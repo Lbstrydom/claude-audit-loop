@@ -368,11 +368,25 @@ function extractPlanPaths(planContent) {
  * @param {number} [opts.maxTotal=120000]
  * @returns {string} Markdown block with file contents
  */
+// Sensitive file patterns — never send to external API
+const SENSITIVE_PATTERNS = [
+  /\.env$/i, /\.env\./i, /secret/i, /credential/i, /\.pem$/i, /\.key$/i,
+  /password/i, /token/i, /\.pfx$/i, /\.p12$/i, /id_rsa/i, /id_ed25519/i
+];
+
+function isSensitiveFile(relPath) {
+  const basename = path.basename(relPath);
+  return SENSITIVE_PATTERNS.some(p => p.test(basename));
+}
+
 function readFilesAsContext(filePaths, { maxPerFile = 10000, maxTotal = 120000 } = {}) {
   let total = '';
   let omitted = 0;
+  let sensitive = 0;
 
   for (const relPath of filePaths) {
+    if (isSensitiveFile(relPath)) { sensitive++; continue; }
+
     const absPath = path.resolve(relPath);
     if (!fs.existsSync(absPath)) continue;
 
@@ -389,6 +403,7 @@ function readFilesAsContext(filePaths, { maxPerFile = 10000, maxTotal = 120000 }
   }
 
   if (omitted > 0) total += `\n... [${omitted} file(s) omitted — context budget reached]\n`;
+  if (sensitive > 0) total += `\n... [${sensitive} sensitive file(s) excluded (.env, secrets, keys)]\n`;
   return total;
 }
 
@@ -456,8 +471,8 @@ function formatFindings(findings) {
  */
 async function callGPT(openai, { systemPrompt, userPrompt, schema, schemaName, reasoning, maxTokens, timeoutMs, passName }) {
   const effort = reasoning ?? REASONING_EFFORT;
-  const tokens = maxTokens ?? MAX_OUTPUT_TOKENS;
-  const timeout = timeoutMs ?? TIMEOUT_MS;
+  const tokens = maxTokens ?? MAX_OUTPUT_TOKENS_CAP;
+  const timeout = timeoutMs ?? TIMEOUT_MS_CAP;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
