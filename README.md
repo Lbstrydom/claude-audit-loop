@@ -1,14 +1,58 @@
 # Claude Audit Loop
 
-A self-driving **plan → audit → deliberate → fix → re-audit** loop that uses **Claude** (Opus/Sonnet) for planning and fixing, and **GPT-5.4** as an independent auditor. The two models operate as **peers** — Claude can challenge GPT findings, and GPT can sustain, overrule, or compromise.
+A self-driving **plan → audit → deliberate → fix → re-audit** loop that uses your **AI coding assistant** (Claude, Copilot, etc.) for planning and fixing, and **GPT-5.4** as an independent auditor. The two models operate as **peers** — neither blindly defers to the other.
 
-Works with any codebase. No hardcoded paths or project-specific config — the script adapts to your project size automatically.
+Works with **any codebase, any AI assistant**. No hardcoded paths or project-specific config — the script adapts to your project size automatically.
+
+## Supported Environments
+
+| Environment | Skill Location | How to Invoke |
+|-------------|---------------|---------------|
+| **Claude Code** (CLI or VS Code) | `.claude/skills/audit-loop/` | `/audit-loop plan docs/plans/X.md` |
+| **VS Code Copilot** | `.github/skills/audit-loop/` | `/audit-loop` in Copilot Chat |
+| **Any terminal** | N/A | `node scripts/openai-audit.mjs plan <file>` |
+
+## Quick Start
+
+### Option A: Automated Setup (Recommended)
+
+```bash
+git clone https://github.com/Lbstrydom/claude-audit-loop.git
+cd claude-audit-loop
+node setup.mjs --target /path/to/your/project
+```
+
+The setup script will:
+1. Check Node.js 18+, npm, git
+2. Install dependencies (`openai`, `zod`, `dotenv`) if missing
+3. Copy `scripts/openai-audit.mjs` to your project
+4. Install skills for both Claude Code AND VS Code Copilot
+5. Set up `.env` with your OpenAI API key
+6. Add `.env` to `.gitignore`
+
+### Option B: Manual Setup
+
+```bash
+# 1. Copy files into your project
+cp scripts/openai-audit.mjs <your-project>/scripts/
+mkdir -p <your-project>/.claude/skills/audit-loop
+cp .claude/skills/audit-loop/SKILL.md <your-project>/.claude/skills/audit-loop/
+mkdir -p <your-project>/.github/skills/audit-loop
+cp .github/skills/audit-loop/SKILL.md <your-project>/.github/skills/audit-loop/
+
+# 2. Install dependencies
+cd <your-project>
+npm install openai zod dotenv
+
+# 3. Add API key to .env
+echo "OPENAI_API_KEY=sk-..." >> .env
+```
 
 ## How It Works
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Claude creates/updates plan or code                      │
+│  Your AI assistant creates/updates plan or code           │
 └──────────┬───────────────────────────────────────────────┘
            ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -20,7 +64,7 @@ Works with any codebase. No hardcoded paths or project-specific config — the s
 └──────────┬───────────────────────────────────────────────┘
            ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Claude deliberates on each finding:                      │
+│  AI assistant deliberates on each finding:                │
 │    ✅ ACCEPT — fix as recommended                         │
 │    🔄 PARTIAL ACCEPT — problem real, but better fix       │
 │    ❌ CHALLENGE — finding is wrong (cites evidence)       │
@@ -28,70 +72,41 @@ Works with any codebase. No hardcoded paths or project-specific config — the s
            ▼ (challenged findings only)
 ┌──────────────────────────────────────────────────────────┐
 │  GPT-5.4 deliberation round:                              │
-│    🔴 SUSTAIN — GPT holds, Claude must fix                │
-│    🟢 OVERRULE — Claude was right, finding dismissed      │
+│    🔴 SUSTAIN — GPT holds, assistant must fix             │
+│    🟢 OVERRULE — assistant was right, finding dismissed   │
 │    🟡 COMPROMISE — modified recommendation                │
 └──────────┬───────────────────────────────────────────────┘
            ▼
-┌──────────────────────────────────────────────────────────┐
-│  Claude fixes surviving findings                          │
-│  Loop back to audit (max 4 rounds)                        │
-│                                                            │
-│  Converges when:                                          │
-│    • 0 HIGH findings                                      │
-│    • ≤ 2 MEDIUM findings                                  │
-│    • 0 quick-fix warnings                                 │
+│  Fix surviving findings → re-audit → repeat (max 4 rounds)│
+│  Converges: 0 HIGH, ≤2 MEDIUM, 0 quick-fix warnings      │
 └──────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Usage
 
-### 1. Install in your project
-
-```bash
-# Copy into your project
-cp -r scripts/openai-audit.mjs <your-project>/scripts/
-cp -r .claude/skills/audit-loop <your-project>/.claude/skills/
-
-# Install dependencies (if not already present)
-cd <your-project>
-npm install openai zod dotenv
-```
-
-Or install as a standalone tool:
+### With Claude Code (CLI or VS Code Extension)
 
 ```bash
-git clone https://github.com/Lbstrydom/claude-audit-loop.git
-cd claude-audit-loop
-npm install
+/audit-loop plan docs/plans/my-feature.md     # Audit plan quality iteratively
+/audit-loop code docs/plans/my-feature.md     # Audit code against plan
+/audit-loop full add user authentication      # Plan → audit → implement → audit code
+/audit-loop add a REST API for notifications  # Plan → audit loop
 ```
 
-### 2. Set your API key
+### With VS Code Copilot Chat
 
-```bash
-cp .env.example .env
-# Edit .env and add your OpenAI API key
+Type `/audit-loop` in Copilot Chat, then describe what you want:
+
+```
+/audit-loop audit the plan at docs/plans/my-feature.md
+/audit-loop audit code against docs/plans/my-feature.md
+/audit-loop plan and audit a new REST API for notifications
 ```
 
-### 3. Use with Claude Code
+Copilot will use the `.github/skills/audit-loop/SKILL.md` skill to orchestrate the loop,
+running `scripts/openai-audit.mjs` in the terminal for each GPT-5.4 audit pass.
 
-The `/audit-loop` skill is available in Claude Code (CLI and VS Code):
-
-```bash
-# Audit an existing plan iteratively
-/audit-loop plan docs/plans/my-feature.md
-
-# Audit code against a plan iteratively
-/audit-loop code docs/plans/my-feature.md
-
-# Full cycle: plan → audit plan → implement → audit code
-/audit-loop full add user authentication
-
-# Just plan + audit loop
-/audit-loop add a REST API for notifications
-```
-
-### 4. Use the script directly (without Claude Code)
+### Without Any AI Assistant (Script Only)
 
 ```bash
 # Audit a plan
@@ -100,40 +115,40 @@ node scripts/openai-audit.mjs plan docs/plans/my-feature.md
 # Audit code against a plan
 node scripts/openai-audit.mjs code docs/plans/my-feature.md
 
-# Get JSON output (for piping to other tools)
+# JSON output for piping to other tools
 node scripts/openai-audit.mjs plan docs/plans/my-feature.md --json
 
-# Send Claude's rebuttals for GPT deliberation
+# Send rebuttals for GPT deliberation
 node scripts/openai-audit.mjs rebuttal docs/plans/my-feature.md rebuttal.md --json
 ```
 
 ## What It Checks
 
 ### Plan Audits
-- **SOLID principles** (all 5), DRY, modularity, no dead code, no hardcoding
-- **Sustainability** — will this design accommodate change in 6 months?
-- **Specificity** — can a developer implement from this plan without guessing?
-- **Gestalt principles** (frontend) — proximity, similarity, continuity, closure
-- **State coverage** — loading, error, empty states specified?
-- **Data flow** — traceable end-to-end (UI → API → Service → DB)?
-- **Vague language** — flags "as needed", "TBD", "handle appropriately"
+- SOLID principles (all 5), DRY, modularity, no dead code, no hardcoding
+- Long-term sustainability — will this design accommodate change in 6 months?
+- Specificity — can a developer implement from this plan without guessing?
+- Gestalt principles (frontend) — proximity, similarity, continuity, closure
+- State coverage — loading, error, empty states specified?
+- Data flow — traceable end-to-end (UI → API → Service → DB)?
+- Vague language detection — flags "as needed", "TBD", "handle appropriately"
 
-### Code Audits (5 parallel passes)
+### Code Audits (5 Parallel Passes)
 
-| Pass | Focus | Reasoning |
-|------|-------|-----------|
-| **Structure** | Files exist? Exports match plan? Dependencies correct? | low |
-| **Wiring** | Frontend API calls ↔ backend routes match? Auth headers? | low |
-| **Backend** | SOLID, DRY, async/await, security, transactions, N+1 | high |
-| **Frontend** | Gestalt, CSP, accessibility, state handling, responsive | high |
-| **Sustainability** | Quick fixes, dead code, coupling, extension points | medium |
+| Pass | Focus | Reasoning | Time |
+|------|-------|-----------|------|
+| **Structure** | Files exist? Exports match plan? | low | ~25s |
+| **Wiring** | Frontend API calls ↔ backend routes | low | ~25s |
+| **Backend** | SOLID, DRY, async/await, security, N+1 | high | ~90-170s |
+| **Frontend** | Gestalt, CSP, accessibility, states | high | ~90-170s |
+| **Sustainability** | Quick fixes, dead code, coupling | medium | ~90s |
 
 ### Quick-Fix Detection
-Every finding includes an `is_quick_fix` flag. Band-aid solutions are automatically flagged and rejected — both Claude and GPT enforce sustainable fixes only.
+Every finding has an `is_quick_fix` flag. Band-aid solutions are flagged and rejected — both models enforce sustainable fixes only.
 
 ## Adaptive Sizing
 
-The script automatically sizes token limits and timeouts based on your codebase:
+The script sizes token limits and timeouts to your codebase — no tuning needed:
 
 | Codebase Size | Files | Max Tokens | Timeout |
 |--------------|-------|-----------|---------|
@@ -142,52 +157,30 @@ The script automatically sizes token limits and timeouts based on your codebase:
 | Medium | 15 | ~12,000 | 110s |
 | Large | 25+ | ~19,000 | 157s |
 
-No tuning needed. Hard ceilings (32K tokens, 300s) are configurable via env vars.
-
-If a pass has >12 backend files, it auto-splits into routes + services sub-passes.
+If a backend has >12 files, it auto-splits into routes + services sub-passes.
 
 ## Graceful Degradation
 
 If any pass fails (timeout, token limit, API error):
-- The pass returns empty findings (no crash)
-- Other passes continue normally
-- The `_failed_passes` field in JSON output shows what failed
-- The `/audit-loop` skill prompts you with recovery options
+- Other passes continue normally (no crash)
+- `_failed_passes` in JSON output shows what failed
+- The skill prompts you with recovery options (re-run with lower reasoning, continue with partial results, or split further)
 
 ## Project Structure
 
 ```
 claude-audit-loop/
 ├── scripts/
-│   └── openai-audit.mjs      # GPT-5.4 multi-pass audit script
+│   └── openai-audit.mjs               # GPT-5.4 multi-pass audit script
 ├── .claude/
-│   └── skills/
-│       └── audit-loop/
-│           └── SKILL.md       # Claude Code skill (orchestrator)
-├── .env.example               # Environment variable template
+│   └── skills/audit-loop/SKILL.md      # Claude Code skill
+├── .github/
+│   └── skills/audit-loop/SKILL.md      # VS Code Copilot skill
+├── setup.mjs                           # Interactive installer
+├── .env.example                        # Env var template
 ├── package.json
 └── README.md
 ```
-
-## Adding to an Existing Project
-
-1. **Copy the files**:
-   ```bash
-   cp scripts/openai-audit.mjs <project>/scripts/
-   mkdir -p <project>/.claude/skills/audit-loop
-   cp .claude/skills/audit-loop/SKILL.md <project>/.claude/skills/audit-loop/
-   ```
-
-2. **Install dependencies** (skip if already present):
-   ```bash
-   npm install openai zod dotenv
-   ```
-
-3. **Add OPENAI_API_KEY** to your `.env`
-
-4. **Done.** Use `/audit-loop` in Claude Code or run the script directly.
-
-The script reads your project's `CLAUDE.md` (if present) for project-specific conventions and patterns. This gives GPT-5.4 context about your coding standards without any manual configuration.
 
 ## Environment Variables
 
@@ -196,43 +189,38 @@ The script reads your project's `CLAUDE.md` (if present) for project-specific co
 | `OPENAI_API_KEY` | (required) | Your OpenAI API key |
 | `OPENAI_AUDIT_MODEL` | `gpt-5.4` | GPT model for auditing |
 | `OPENAI_AUDIT_REASONING` | `high` | Reasoning effort: low/medium/high/xhigh |
-| `OPENAI_AUDIT_MAX_TOKENS` | `32000` | Hard ceiling for output tokens per pass |
-| `OPENAI_AUDIT_TIMEOUT_MS` | `300000` | Hard ceiling for timeout per pass (ms) |
+| `OPENAI_AUDIT_MAX_TOKENS` | `32000` | Hard ceiling — output tokens per pass |
+| `OPENAI_AUDIT_TIMEOUT_MS` | `300000` | Hard ceiling — timeout per pass (ms) |
 | `OPENAI_AUDIT_SPLIT_THRESHOLD` | `12` | Backend file count that triggers splitting |
 
 ## Peer Deliberation Model
 
-Unlike traditional linting where the tool's word is final, this system treats Claude and GPT-5.4 as **equals**:
+Unlike traditional linting, this system treats the AI assistant and GPT-5.4 as **equals**:
 
-- **Claude has codebase context** — knows your conventions, patterns, and CLAUDE.md
+- **Your assistant has codebase context** — knows conventions, patterns, project history
 - **GPT-5.4 has fresh eyes** — catches blind spots from familiarity bias
-- **Deliberation is final** — once GPT rules on a challenge (sustain/overrule/compromise), that ruling is accepted. No infinite debate.
+- **Deliberation is final** — once GPT rules on a challenge, that ruling is accepted
 
-This produces better outcomes than either model alone because:
-1. False positives get caught (Claude challenges findings that misunderstand project conventions)
-2. True issues don't get dismissed (GPT sustains valid findings even when Claude pushes back)
-3. Solutions improve (compromises combine both models' insights)
+Research shows multi-model adversarial review catches **80% of bugs** vs 53% for single-model review (27 percentage point improvement).
 
-## Example Output
+## Related Projects
 
-```
-# GPT-5.4 Multi-Pass Code Audit Report
-- **Model**: gpt-5.4
-- **Total time**: structure: 22.0s, wiring: 23.3s, be-routes: 173.1s, frontend: 103.9s, sustainability: 99.0s, total: 302.3s
-- **Tokens**: 79865 in / 26128 out (18554 reasoning)
-- **Files**: 26 found, 6 missing
+This tool was inspired by and builds on ideas from:
 
-## Verdict: **SIGNIFICANT_ISSUES**
-- **HIGH**: 15 | **MEDIUM**: 15 | **LOW**: 3
+| Project | What It Does | What We Learned |
+|---------|-------------|-----------------|
+| [adversarial-review](https://github.com/alecnielsen/adversarial-review) | Multi-agent debate (Claude + GPT Codex) | Adversarial structure prevents consensus bias |
+| [claude-review-loop](https://github.com/hamelsmu/claude-review-loop) | Claude implements → Codex reviews | Hook-based two-phase lifecycle |
+| [desloppify](https://github.com/peteromallet/desloppify) | Mechanical + LLM hybrid detection | Queue-based fix prioritization |
+| [ralphex](https://github.com/umputun/ralphex) | Multi-agent parallel review | 5 specialized agents in parallel |
+| [heavy3 code-audit](https://github.com/heavy3-ai/code-audit) | Multi-model consensus validation | Consensus catches what single models miss |
 
-## Findings
-
-### HIGH Severity
-
-#### [H1] [Structure] Missing Planned File: public/js/api/pairingLab.js
-- **Detail**: The planned frontend API module is missing...
-- **Recommendation**: Create the module following existing api/ patterns...
-```
+**Key differentiators of this tool:**
+- **Peer deliberation** — not just audit, but structured accept/challenge/compromise
+- **Multi-pass parallel** — 5 focused passes instead of one monolithic call
+- **Adaptive sizing** — works on any codebase without configuration
+- **Quick-fix rejection** — both models enforce sustainable solutions
+- **Portable** — works with Claude Code, VS Code Copilot, or raw terminal
 
 ## License
 
