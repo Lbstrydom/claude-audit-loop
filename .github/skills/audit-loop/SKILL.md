@@ -13,683 +13,252 @@ description: |
   Usage: /audit-loop full <task-description>      — Plan + implement + audit code
 ---
 
-# Self-Driving Plan-Audit-Deliberate-Fix Loop
+# Self-Driving Audit Loop
 
-You are orchestrating an automated quality loop. The user expects a **clear, structured experience**
-with visible progress — not walls of raw JSON and scattered explanations.
+Orchestrate an automated plan-audit-fix quality loop. Show clear progress, not raw JSON.
 
-**CRITICAL UX RULE**: After every phase, display a **status card** (the boxed format shown below).
-The user should always know: what just happened, what was decided, what's next, and how long it will take.
-
-**Input**: `$ARGUMENTS` — either a task description, or `plan|code|full <path>` for targeted modes.
+**Input**: `$ARGUMENTS` — task description or `plan|code|full <path>`.
 
 ---
 
-## Step 0 — Parse Mode, Validate, and Show Kickoff Card
+## Step 0 — Parse Mode and Validate
 
-Determine the operating mode from `$ARGUMENTS`:
+| Input | Mode |
+|-------|------|
+| `plan docs/plans/X.md` | PLAN_AUDIT — audit plan iteratively |
+| `code docs/plans/X.md` | CODE_AUDIT — audit code against plan |
+| `full <description>` | FULL_CYCLE — plan → audit → implement → audit code |
+| `<description>` | PLAN_CYCLE — plan → audit → fix → repeat |
 
-| Input Pattern | Mode | What Happens |
-|---------------|------|-------------|
-| `plan docs/plans/X.md` | PLAN_AUDIT | Audit existing plan iteratively |
-| `code docs/plans/X.md` | CODE_AUDIT | Audit code against existing plan iteratively |
-| `full <description>` | FULL_CYCLE | Plan → audit plan → implement → audit code |
-| `<description>` (no keyword) | PLAN_CYCLE | Plan → audit plan → fix → repeat |
+Validate: plan file exists (if applicable), `OPENAI_API_KEY` is set.
 
-**Validate prerequisites**:
-- For PLAN_AUDIT/CODE_AUDIT: verify the plan file exists
-- Verify `OPENAI_API_KEY` is set (check with a quick node command)
-- If missing, tell the user and stop
-
-**Display kickoff card**:
-
+Show kickoff card:
 ```
-═══════════════════════════════════════════════════════════
-  AUDIT LOOP — Starting
-  Plan: docs/plans/my-feature.md
-  Mode: CODE AUDIT (multi-pass parallel)
-  Estimated time: ~3-5 min per round (max 6 rounds)
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  AUDIT LOOP — [MODE] — Starting
+  Plan: <path> | Max 6 rounds
+═══════════════════════════════════════
 ```
 
 ---
 
-## Step 1 — Plan Generation (if needed)
+## Step 1 — Plan Generation (PLAN_CYCLE / FULL_CYCLE only)
 
-Only for PLAN_CYCLE or FULL_CYCLE modes. Otherwise skip.
-
-Generate the plan using `/plan-backend` or `/plan-frontend` patterns, save to `docs/plans/<name>.md`.
+Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<name>.md`. Skip otherwise.
 
 ---
 
 ## Step 2 — Run GPT-5.4 Audit
 
-Run the audit script and **show real-time pass progress** by reading stderr:
+Use `--out` to write JSON to file (keeps terminal clean). Use `--history` from round 2+ to prevent re-raising resolved findings.
 
 ```bash
-node scripts/openai-audit.mjs code <plan-file> --json 2>/tmp/audit-$$-stderr.log 1>/tmp/audit-$$-stdout.log
+# Round 1
+node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json 2>/tmp/audit-$$-stderr.log
+
+# Round 2+ (with history)
+node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json --history /tmp/audit-$$-history.json 2>/tmp/audit-$$-stderr.log
 ```
 
-(Use `$$` for PID-based unique filenames to avoid collisions with concurrent runs.)
+Read stderr log for pass progress, then **read result from the JSON file** (not stdout):
 
-While waiting (or after completion), read the stderr log and display:
-
-```
-⏳ Running GPT-5.4 audit (Round 1)...
-  ✓ Structure     22s  (3 findings)
-  ✓ Wiring        24s  (1 finding)
-  ✓ Backend      173s  (8 findings)
-  ✓ Frontend     104s  (5 findings)
-  ✗ Sustainability  — timed out (will retry)
+```bash
+cat /tmp/audit-$$-result.json
 ```
 
-Parse the JSON output from `audit-stdout.log`.
+Parse JSON directly — no format conversion needed.
 
-### 2.1 Handle Failed Passes
+### History File
 
-If `_failed_passes` is non-empty, show clearly and offer options:
+Maintain `/tmp/audit-$$-history.json` — a JSON array of round summaries. After each round:
+
+```json
+[{
+  "round": 1,
+  "findings": [{"id": "H1", "severity": "HIGH", "detail": "Missing auth..."}],
+  "fixed_ids": ["H1", "M2"],
+  "dismissed_ids": ["M4"],
+  "resolutions": [{"finding_id": "M3", "gpt_ruling": "compromise", "final_severity": "LOW"}]
+}]
+```
+
+Append to history after deliberation + fixes, pass `--history` on next audit call.
+
+### Handle Failed Passes
+
+If `_failed_passes` is non-empty, show and offer: re-run with lower reasoning, continue with partial results, or split further.
+
+### Show Results
 
 ```
-⚠️ 1 of 6 passes failed: be-services timed out (180s, 12 files)
-   The other 5 passes produced 33 findings.
-
-   A) Re-run failed pass with reasoning: medium (faster)
-   B) Continue with partial results (33 findings is substantial)
-   C) Split further and retry
-```
-
-Wait for user choice. Do NOT silently continue with 0 findings from a failed pass.
-
-### 2.2 Show Audit Results Card
-
-After parsing, show a clear summary — NOT raw JSON:
-
-```
-═══════════════════════════════════════════════════════════
-  📋 GPT-5.4 AUDIT RESULTS — Round 1
-═══════════════════════════════════════════════════════════
-  Verdict: SIGNIFICANT_ISSUES
-  Findings: 21 total
-    🔴 HIGH:   6    (must fix)
-    🟡 MEDIUM: 10   (should fix)
-    ⚪ LOW:    5    (nice to fix)
-
-  Quick-fix warnings: 3 (band-aids GPT flagged)
-  Time: 5m 12s | Cost: ~$0.45
-
-  Top findings:
-    [H1] Missing auth middleware on /api/pairing-lab/chat
-    [H2] No input validation on candidate_wines array
-    [H3] Sensitive files not excluded from API context
-    [M1] DRY violation — scoring logic in two places
-    [M2] No loading state on recommendation panel
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  ROUND 1 AUDIT — SIGNIFICANT_ISSUES
+  H:6 M:10 L:5 | Cost: ~$0.45
+  Top: [H1] Missing auth on /api/...
+═══════════════════════════════════════
 ```
 
 ---
 
-## Step 3 — Claude Deliberation
+## Step 3 — Deliberation
 
-**You are a peer, not a subordinate.** Review each finding using your codebase knowledge.
-
-### 3.1 Check Convergence (Stability Algorithm)
-
-Convergence requires BOTH a quality threshold AND stability:
-
-**Quality threshold** (necessary):
-- `highCount === 0`
-- `mediumCount <= 2`
-- `quickFixCount === 0`
-
-**Stability check** (also necessary — fixes often introduce new issues):
-
-Track across rounds:
-- `previousFindingIds` — set of finding IDs from last round
-- `newFindingsThisRound` — findings whose category+detail don't match any from previous round
-- `consecutiveStableRounds` — counter, resets to 0 whenever new findings appear
-
-```
-Stability Rules:
-  1. After EVERY fix round, a mandatory verification audit runs (even if threshold is met)
-  2. If the verification audit finds NEW findings (not seen in prior rounds) → not stable, fix and re-audit
-  3. Stability = quality threshold met for 2 consecutive rounds with zero new findings
-  4. Maximum 6 rounds total (raised from 4 to allow stabilization)
-  5. If round 6 reached without stability: present remaining findings to user
-```
-
-**How to detect "new" findings:**
-Compare each finding's `category + section + detail` (normalized lowercase, trimmed) against all
-findings from the previous round. If >70% of words overlap, it's the same finding (possibly
-re-worded by GPT). If <70% overlap, it's genuinely new — likely caused by a fix.
-
-**Convergence state tracking** (maintain across rounds):
-
-```
-Round 1: 7H 5M 1L (13 total)           → fix →
-Round 2: 1H 3M 0L (4 total, 1 new)     → fix → [not stable: new finding]
-Round 3: 0H 2M 1L (3 total, 0 new)     → threshold met, stable round 1 of 2
-Round 4: 0H 1M 0L (1 total, 0 new)     → threshold met, stable round 2 of 2 → CONVERGED ✓
-```
-
-**Show stability in the round transition card:**
-
-```
-═══════════════════════════════════════════════════════════
-  ROUND 3 → ROUND 4
-═══════════════════════════════════════════════════════════
-  HIGH:    0 ✓  |  MEDIUM: 2 (≤2 ✓)  |  LOW: 1
-  Quick fixes: 0 ✓
-  New findings this round: 0 ✓
-
-  Stability: 1/2 consecutive clean rounds
-  Need 1 more clean round to confirm stability...
-═══════════════════════════════════════════════════════════
-```
-
-If max rounds reached without stability:
-
-```
-═══════════════════════════════════════════════════════════
-  ⚠️ MAX ROUNDS REACHED (6) — Not fully stable
-═══════════════════════════════════════════════════════════
-  Quality threshold: MET (0H, 2M, 0 quick-fix)
-  Stability: NOT MET (new findings still appearing)
-
-  This suggests fixes are creating oscillating issues.
-
-  Remaining findings (3):
-    [M2] Input validation too strict — added in R4, relaxed in R5, re-flagged in R6
-    [M5] Error message wording inconsistency
-    [L1] Unused import from Round 3 fix
-
-  Options:
-    A) Accept current state — these are minor and non-blocking
-    B) Run 1 more round with reasoning: low (faster stability check)
-    C) Fix remaining items manually
-═══════════════════════════════════════════════════════════
-```
-
-### 3.2 Form Your Position on Each Finding
-
-For each finding, decide:
+**You are a peer, not a subordinate.** For each finding:
 - **ACCEPT** — valid, will fix
-- **PARTIAL ACCEPT** — problem real but severity wrong, or you have a better fix
-- **CHALLENGE** — finding is wrong (cite specific evidence: file paths, CLAUDE.md, conventions)
+- **PARTIAL** — real but severity wrong or better fix exists
+- **CHALLENGE** — wrong (cite evidence: file paths, conventions)
 
-### 3.3 Show Deliberation Card
+### Convergence Check
 
-```
-═══════════════════════════════════════════════════════════
-  🤔 CLAUDE DELIBERATION — Round 1
-═══════════════════════════════════════════════════════════
-  ✅ Accepted:    12 findings (will fix)
-  🔄 Partial:     4 findings (better fix proposed)
-  ❌ Challenged:  5 findings (cited evidence)
+Quality threshold: `HIGH == 0 && MEDIUM <= 2 && quickFix == 0`
+Stability: quality met for **2 consecutive rounds** with zero new findings.
 
-  Sending 9 contested findings to GPT-5.4 for resolution...
-═══════════════════════════════════════════════════════════
-```
+New finding detection: compare `category + section + detail` against prior round (>70% word overlap = same finding).
 
-### 3.4 Send Rebuttal (if any challenges/partials)
+Max 6 rounds. If reached without stability, present remaining to user.
 
-Write rebuttal to temp file, run:
+### Send Rebuttal (if challenges exist)
+
+Write rebuttal to temp file, then:
 ```bash
-node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> --json
+node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> --out /tmp/resolution-$$-result.json 2>/tmp/rebuttal-$$-stderr.log
 ```
 
-### 3.5 Show Resolution Card
+Read result from `/tmp/resolution-$$-result.json`.
 
+Show unified status:
 ```
-═══════════════════════════════════════════════════════════
-  ⚖️  GPT-5.4 RESOLUTION
-═══════════════════════════════════════════════════════════
-  🔴 Sustained (GPT holds):  2  — Claude must fix
-  🟢 Overruled (Claude won):  2  — findings dismissed
-  🟡 Compromise:               1  — modified recommendation
-
-  Post-deliberation: 1 HIGH | 7 MEDIUM | 3 LOW | 2 dismissed
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  ROUND 1 DELIBERATION
+  Accepted: 12 | Partial: 4 | Challenged: 5
+  Sustained: 2 | Overruled: 2 | Compromise: 1
+═══════════════════════════════════════
 ```
 
 ---
 
-## Parallel Execution (Speed Optimisation)
+## Parallel Execution
 
-**Do as much in parallel as possible without risking code quality.**
+**Safe to parallelise:**
+- Fix accepted findings WHILE waiting for rebuttal response
+- Fix mechanical issues (await, fetch, CSP) alongside recommendation fixes
+- Run tests alongside writing summary notes
 
-### What CAN Run in Parallel (safe)
-
-| Action A | Action B | Why Safe |
-|----------|----------|----------|
-| Fix **accepted** findings | Wait for **rebuttal** response | Accepted findings won't change — GPT already ruled on them |
-| Fix **mechanical** issues (await, fetch, CSP) | Fix **recommendation** issues | Independent files, no interaction |
-| Read implementation files | Write rebuttal document | Read-only vs write to different file |
-| Run tests after fixes | Write audit summary notes | Tests are read-only validation |
-
-### What MUST Be Sequential (unsafe to parallelise)
-
-| Step | Depends On | Why |
-|------|-----------|-----|
-| Apply **sustained** fixes | Rebuttal response | Don't know which are sustained until GPT responds |
-| Apply **compromise** fixes | Rebuttal response | Compromise wording not known until GPT responds |
-| Verification audit | ALL fixes complete | Must audit the final state, not an intermediate one |
-| Opus deep review | Convergence confirmed | Only runs once stable |
-
-### Optimal Execution Pattern
-
-```
-1. GPT audit completes → parse findings
-2. IN PARALLEL:
-   a) Start fixing accepted/mechanical findings (known good)
-   b) Write rebuttal document for contested findings
-3. Send rebuttal to GPT → WHILE WAITING:
-   c) Continue fixing accepted findings
-   d) Run tests on mechanical fixes
-4. Rebuttal response arrives → apply sustained/compromise fixes
-5. SEQUENTIAL: Run verification audit on final state
-```
-
-This typically saves 60-90s per round by overlapping fix work with rebuttal wait time.
+**Must be sequential:**
+- Sustained/compromise fixes depend on rebuttal response
+- Verification audit must run AFTER all fixes complete
 
 ---
 
-## Step 4 — Fix All Surviving Findings
+## Step 4 — Fix Findings
 
-**ALL HIGH findings MUST be fixed.** MEDIUM findings are fixed until ≤2 remain.
-LOW findings are fixed if easy (mechanical), otherwise left for the user.
+ALL HIGH must be fixed. MEDIUM until ≤2 remain. LOW if mechanical.
 
-### 4.1 Fix and Show Every Change
-
-For EACH fix, show what you did in a compact format:
-
+Show what changed:
 ```
-═══════════════════════════════════════════════════════════
-  🔧 FIXING — 17 findings to address
-═══════════════════════════════════════════════════════════
-
-  Auto-fixed (mechanical):
-    ✓ [H3] Added SENSITIVE_PATTERNS filter to readFilesAsContext()
-         → scripts/openai-audit.mjs lines 371-385
-    ✓ [M6] Fixed MAX_OUTPUT_TOKENS → MAX_OUTPUT_TOKENS_CAP
-         → scripts/openai-audit.mjs line 459
-    ✓ [L2] Removed console.log from production code
-         → src/services/pairing/pairingLab.js line 42
-
-  Fixed per recommendation:
-    ✓ [H1] Added requireCellarEdit middleware to POST /chat
-         → src/routes/pairingLab.js line 18
-    ✓ [H2] Added Zod validation for candidate_wines array
-         → src/schemas/pairingLab.js (new schema)
-    ✓ [M1] Extracted shared scoring to wineStyleMatcher.js
-         → src/services/shared/wineStyleMatcher.js
-    ✓ [M2] Added loading skeleton to recommendation panel
-         → public/js/pairingLab/results.js
-
-  Compromises applied:
-    ✓ [M5] Added retry with backoff (GPT wanted circuit breaker,
-         Claude proposed simpler retry — compromised on 3 retries)
-         → src/services/pairing/pairingLab.js lines 55-72
-
-  Skipped (LOW, non-critical):
-    · [L1] Naming inconsistency in CSS — cosmetic only
-    · [L3] TODO comment in test — tracked in backlog
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  FIXING — 17 findings
+  Auto-fixed: 3 (mechanical)
+  Fixed per recommendation: 8
+  Compromises: 2
+  Skipped (LOW): 4
+═══════════════════════════════════════
 ```
 
-### 4.2 Ask User Only for Genuine Decisions
+List each fix: `[ID] description → file:lines`
 
-If any findings require a design choice between valid alternatives, batch them:
-
-```
-  ⚠️  2 items need your decision:
-
-  A) [M8] Transaction wrapping on batch update
-     → GPT: Add BEGIN/COMMIT/ROLLBACK (data integrity)
-     → Claude: Low-risk operation, adds 15ms latency
-     → Which approach?
-
-  B) [M9] Split pairingLab.js (380 lines)
-     → GPT: Extract photo parsing into separate module
-     → Claude: Agree, but keep in same directory
-     → Proceed with split?
-```
-
-Wait for response. Apply choices. Then continue.
+Batch genuine design decisions into one user prompt.
 
 ---
 
-## Step 5 — Mandatory Verification Audit + Loop
+## Step 5 — Verify and Loop
 
-**CRITICAL**: After every fix round, ALWAYS re-audit — even if the threshold appears met.
-Fixes frequently introduce new issues. Skipping verification is the #1 cause of
-"it passed audit but broke in production."
-
-### 5.1 Re-run Audit (Verification)
-
-Go back to Step 2. Run the full audit again on the now-modified codebase.
-
-### 5.2 Detect New Findings (Fix Regression Check)
-
-After parsing the new round's results, compare against the previous round:
-
-For each finding in this round, check if it existed in the prior round:
-- **Same finding** = category + section overlap >70% of words (GPT may re-word slightly)
-- **New finding** = <70% overlap — this was likely CAUSED by a fix
-
-Track:
-- `newFindingCount` — findings that didn't exist last round
-- `resolvedFindingCount` — findings from last round that are now gone
-- `recurringFindingCount` — findings that persist across rounds
-
-### 5.3 Show Round Transition Card (with Stability)
+After fixes, re-audit (back to Step 2). Track finding churn:
+- Resolved (fixed successfully)
+- Recurring (persisted)
+- New (introduced by fixes — resets stability counter)
 
 ```
-═══════════════════════════════════════════════════════════
-  ROUND 2 → ROUND 3 (Verification)
-═══════════════════════════════════════════════════════════
-  HIGH:    1 → 0  ✓
-  MEDIUM:  3 → 2  ✓ (target: ≤2)
-  LOW:     2 → 1
-  Quick fixes: 0  ✓
-
-  Finding churn:
-    Resolved: 3 (fixed successfully)
-    Recurring: 2 (persisted, minor)
-    ⚠️ New: 1 (introduced by Round 2 fixes!)
-      → [M8] Missing null check in retry logic (added in R2 fix for M5)
-
-  Stability: 0/2 — new findings appeared, resetting counter
-  Files changed this round: 4
-  Fixing new finding, then re-auditing...
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  ROUND 2 → ROUND 3
+  H:0 M:2 L:1 | New: 0 | Stable: 1/2
+═══════════════════════════════════════
 ```
-
-### 5.4 Stability Decision
 
 | Condition | Action |
 |-----------|--------|
-| Threshold NOT met | Fix findings → re-audit (back to Step 3) |
-| Threshold met BUT new findings appeared | Fix new findings → re-audit (stability counter resets to 0) |
-| Threshold met AND 0 new findings (stable round 1/2) | Re-audit one more time (mandatory second stable round) |
-| Threshold met AND 0 new findings for 2 consecutive rounds | **CONVERGED** → Step 6 |
-| Round 6 reached without stability | Present to user with options (Step 6 fallback) |
+| Threshold NOT met | Fix → re-audit |
+| Threshold met, new findings | Fix new → re-audit (stability resets) |
+| Threshold met, 0 new, 1/2 stable | Re-audit once more |
+| Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6 |
+| Round 6, not stable | Present to user |
 
 ---
 
-## Step 6 — Convergence: Show Final Report
-
-When converged (or max rounds reached):
+## Step 6 — Final Report
 
 ```
-═══════════════════════════════════════════════════════════
-  ✅ CONVERGED — Round 4 (stable for 2 consecutive rounds)
-═══════════════════════════════════════════════════════════
-  Final: 0 HIGH | 2 MEDIUM | 1 LOW
-  Rounds: 4 (2 fix + 2 verification) | Total time: 14m 18s | Cost: ~$1.20
-
-  Stability journey:
-    R1: 13 findings → fixed 10 → R2: 4 findings (1 new from fixes!)
-    R2: fixed 2 → R3: 3 findings (0 new ✓, stable 1/2)
-    R3: no fixes needed → R4: 3 findings (0 new ✓, stable 2/2) → CONVERGED
-
-  Deliberation stats:
-    Challenged: 6 | Sustained: 2 | Overruled: 2 | Compromise: 2
-    Claude win rate: 67% (4/6 challenges accepted or compromised)
-
-  Fix regressions caught: 1
-    → [M8] Missing null check in retry logic (caused by R1 fix for M5)
-
-  Files changed:
-    ✓ scripts/openai-audit.mjs (security fix, constant fix)
-    ✓ src/routes/pairingLab.js (auth, validation)
-    ✓ src/services/pairing/pairingLab.js (retry, split, null check)
-    ✓ src/schemas/pairingLab.js (new validation)
-    ✓ public/js/pairingLab/results.js (loading state)
-    ✓ tests/unit/services/pairing/pairingLab.test.js (new)
-
-  Remaining (accepted, non-blocking):
-    [M3] CSS naming inconsistency — cosmetic
-    [M7] Missing JSDoc on 2 helpers — hygiene
-
-  📄 Full report: docs/plans/<name>-audit-summary.md
-═══════════════════════════════════════════════════════════
+═══════════════════════════════════════
+  CONVERGED — Round 4
+  Final: H:0 M:2 L:1
+  Rounds: 4 | Time: 14m | Cost: ~$1.20
+  Files changed: 6
+  Remaining (accepted): [M3], [M7]
+═══════════════════════════════════════
 ```
 
-**Save the full report** to `docs/plans/<name>-audit-summary.md` with:
-- Round-by-round progress table
-- All deliberation outcomes
-- Files changed with line-level detail
-- Remaining items and why they were accepted
-- Total cost and timing
+Save full report to `docs/plans/<name>-audit-summary.md`.
 
 ---
 
-## Step 6.5 — Opus Deep Review (Final Quality Gate)
+## Step 6.5 — Opus Deep Review (Final Gate)
 
-After GPT-5.4 convergence confirms mechanical stability, run a **single high-effort holistic review**
-using Claude Opus (or the most capable model available). This catches architectural and design
-coherence issues that pass-based auditing misses.
+After GPT-5.4 convergence, run a single holistic review using the highest-capability model.
 
-**Why a different model at the end?**
-- GPT-5.4 excels at structured, pass-based mechanical checking
-- Opus with extended thinking excels at holistic reasoning about design coherence, subtle coupling,
-  and cross-cutting concerns that span multiple files
-- Three-model system: Sonnet (work) + GPT-5.4 (iterate) + Opus (final gate)
+**Opus checks what passes miss:**
+- Architectural coherence across files
+- Over-engineering from audit pressure
+- Cross-file naming/pattern consistency
+- Missing integration tests
+- User-facing impact
 
-### 6.5.1 What Opus Reviews (NOT covered by GPT passes)
-
-Opus specifically looks for **cross-cutting concerns** that no single pass catches:
-
-- **Architectural coherence** — Do all the files work together as a unified design, or are there
-  seams where different fix rounds created inconsistent patterns?
-- **Abstraction integrity** — Are the boundaries between modules clean after all the fixes,
-  or did iterative patching create leaky abstractions?
-- **Naming consistency** — After 4 rounds of fixes, are naming conventions still consistent
-  across the full changeset?
-- **Over-engineering from audit pressure** — Did the loop add unnecessary complexity just to
-  satisfy GPT findings? (e.g., wrapping a simple function in a strategy pattern because GPT
-  flagged it, when the simple version was correct)
-- **Missing integration tests** — The loop checked unit-level quality, but did anyone verify
-  the components actually work together?
-- **User-facing impact** — Step back from code quality: does this feature actually work well
-  for the end user?
-
-### 6.5.2 Invoke Opus Review
-
-Use the highest-capability model available with extended thinking:
-
-```
-You are performing a FINAL HOLISTIC REVIEW of code that has already passed
-iterative GPT-5.4 auditing (N rounds, converged at 0 HIGH, ≤2 MEDIUM).
-
-The mechanical quality is confirmed. Your job is different:
-
-1. ARCHITECTURAL COHERENCE — Do these files form a unified design?
-   Look for seams where iterative fixing created inconsistencies.
-
-2. OVER-ENGINEERING — Did audit pressure add unnecessary complexity?
-   Flag any abstraction that exists only to satisfy an auditor, not a real need.
-
-3. CROSS-FILE PATTERNS — After N rounds of changes, are patterns
-   (naming, error handling, state management) still consistent?
-
-4. INTEGRATION GAPS — Unit-level quality is verified. What about the
-   interaction between components? Any untested integration paths?
-
-5. USER IMPACT — Does this feature actually work well for the end user?
-   Step back from code quality and think about the experience.
-
-Produce a SHORT assessment (max 10 items). Only flag issues the pass-based
-audit could NOT have caught. If everything is genuinely clean, say so.
-```
-
-Read all changed files and pass them with the plan to Opus (or the assistant's extended thinking mode).
-
-### 6.5.3 Show Deep Review Card
-
-```
-═══════════════════════════════════════════════════════════
-  🔬 OPUS DEEP REVIEW (holistic quality gate)
-═══════════════════════════════════════════════════════════
-  Architectural coherence: CLEAN
-  Over-engineering risk: 1 item flagged
-    → [DR1] Strategy pattern on retry logic is overkill — simple
-       3-line retry loop would be clearer and more maintainable
-
-  Cross-file consistency: CLEAN
-  Integration gaps: 1 item
-    → [DR2] No integration test for agent → pairingLab → feedback
-       pipeline. Unit tests cover each piece but not the chain.
-
-  User impact: GOOD
-    → Feature flow is intuitive, but consider adding a "last used"
-       indicator to Pairing Lab history for quick reference.
-
-  Verdict: APPROVED with 2 suggestions (non-blocking)
-═══════════════════════════════════════════════════════════
-```
-
-### 6.5.4 Sonnet Deliberation on Opus Findings
-
-Opus findings follow the same peer deliberation model as GPT findings.
-You (Sonnet/the working assistant) review each Opus finding:
-
-- **ACCEPT** — valid architectural concern, will fix
-- **PARTIAL ACCEPT** — real issue but the fix should differ (e.g., Opus says "add strategy pattern"
-  but the simpler approach is better)
-- **CHALLENGE** — Opus missed context (e.g., the "over-engineering" is actually a documented
-  project pattern, or the "integration gap" is covered by an existing test elsewhere)
-
-**Show deliberation card:**
-
-```
-═══════════════════════════════════════════════════════════
-  🤔 SONNET DELIBERATION on Opus Deep Review
-═══════════════════════════════════════════════════════════
-  ✅ Accepted:    3 (will fix)
-  🔄 Partial:     1 (agree but simpler fix)
-  ❌ Challenged:  1 (covered by existing test at tests/integration/...)
-═══════════════════════════════════════════════════════════
-```
-
-**No rebuttal API call needed** — Opus findings are deliberated locally (you have the context).
-If you challenge an Opus finding, document your reasoning in the audit summary. The user
-can review your reasoning and override if they disagree.
-
-### 6.5.5 Fix and Verify Opus Findings
-
-Fix accepted + partially accepted findings:
-
-```
-  🔧 Deep review fixes:
-    ✓ [DR1] Simplified retry to 3-line loop (removed strategy pattern)
-         → src/services/pairing/pairingLab.js lines 55-58
-    ✓ [DR2] Added integration test for agent→lab→feedback chain
-         → tests/integration/pairingLabFlow.test.js (new)
-    ✓ [DR3] Fixed naming inconsistency introduced in Round 2 fixes
-         → src/services/pairing/pairingLab.js (renamed 3 functions)
-```
-
-### 6.5.6 Opus Verification (Mandatory)
-
-After fixing Opus findings, run Opus review ONCE MORE to verify the fixes are clean.
-This is the same principle as the GPT stability loop — fixes can introduce issues.
-
-```
-═══════════════════════════════════════════════════════════
-  🔬 OPUS VERIFICATION
-═══════════════════════════════════════════════════════════
-  Previous findings: 5 | Fixed: 4 | Challenged: 1
-  New findings: 0 ✓
-  Verdict: APPROVED — all fixes are clean
-
-  Total deep review: 2 passes | ~2 min
-═══════════════════════════════════════════════════════════
-```
-
-**Opus convergence**: If the verification pass finds NEW issues:
-- Fix them → verify once more (max 3 Opus rounds total)
-- If Opus keeps finding new issues after 3 rounds, present to user
-
-**If verification is clean**: Proceed to final report (Step 6 convergence card).
+Deliberate on Opus findings locally (ACCEPT/PARTIAL/CHALLENGE). Fix accepted items, verify once. Max 3 Opus rounds.
 
 ---
 
-## Step 7 — Transition to Code Audit (FULL_CYCLE only)
+## Step 7 — Code Audit Transition (FULL_CYCLE only)
 
-After plan audit converges:
-1. Show: "Plan approved. Starting implementation..."
-2. Implement the plan
-3. Show: "Implementation complete. Starting code audit loop..."
-4. Run Steps 2-6 with CODE_AUDIT mode
+After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 
 ---
 
-## UX Rules (MANDATORY)
+## UX Rules
 
-1. **Status cards after EVERY phase** — use the boxed `═══` format shown above
-2. **Never dump raw JSON** — always parse and present structured summaries
-3. **Show every fix** — the user must see what changed, in which file, and why
-4. **Time estimates** — show estimated time at the start of each phase
-5. **Cost tracking** — calculate approximate cost from token usage and show it
-6. **One question batch** — collect ALL user decisions into one prompt, not multiple
-7. **Files changed summary** — always list modified files at convergence
-8. **No silent fixes** — even auto-fixes must be listed (just don't ask permission)
-9. **Progress indicators** — show ⏳ before long operations, ✓/✗ after each pass
-10. **Round transitions** — clear before/after comparison at each round boundary
-
-## Cost Estimation
-
-Approximate costs (GPT-5.4, March 2026):
-- Input: ~$2.50 / 1M tokens
-- Output: ~$10.00 / 1M tokens
-- Formula: `cost ≈ (input_tokens × 2.5 + output_tokens × 10) / 1_000_000`
-- Show as: `Cost: ~$X.XX` after each audit pass
-
----
+1. Status card after every phase (compact format above)
+2. Never dump raw JSON — parse and summarize
+3. Show every fix with file + line reference
+4. Cost tracking: `cost ≈ (input × 2.5 + output × 10) / 1M`
+5. Batch all user decisions into one prompt
+6. Progress: show pass timings from stderr
 
 ## Key Principles
 
-1. **Peer Relationship**: You and GPT-5.4 are equals. Neither blindly defers.
-2. **Three-Model System**: You (work) + GPT-5.4 (iterate) + Opus (final gate) = comprehensive quality.
-3. **Fix Everything That Survived**: ALL HIGH must be fixed. MEDIUM until ≤2. LOW optional.
-4. **Show Your Work**: Every fix is visible. Every decision is transparent.
-5. **Respect the User's Time**: Batch decisions. Show progress. Give estimates. Parallelise where safe.
-6. **No Quick Fixes**: Band-aids are rejected by all models.
-7. **Deliberation Is Final**: GPT's ruling on a challenge is accepted. No infinite debate.
-8. **Stability Over Speed**: 2 consecutive clean rounds required. Mandatory verification after every fix.
-9. **Graceful Degradation**: Failed passes don't crash — offer recovery options.
+1. **Peer relationship** — neither model blindly defers
+2. **Three-model system** — work + iterate + final gate
+3. **Fix all HIGH**, MEDIUM until ≤2, LOW optional
+4. **Stability over speed** — 2 clean rounds required
+5. **No quick fixes** — band-aids rejected by all models
+6. **Deliberation is final** — no infinite debate
+7. **Graceful degradation** — failed passes offer recovery
 
 ---
 
 ## Compatibility
 
-This skill works with any AI coding assistant that can run terminal commands:
+| Environment | Skill Location | Notes |
+|-------------|---------------|-------|
+| Claude Code | `.claude/skills/audit-loop/` | Native bash |
+| VS Code Copilot | `.github/skills/audit-loop/` | Terminal tool |
+| Cursor / Windsurf | `.github/skills/audit-loop/` | Terminal tool |
+| Any AI + terminal | Direct script | `node scripts/openai-audit.mjs` |
 
-| Environment | Skill Location | Terminal Access |
-|-------------|---------------|----------------|
-| **Claude Code CLI** | `.claude/skills/audit-loop/` | Native bash |
-| **Claude Code in VS Code** | `.claude/skills/audit-loop/` | Integrated terminal |
-| **VS Code Copilot Chat** | `.github/skills/audit-loop/` | Terminal tool (auto-approve recommended) |
-| **Cursor / Windsurf** | `.github/skills/audit-loop/` | Terminal tool |
-| **Any AI + terminal** | N/A (use script directly) | `node scripts/openai-audit.mjs` |
-
-### VS Code Copilot Setup Notes
-
-1. The skill file at `.github/skills/audit-loop/SKILL.md` is auto-discovered by Copilot
-2. Invoke with `/audit-loop` in Copilot Chat
-3. Copilot uses its terminal tool to run `node scripts/openai-audit.mjs`
-4. For smooth operation, consider adding terminal auto-approve for `node scripts/` commands
-   in VS Code settings: `"chat.tools.autoApprove": true` or scope to specific commands
-5. The skill references `node` commands — ensure Node.js 18+ is in your terminal PATH
-6. If Copilot asks for permission to run commands, approve the `node scripts/openai-audit.mjs` pattern
-
-### Opus Deep Review Compatibility
-
-The Opus deep review (Step 6.5) uses the assistant's OWN extended thinking capability:
-- **Claude Code**: Uses Claude Opus naturally (switch to opus model or use extended thinking)
-- **VS Code Copilot**: Uses the highest available GPT model with `reasoning: high`, OR
-  the user can configure `OPUS_REVIEW_MODEL` env var to point to a specific model
-- **Other assistants**: Falls back to the assistant's best available reasoning mode
-
-The deep review prompt is model-agnostic — it works with any capable reasoning model.
+The script auto-detects project context from `CLAUDE.md`, `Agents.md`, or `.github/copilot-instructions.md`.

@@ -17,6 +17,8 @@
  *   node scripts/openai-audit.mjs code <plan-file>                    # Multi-pass code audit
  *   node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> # Send Claude's rebuttals
  *   node scripts/openai-audit.mjs plan <plan-file> --json              # JSON output
+ *   node scripts/openai-audit.mjs code <plan-file> --out /tmp/r.json   # Write results to file (clean terminal)
+ *   node scripts/openai-audit.mjs code <plan-file> --history /tmp/h.json # Inject prior round history
  *
  * Requires: OPENAI_API_KEY in .env or environment
  *
@@ -321,13 +323,176 @@ function readFileOrDie(filePath) {
   return fs.readFileSync(resolved, 'utf-8');
 }
 
-function readProjectContext() {
-  const claudeMdPath = path.resolve('CLAUDE.md');
-  if (fs.existsSync(claudeMdPath)) {
-    const content = fs.readFileSync(claudeMdPath, 'utf-8');
-    return content.slice(0, 8000);
+// ── Project Context (Targeted) ───────────────────────────────────────────────
+// Instead of sending 8000 chars of CLAUDE.md to every pass, extract only the
+// sections relevant to each pass type. Saves ~2000 tokens per pass.
+
+let _claudeMdCache = null;
+function _getClaudeMd() {
+  if (_claudeMdCache !== null) return _claudeMdCache;
+  // Check both CLAUDE.md (Claude Code) and Agents.md (VS Code Copilot)
+  for (const name of ['CLAUDE.md', 'Agents.md', '.github/copilot-instructions.md']) {
+    const p = path.resolve(name);
+    if (fs.existsSync(p)) {
+      _claudeMdCache = fs.readFileSync(p, 'utf-8');
+      return _claudeMdCache;
+    }
   }
-  return '(No CLAUDE.md found — auditing without project context)';
+  _claudeMdCache = '';
+  return _claudeMdCache;
+}
+
+/**
+ * Extract targeted CLAUDE.md sections for a specific audit pass.
+ * Each pass gets only ~800-1500 chars instead of 8000.
+ * @param {string} passName - structure|wiring|backend|frontend|sustainability|plan|rebuttal
+ * @returns {string}
+ */
+function readProjectContextForPass(passName) {
+  const content = _getClaudeMd();
+  if (!content) return '(No CLAUDE.md found)';
+
+  // Extract sections by heading (## Heading ... up to next ## or end)
+  function extractSections(patterns) {
+    const results = [];
+    for (const pat of patterns) {
+      const regex = new RegExp(`(## ${pat}[\\s\\S]*?)(?=\\n## [A-Z]|$)`, 'i');
+      const match = content.match(regex);
+      if (match) results.push(match[1].slice(0, 1500));
+    }
+    return results.join('\n\n').slice(0, 3000) || content.slice(0, 1500);
+  }
+
+  switch (passName) {
+    case 'structure':
+      return extractSections(['Code Organisation', 'Naming Conventions']);
+    case 'wiring':
+      return extractSections(['API Design', 'Frontend.*(API|Patterns)', 'Frontend API']);
+    case 'backend':
+      return extractSections(['Data Integrity', 'Multi-User', 'PostgreSQL', 'Code Style']);
+    case 'frontend':
+      return extractSections(['Frontend Patterns', 'Content Security Policy', 'CSP']);
+    case 'sustainability':
+      return extractSections(['Testing', 'Do NOT', 'Do ']);
+    case 'plan': case 'rebuttal':
+      // Plan audit gets a broader but still trimmed context
+      return content.slice(0, 4000);
+    default:
+      return content.slice(0, 2000);
+  }
+}
+
+// Backward compat: full context for single-call modes (plan, rebuttal)
+function readProjectContext() {
+  const content = _getClaudeMd();
+  return content ? content.slice(0, 4000) : '(No CLAUDE.md found — auditing without project context)';
+}
+
+// ── Plan Section Extraction ──────────────────────────────────────────────────
+// Instead of sending 6000 chars of plan to every pass, extract targeted sections.
+
+/**
+ * Extract plan sections relevant to a specific audit pass.
+ * Falls back to truncated full plan if sections can't be found.
+ * @param {string} planContent - Full plan text
+ * @param {string} passName - structure|wiring|backend|frontend|sustainability
+ * @returns {string}
+ */
+function extractPlanForPass(planContent, passName) {
+  const sectionPatterns = {
+    structure: ['File.Level Plan', 'Architecture', 'Files', 'Structure'],
+    wiring: ['API', 'Route', 'Endpoint', 'Contract', 'Wiring'],
+    backend: ['Backend', 'Database', 'Service', 'Logic', 'Schema'],
+    frontend: ['Frontend', 'UI', 'User Flow', 'Component', 'Layout', 'UX'],
+    sustainability: ['Sustainability', 'Testing', 'Risk', 'Trade.off', 'Error']
+  };
+
+  const patterns = sectionPatterns[passName];
+  if (!patterns) return planContent.length > 4000 ? planContent.slice(0, 4000) : planContent;
+
+  const sections = [];
+  for (const pat of patterns) {
+    const regex = new RegExp(`(##+ .*${pat}[\\s\\S]*?)(?=\\n##+ |$)`, 'i');
+    const match = planContent.match(regex);
+    if (match) sections.push(match[1]);
+  }
+
+  if (sections.length > 0) {
+    const combined = sections.join('\n\n');
+    return combined.length > 4000 ? combined.slice(0, 4000) + '\n...[truncated]' : combined;
+  }
+  // Fallback: truncated full plan
+  return planContent.length > 3000 ? planContent.slice(0, 3000) + '\n...[plan truncated]' : planContent;
+}
+
+// ── History Context Builder ─────────────────────────────────────────────────
+// Compresses prior round results into an efficient context block for GPT,
+// so it knows what was already found, fixed, challenged, and resolved.
+
+/**
+ * Build a compact audit history block from a history JSON file.
+ * @param {string} historyPath - Path to history JSON file
+ * @returns {string} Markdown block for injection into prompt, or empty string
+ */
+function buildHistoryContext(historyPath) {
+  if (!historyPath) return '';
+  const abs = path.resolve(historyPath);
+  if (!fs.existsSync(abs)) {
+    process.stderr.write(`  [history] File not found: ${abs} — proceeding without history\n`);
+    return '';
+  }
+
+  let rounds;
+  try {
+    rounds = JSON.parse(fs.readFileSync(abs, 'utf-8'));
+  } catch (err) {
+    process.stderr.write(`  [history] Failed to parse: ${err.message}\n`);
+    return '';
+  }
+
+  if (!Array.isArray(rounds) || rounds.length === 0) return '';
+
+  const lines = ['## Prior Audit History (DO NOT re-raise resolved items)\n'];
+  lines.push(`${rounds.length} prior round(s). Only raise GENUINELY NEW or UNFIXED findings.\n`);
+
+  for (const round of rounds) {
+    lines.push(`### Round ${round.round ?? '?'}`);
+    const findings = round.findings ?? [];
+    if (findings.length > 0) {
+      lines.push(`Findings (${findings.length}):`);
+      for (const f of findings) lines.push(`  ${f.id} [${f.severity}] ${(f.detail ?? f.category ?? '').slice(0, 120)}`);
+    }
+    if (round.fixed_ids?.length) lines.push(`Fixed: ${round.fixed_ids.join(', ')}`);
+    if (round.dismissed_ids?.length) lines.push(`Dismissed: ${round.dismissed_ids.join(', ')}`);
+    if (round.resolutions?.length) {
+      for (const r of round.resolutions) lines.push(`  ${r.finding_id}: ${r.gpt_ruling} → ${r.final_severity}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('IMPORTANT: Do NOT re-raise findings in the Fixed or Dismissed lists above.\n');
+  const block = lines.join('\n');
+  process.stderr.write(`  [history] Loaded ${rounds.length} round(s), ${block.length} chars\n`);
+  return block;
+}
+
+// ── Output Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Write output to file or stdout. When --out is specified, JSON goes to file
+ * and only a 1-line summary goes to stdout (keeps terminal clean for copilots).
+ */
+function writeOutput(data, outPath, summaryLine) {
+  const json = JSON.stringify(data, null, 2);
+  if (outPath) {
+    const abs = path.resolve(outPath);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, json, 'utf-8');
+    process.stderr.write(`  [out] Results written to ${abs}\n`);
+    console.log(summaryLine);
+  } else {
+    console.log(json);
+  }
 }
 
 /**
@@ -595,7 +760,7 @@ async function safeCallGPT(openai, opts, emptyResult) {
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '') {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -616,33 +781,35 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   process.stderr.write(`  Frontend: ${frontend.length} files + ${shared.length} shared\n`);
   if (splitBackend) process.stderr.write(`  Backend split: YES (>${BACKEND_SPLIT_THRESHOLD} files → separate route + service passes)\n`);
 
-  const planSummary = planContent.length > 6000
-    ? planContent.slice(0, 6000) + '\n... [plan truncated for pass context]'
-    : planContent;
+  // History context for round 2+ (prevents re-raising resolved findings)
+  const historyBlock = historyContext ? `\n${historyContext}\n` : '';
 
   const fileListContext = `## Files Referenced in Plan (${found.length} found, ${missing.length} missing)\n\n`
     + (missing.length ? `**Missing:** ${missing.join(', ')}\n\n` : '')
     + `**Found:** ${found.join(', ')}\n`;
 
-  const baseContextChars = projectContext.length + planSummary.length + fileListContext.length;
+  // Read shared files ONCE — reuse across passes that need them
+  const sharedContext = shared.length > 0 ? readFilesAsContext(shared, { maxPerFile: 6000, maxTotal: 20000 }) : '';
+
+  // Estimate base context size (targeted context per pass, not full CLAUDE.md)
+  const baseContextChars = 2000 + fileListContext.length + historyBlock.length; // ~2000 for targeted CLAUDE.md
 
   // 2. Wave 1: Structure + Wiring (mechanical, reasoning: low)
-  // Adaptive: measure actual context, compute limits
   const structureContextChars = baseContextChars + measureContextChars(found, 2000);
   const structureLimits = computePassLimits(structureContextChars, 'low');
 
-  const wiringFiles = [...found.filter(f => f.includes('/api/') || f.includes('/routes/')), ...shared];
-  const wiringContextChars = baseContextChars + measureContextChars(wiringFiles, 8000);
+  const wiringFiles = found.filter(f => f.includes('/api/') || f.includes('/routes/'));
+  const wiringContextChars = baseContextChars + measureContextChars(wiringFiles, 8000) + sharedContext.length;
   const wiringLimits = computePassLimits(wiringContextChars, 'low');
 
   process.stderr.write(`\n── Wave 1: Structure + Wiring (parallel, reasoning: low) ──\n`);
-  process.stderr.write(`  Adaptive limits — structure: ${structureLimits.maxTokens} tok / ${(structureLimits.timeoutMs/1000).toFixed(0)}s | wiring: ${wiringLimits.maxTokens} tok / ${(wiringLimits.timeoutMs/1000).toFixed(0)}s\n`);
+  process.stderr.write(`  structure: ${structureLimits.maxTokens} tok / ${(structureLimits.timeoutMs/1000).toFixed(0)}s | wiring: ${wiringLimits.maxTokens} tok / ${(wiringLimits.timeoutMs/1000).toFixed(0)}s\n`);
 
   const structureFiles = readFilesAsContext(found, { maxPerFile: 2000, maxTotal: 30000 });
   const [structureResult, wiringResult] = await Promise.all([
     safeCallGPT(openai, {
       systemPrompt: PASS_STRUCTURE_SYSTEM,
-      userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n${fileListContext}\n\n## File Signatures\n${structureFiles}`,
+      userPrompt: `## Project Context\n${readProjectContextForPass('structure')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'structure')}\n\n${fileListContext}\n\n## File Signatures\n${structureFiles}`,
       schema: StructurePassSchema,
       schemaName: 'structure_pass',
       reasoning: 'low',
@@ -651,7 +818,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     }, EMPTY_STRUCTURE),
     safeCallGPT(openai, {
       systemPrompt: PASS_WIRING_SYSTEM,
-      userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n${fileListContext}\n\n## API & Route Files\n${readFilesAsContext(wiringFiles, { maxPerFile: 8000, maxTotal: 60000 })}`,
+      userPrompt: `## Project Context\n${readProjectContextForPass('wiring')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'wiring')}\n\n${fileListContext}\n\n## API & Route Files\n${readFilesAsContext(wiringFiles, { maxPerFile: 8000, maxTotal: 60000 })}\n\n## Shared Files\n${sharedContext}`,
       schema: WiringPassSchema,
       schemaName: 'wiring_pass',
       reasoning: 'low',
@@ -666,16 +833,18 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   const wave2Promises = [];
   const backendPassNames = [];
 
+  const beCtx = readProjectContextForPass('backend');
+  const bePlan = extractPlanForPass(planContent, 'backend');
+
   if (splitBackend) {
-    if (backendRoutes.length + shared.length > 0) {
-      const files = [...backendRoutes, ...shared];
-      const limits = computePassLimits(baseContextChars + measureContextChars(files, 8000), 'high');
-      process.stderr.write(`  be-routes: ${files.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
+    if (backendRoutes.length > 0) {
+      const limits = computePassLimits(baseContextChars + measureContextChars(backendRoutes, 8000) + sharedContext.length, 'high');
+      process.stderr.write(`  be-routes: ${backendRoutes.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
       backendPassNames.push('be-routes');
       wave2Promises.push(
         safeCallGPT(openai, {
           systemPrompt: PASS_BACKEND_SYSTEM,
-          userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n## Backend ROUTES + Schemas\n${readFilesAsContext(files, { maxPerFile: 8000, maxTotal: 60000 })}`,
+          userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend ROUTES\n${readFilesAsContext(backendRoutes, { maxPerFile: 8000, maxTotal: 60000 })}\n\n## Shared Files\n${sharedContext}`,
           schema: PassFindingsSchema,
           schemaName: 'backend_routes_pass',
           reasoning: 'high',
@@ -691,7 +860,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       wave2Promises.push(
         safeCallGPT(openai, {
           systemPrompt: PASS_BACKEND_SYSTEM,
-          userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n## Backend SERVICES\n${readFilesAsContext(backendServices, { maxPerFile: 8000, maxTotal: 80000 })}`,
+          userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend SERVICES\n${readFilesAsContext(backendServices, { maxPerFile: 8000, maxTotal: 80000 })}`,
           schema: PassFindingsSchema,
           schemaName: 'backend_services_pass',
           reasoning: 'high',
@@ -700,15 +869,15 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
         }, EMPTY_FINDINGS)
       );
     }
-  } else if (backend.length + shared.length > 0) {
-    const files = [...backend, ...shared];
-    const limits = computePassLimits(baseContextChars + measureContextChars(files, 8000), 'high');
+  } else if (backend.length > 0) {
+    const files = backend;
+    const limits = computePassLimits(baseContextChars + measureContextChars(files, 8000) + sharedContext.length, 'high');
     process.stderr.write(`  backend: ${files.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
     backendPassNames.push('backend');
     wave2Promises.push(
       safeCallGPT(openai, {
         systemPrompt: PASS_BACKEND_SYSTEM,
-        userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n## Backend Implementation Files\n${readFilesAsContext(files, { maxPerFile: 8000, maxTotal: 80000 })}`,
+        userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend Implementation Files\n${readFilesAsContext(files, { maxPerFile: 8000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
         schema: PassFindingsSchema,
         schemaName: 'backend_pass',
         reasoning: 'high',
@@ -718,14 +887,13 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     );
   }
 
-  if (frontend.length + shared.length > 0) {
-    const files = [...frontend, ...shared];
-    const limits = computePassLimits(baseContextChars + measureContextChars(files, 10000), 'high');
-    process.stderr.write(`  frontend: ${files.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
+  if (frontend.length > 0) {
+    const limits = computePassLimits(baseContextChars + measureContextChars(frontend, 10000) + sharedContext.length, 'high');
+    process.stderr.write(`  frontend: ${frontend.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
     wave2Promises.push(
       safeCallGPT(openai, {
         systemPrompt: PASS_FRONTEND_SYSTEM,
-        userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n## Frontend Implementation Files\n${readFilesAsContext(files, { maxPerFile: 10000, maxTotal: 80000 })}`,
+        userPrompt: `## Project Context\n${readProjectContextForPass('frontend')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'frontend')}\n\n## Frontend Implementation Files\n${readFilesAsContext(frontend, { maxPerFile: 10000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
         schema: PassFindingsSchema,
         schemaName: 'frontend_pass',
         reasoning: 'high',
@@ -752,7 +920,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   const sustainResult = await safeCallGPT(openai, {
     systemPrompt: PASS_SUSTAINABILITY_SYSTEM,
-    userPrompt: `## Project Context\n${projectContext}\n\n## Plan\n${planSummary}\n\n## All Implementation Files\n${readFilesAsContext(found, { maxPerFile: 4000, maxTotal: 60000 })}`,
+    userPrompt: `## Project Context\n${readProjectContextForPass('sustainability')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'sustainability')}\n\n## All Implementation Files\n${readFilesAsContext(found, { maxPerFile: 4000, maxTotal: 60000 })}`,
     schema: SustainabilityPassSchema,
     schemaName: 'sustainability_pass',
     reasoning: 'medium',
@@ -850,7 +1018,10 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   };
 
   // 6. Output
-  if (jsonMode) {
+  if (outFile) {
+    const summaryLine = `Verdict: ${verdict} | H:${high} M:${medium} L:${low} | ${(totalLatency / 1000).toFixed(0)}s`;
+    writeOutput(mergedResult, outFile, summaryLine);
+  } else if (jsonMode) {
     console.log(JSON.stringify(mergedResult, null, 2));
   } else {
     console.log('# GPT-5.4 Multi-Pass Code Audit Report');
@@ -902,9 +1073,17 @@ async function main() {
   const rebuttalFile = mode === 'rebuttal' ? args[2] : null;
   const jsonMode = args.includes('--json');
 
+  // --out <file>: write JSON results to file, keep terminal clean
+  const outIdx = args.indexOf('--out');
+  const outFile = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1] : null;
+
+  // --history <file>: inject prior round results to avoid re-raising resolved findings
+  const histIdx = args.indexOf('--history');
+  const historyFile = histIdx !== -1 && args[histIdx + 1] ? args[histIdx + 1] : null;
+
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
-    console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json]');
-    console.error('       node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> [--json]');
+    console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>]');
+    console.error('       node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> [--json] [--out <file>]');
     process.exit(1);
   }
 
@@ -921,15 +1100,16 @@ async function main() {
 
   const planContent = readFileOrDie(planFile);
   const projectContext = readProjectContext();
+  const historyContext = buildHistoryContext(historyFile);
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   // Code mode → multi-pass parallel audit
   if (mode === 'code') {
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode);
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext);
     return;
   }
 
-  // Plan and rebuttal modes → single call (plan is text-only, rebuttal is focused)
+  // Plan and rebuttal modes → single call
   let systemPrompt, schema, schemaName, userPrompt;
 
   if (mode === 'rebuttal') {
@@ -942,7 +1122,7 @@ async function main() {
     systemPrompt = PLAN_AUDIT_SYSTEM;
     schema = PlanAuditResultSchema;
     schemaName = 'plan_audit_result';
-    userPrompt = `## Project Context\n${projectContext}\n\n---\n\n## Plan to Audit\n${planContent}`;
+    userPrompt = `## Project Context\n${projectContext}\n\n${historyContext ? `---\n\n${historyContext}\n` : ''}---\n\n## Plan to Audit\n${planContent}`;
   }
 
   try {
@@ -951,8 +1131,16 @@ async function main() {
       passName: mode
     });
 
-    if (jsonMode) {
-      console.log(JSON.stringify({ ...result, _usage: usage }, null, 2));
+    if (jsonMode || outFile) {
+      const data = { ...result, _usage: usage };
+      if (outFile) {
+        const summaryLine = mode === 'rebuttal'
+          ? `Deliberation complete: ${result.resolutions?.length ?? 0} resolutions`
+          : `Verdict: ${result.verdict} | H:${result.findings?.filter(f => f.severity === 'HIGH').length ?? 0} M:${result.findings?.filter(f => f.severity === 'MEDIUM').length ?? 0} L:${result.findings?.filter(f => f.severity === 'LOW').length ?? 0}`;
+        writeOutput(data, outFile, summaryLine);
+      } else {
+        console.log(JSON.stringify(data, null, 2));
+      }
     } else if (mode === 'rebuttal') {
       const sustained = result.resolutions.filter(r => r.gpt_ruling === 'sustain').length;
       const overruled = result.resolutions.filter(r => r.gpt_ruling === 'overrule').length;
