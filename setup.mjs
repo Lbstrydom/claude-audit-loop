@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import readline from 'readline';
 
@@ -185,7 +186,7 @@ async function setupEnv(targetDir) {
   const envExamplePath = path.join(targetDir, '.env.example');
 
   // Copy .env.example if target doesn't have one
-  const sourceExample = path.resolve(path.dirname(new URL(import.meta.url).pathname), '.env.example');
+  const sourceExample = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.env.example');
   if (!fs.existsSync(envExamplePath) && fs.existsSync(sourceExample)) {
     fs.copyFileSync(sourceExample, envExamplePath);
     ok('Copied .env.example template');
@@ -239,7 +240,7 @@ async function main() {
   const targetIdx = args.indexOf('--target');
   const targetArg = targetIdx >= 0 ? args[targetIdx + 1] : null;
 
-  const sourceDir = path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Z]:)/, '$1'); // Fix Windows paths
+  const sourceDir = path.dirname(fileURLToPath(import.meta.url));
   let targetDir = targetArg ? path.resolve(targetArg) : findProjectRoot(process.cwd()) ?? process.cwd();
 
   // ── Step 1: Prerequisites

@@ -22,8 +22,8 @@
   "author": "Louis Strydom",
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^17.0.0",
-    "openai": "^6.17.0",
-    "zod": "^4.0.0"
+    "dotenv": "17.0.0",
+    "openai": "6.17.0",
+    "zod": "4.0.0"
   }
 }

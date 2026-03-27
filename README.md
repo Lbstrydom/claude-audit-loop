@@ -77,8 +77,9 @@ echo "OPENAI_API_KEY=sk-..." >> .env
 │    🟡 COMPROMISE — modified recommendation                │
 └──────────┬───────────────────────────────────────────────┘
            ▼
-│  Fix surviving findings → re-audit → repeat (max 4 rounds)│
+│  Fix surviving findings → re-audit → repeat (max 6 rounds)│
 │  Converges: 0 HIGH, ≤2 MEDIUM, 0 quick-fix warnings      │
+│  Round 2+: delta audit (only changed files, skip passes)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -120,7 +121,41 @@ node scripts/openai-audit.mjs plan docs/plans/my-feature.md --json
 
 # Send rebuttals for GPT deliberation
 node scripts/openai-audit.mjs rebuttal docs/plans/my-feature.md rebuttal.md --json
+
+# Write results to file (clean terminal for agent consumption)
+node scripts/openai-audit.mjs code docs/plans/my-feature.md --out /tmp/result.json
+
+# Inject prior round history (prevents re-raising resolved findings)
+node scripts/openai-audit.mjs code docs/plans/my-feature.md --history /tmp/history.json
+
+# Delta audit: skip structure pass, scope to changed files only (Round 2+)
+node scripts/openai-audit.mjs code docs/plans/my-feature.md \
+  --passes wiring,backend,sustainability \
+  --files src/routes/wines.js,src/services/wine/parser.js
 ```
+
+### CLI Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--json` | Raw JSON output to stdout |
+| `--out <file>` | Write JSON to file, 1-line summary to stdout (clean terminal) |
+| `--history <file>` | Inject prior round findings to prevent re-raising resolved items |
+| `--passes <list>` | Comma-separated passes to run (e.g. `backend,sustainability`) |
+| `--files <list>` | Comma-separated files to scope quality passes to (delta auditing) |
+
+## Cost Estimates
+
+Approximate costs per audit round (GPT-5.4, March 2026 pricing):
+
+| Codebase | Files | Round 1 (full) | Round 2+ (delta) | Full Audit (4 rounds) |
+|----------|-------|---------------|-----------------|----------------------|
+| Tiny | 3 | ~$0.15 | ~$0.06 | ~$0.35 |
+| Small | 8 | ~$0.35 | ~$0.15 | ~$0.80 |
+| Medium | 15 | ~$0.65 | ~$0.25 | ~$1.40 |
+| Large | 25+ | ~$1.20 | ~$0.50 | ~$2.70 |
+
+Round 2+ is cheaper because delta auditing skips the structure pass and scopes quality passes to only the files you changed.
 
 ## What It Checks
 
@@ -143,8 +178,11 @@ node scripts/openai-audit.mjs rebuttal docs/plans/my-feature.md rebuttal.md --js
 | **Frontend** | Gestalt, CSP, accessibility, states | high | ~90-170s |
 | **Sustainability** | Quick fixes, dead code, coupling | medium | ~90s |
 
-### Quick-Fix Detection
-Every finding has an `is_quick_fix` flag. Band-aid solutions are flagged and rejected — both models enforce sustainable fixes only.
+### Finding Classification
+Every finding is tagged with:
+- **`is_quick_fix`** — band-aid solutions are flagged and rejected by both models
+- **`is_mechanical`** — deterministic fixes (missing await, wrong operator) vs architectural judgment calls. Mechanical fixes converge in 1 round; architectural changes need 2 stable rounds.
+- **`_hash`** — SHA-256 content hash for exact cross-round tracking (same issue keeps the same ID regardless of GPT rewording)
 
 ## Adaptive Sizing
 
@@ -221,6 +259,17 @@ This tool was inspired by and builds on ideas from:
 - **Adaptive sizing** — works on any codebase without configuration
 - **Quick-fix rejection** — both models enforce sustainable solutions
 - **Portable** — works with Claude Code, VS Code Copilot, or raw terminal
+
+## Security
+
+The script includes several safety measures:
+
+- **Sensitive file exclusion** — files matching `.env`, `.pem`, `.key`, `secret`, `credential`, `password`, `token` patterns are never sent to the GPT API
+- **Path traversal guard** — only files within the current working directory are read
+- **No key logging** — API keys are never printed to stdout or stderr
+- **Project context auto-detection** — reads `CLAUDE.md`, `Agents.md`, or `.github/copilot-instructions.md` (never `.env`)
+
+**Important**: Never commit your `.env` file. The setup script adds it to `.gitignore` automatically.
 
 ## License
 
