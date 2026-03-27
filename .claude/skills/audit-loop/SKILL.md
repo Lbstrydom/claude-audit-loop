@@ -50,27 +50,41 @@ Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<nam
 
 ## Step 2 — Run GPT-5.4 Audit
 
-Use `--out` to write JSON to file (keeps terminal clean). Use `--history` from round 2+ to prevent re-raising resolved findings.
+Use `--out` for file output (clean terminal). Use `--history` from R2+ to prevent re-raising resolved findings.
+Use `--passes` and `--files` on R2+ for smart pass selection (skip redundant passes, scope to changed files).
 
 ```bash
-# Round 1
+# Round 1 — full audit, all passes
 node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json 2>/tmp/audit-$$-stderr.log
 
-# Round 2+ (with history)
-node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json --history /tmp/audit-$$-history.json 2>/tmp/audit-$$-stderr.log
+# Round 2+ — delta audit: skip structure, scope to changed files, with history
+node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json \
+  --history /tmp/audit-$$-history.json \
+  --passes wiring,backend,frontend,sustainability \
+  --files src/routes/wines.js,src/services/wine/parser.js \
+  2>/tmp/audit-$$-stderr.log
 ```
 
-Read stderr log for pass progress, then **read result from the JSON file** (not stdout):
+Read result from the JSON file: `cat /tmp/audit-$$-result.json`
 
-```bash
-cat /tmp/audit-$$-result.json
-```
+### Smart Pass Selection (Round 2+)
 
-Parse JSON directly — no format conversion needed.
+| Pass | When to skip on R2+ |
+|------|-------------------|
+| `structure` | Always skip (file existence doesn't change from fixes) |
+| `wiring` | Skip unless a route or API file was changed |
+| `backend` | Run if any backend file changed — scope with `--files` |
+| `frontend` | Run if any frontend file changed — scope with `--files` |
+| `sustainability` | Always run (cross-cutting, catches fix regressions) |
+
+Build the `--passes` and `--files` args from your fix list:
+1. Collect all files you modified in Step 4
+2. Classify: route/API files → include `wiring`. Backend files → include `backend`. Frontend → `frontend`.
+3. Always include `sustainability`. Skip `structure`.
 
 ### History File
 
-Maintain `/tmp/audit-$$-history.json` — a JSON array of round summaries. After each round:
+Maintain `/tmp/audit-$$-history.json` — append after each round's deliberation + fixes:
 
 ```json
 [{
@@ -82,7 +96,9 @@ Maintain `/tmp/audit-$$-history.json` — a JSON array of round summaries. After
 }]
 ```
 
-Append to history after deliberation + fixes, pass `--history` on next audit call.
+### Semantic Finding IDs
+
+The script assigns content-hashed IDs (`_hash` field) to each finding. Use these for exact cross-round matching instead of fuzzy word overlap. Same issue keeps the same hash across rounds.
 
 ### Handle Failed Passes
 
@@ -93,7 +109,7 @@ If `_failed_passes` is non-empty, show and offer: re-run with lower reasoning, c
 ```
 ═══════════════════════════════════════
   ROUND 1 AUDIT — SIGNIFICANT_ISSUES
-  H:6 M:10 L:5 | Cost: ~$0.45
+  H:6 M:10 L:5 | Deduped: 3 | Cost: ~$0.45
   Top: [H1] Missing auth on /api/...
 ═══════════════════════════════════════
 ```
@@ -102,35 +118,56 @@ If `_failed_passes` is non-empty, show and offer: re-run with lower reasoning, c
 
 ## Step 3 — Deliberation
 
-**You are a peer, not a subordinate.** For each finding:
+**You are a peer, not a subordinate.** For each finding, decide:
 - **ACCEPT** — valid, will fix
 - **PARTIAL** — real but severity wrong or better fix exists
 - **CHALLENGE** — wrong (cite evidence: file paths, conventions)
 
-### Convergence Check
+### Finding Classification
 
-Quality threshold: `HIGH == 0 && MEDIUM <= 2 && quickFix == 0`
-Stability: quality met for **2 consecutive rounds** with zero new findings.
+Each finding has `is_mechanical: true/false` set by GPT:
+- **Mechanical** (`is_mechanical: true`): deterministic fix — missing await, wrong operator, missing import. Fix immediately, no deliberation needed. These do NOT reset the stability counter.
+- **Architectural** (`is_mechanical: false`): judgment call — wrong abstraction, missing pattern, design issue. These need deliberation and DO reset stability if new.
 
-New finding detection: compare `category + section + detail` against prior round (>70% word overlap = same finding).
+### Tiered Rebuttal (Production-Grade)
 
-Max 6 rounds. If reached without stability, present remaining to user.
+| Finding Severity | Deliberation |
+|-----------------|-------------|
+| **HIGH** challenged/partial | ALWAYS send to GPT deliberation — stakes too high for single-model judgment |
+| **MEDIUM** challenged/partial | ALWAYS send to GPT deliberation — prod-critical issues like missing transactions |
+| **LOW** challenged | Claude decides locally — cosmetic/hygiene, not worth API call |
 
-### Send Rebuttal (if challenges exist)
-
-Write rebuttal to temp file, then:
+Only send rebuttal if there are challenged/partial HIGH or MEDIUM findings:
 ```bash
 node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> --out /tmp/resolution-$$-result.json 2>/tmp/rebuttal-$$-stderr.log
 ```
 
-Read result from `/tmp/resolution-$$-result.json`.
+### Convergence
 
-Show unified status:
+Quality threshold: `HIGH == 0 && MEDIUM <= 2 && quickFix == 0`
+
+Stability uses `_hash` for exact cross-round matching (no fuzzy overlap needed):
+- Compare finding hashes against prior round's hash set
+- New hash not in prior set = genuinely new finding → resets stability counter
+- Mechanical-only findings do NOT require stability rounds — they converge in 1 fix+verify
+
+| Condition | Action |
+|-----------|--------|
+| Threshold NOT met | Fix → re-audit |
+| Threshold met, new architectural findings | Fix → re-audit (stability resets) |
+| Threshold met, only new mechanical findings | Fix mechanicals → re-audit (stability NOT reset) |
+| Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6 |
+| Round 6, not stable | Present to user |
+
+Max 6 rounds.
+
+Show status:
 ```
 ═══════════════════════════════════════
   ROUND 1 DELIBERATION
   Accepted: 12 | Partial: 4 | Challenged: 5
-  Sustained: 2 | Overruled: 2 | Compromise: 1
+  Mechanical: 8 (auto-fix) | Architectural: 9
+  Rebuttal: HIGH+MEDIUM only (3 findings)
 ═══════════════════════════════════════
 ```
 
@@ -172,25 +209,24 @@ Batch genuine design decisions into one user prompt.
 
 ## Step 5 — Verify and Loop
 
-After fixes, re-audit (back to Step 2). Track finding churn:
-- Resolved (fixed successfully)
-- Recurring (persisted)
-- New (introduced by fixes — resets stability counter)
+After fixes, re-audit using **delta mode** (back to Step 2 with `--passes` and `--files`).
+
+1. Collect files modified during Step 4
+2. Build `--passes` from file types (see Smart Pass Selection table)
+3. Build `--files` from modified file list
+4. Run delta audit with `--history`
+
+Track finding churn using `_hash` fields (exact matching):
+- Resolved: hash in prior round but not current
+- Recurring: hash in both rounds
+- New: hash in current but not prior
 
 ```
 ═══════════════════════════════════════
-  ROUND 2 → ROUND 3
+  ROUND 2 → ROUND 3 (delta: 3 files, 2 passes)
   H:0 M:2 L:1 | New: 0 | Stable: 1/2
 ═══════════════════════════════════════
 ```
-
-| Condition | Action |
-|-----------|--------|
-| Threshold NOT met | Fix → re-audit |
-| Threshold met, new findings | Fix new → re-audit (stability resets) |
-| Threshold met, 0 new, 1/2 stable | Re-audit once more |
-| Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6 |
-| Round 6, not stable | Present to user |
 
 ---
 
