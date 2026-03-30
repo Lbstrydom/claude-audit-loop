@@ -26,12 +26,25 @@
  */
 
 import 'dotenv/config';  // Auto-load .env — no manual export needed
+import fs from 'node:fs';
+import path from 'node:path';
 import OpenAI from 'openai';
 import { z } from 'zod';
 import { zodTextFormat } from 'openai/helpers/zod';
-import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import {
+  safeInt, readFileOrDie, readProjectContext, readProjectContextForPass,
+  extractPlanForPass, buildHistoryContext, extractPlanPaths, readFilesAsContext,
+  classifyFiles, measureContextChars, semanticId,
+  writeOutput, formatFindings, FindingSchema, WiringIssueSchema, initAuditBrief,
+  normalizePath, generateTopicId, populateFindingMetadata, jaccardSimilarity,
+  suppressReRaises, buildRulingsBlock, R2_ROUND_MODIFIER, buildR2SystemPrompt,
+  parseDiffFile, readFilesAsAnnotatedContext, computeImpactSet, LedgerEntrySchema,
+  estimateTokens, chunkLargeFile, extractExportsOnly, buildAuditUnits,
+  buildDependencyGraph, REDUCE_SYSTEM_PROMPT, generateRepoProfile,
+  appendOutcome, loadOutcomes, FalsePositiveTracker
+} from './shared.mjs';
+import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents } from './learning-store.mjs';
+import { PromptBandit, computeReward } from './bandit.mjs';
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -39,11 +52,10 @@ const MODEL = process.env.OPENAI_AUDIT_MODEL || 'gpt-5.4';
 const REASONING_EFFORT = process.env.OPENAI_AUDIT_REASONING || 'high';
 
 // Hard ceilings — adaptive sizing stays below these
-// Safe parseInt: NaN falls back to default
-function safeInt(val, fallback) { const n = parseInt(val, 10); return Number.isNaN(n) ? fallback : n; }
 const MAX_OUTPUT_TOKENS_CAP = safeInt(process.env.OPENAI_AUDIT_MAX_TOKENS, 32000);
 const TIMEOUT_MS_CAP = safeInt(process.env.OPENAI_AUDIT_TIMEOUT_MS, 300000); // 5 min absolute max
 const BACKEND_SPLIT_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_SPLIT_THRESHOLD, 12);
+const MAP_REDUCE_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_THRESHOLD, 15);
 
 // ── Adaptive Sizing ────────────────────────────────────────────────────────────
 
@@ -75,7 +87,7 @@ function computePassLimits(contextChars, reasoning = 'high') {
   const reasoningOverhead = Math.ceil(estimatedInputTokens * reasoningMultiplier);
   const maxTokens = Math.min(
     MAX_OUTPUT_TOKENS_CAP,
-    Math.max(baseOutputTokens, baseOutputTokens + reasoningOverhead)
+    baseOutputTokens + reasoningOverhead
   );
 
   // Timeout: based on expected generation speed + reasoning overhead
@@ -94,38 +106,7 @@ function computePassLimits(contextChars, reasoning = 'high') {
   return { maxTokens, timeoutMs };
 }
 
-/**
- * Measure total character count of files that would be sent in a context block.
- * @param {string[]} filePaths
- * @param {number} maxPerFile
- * @returns {number}
- */
-function measureContextChars(filePaths, maxPerFile = 10000) {
-  let total = 0;
-  for (const p of filePaths) {
-    const abs = path.resolve(p);
-    if (fs.existsSync(abs)) {
-      const size = fs.statSync(abs).size;
-      total += Math.min(size, maxPerFile);
-    }
-  }
-  return total;
-}
-
-// ── Shared Schemas ─────────────────────────────────────────────────────────────
-
-const FindingSchema = z.object({
-  id: z.string().max(10).describe('Finding ID, e.g. H1, M3, L2'),
-  severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
-  category: z.string().max(80).describe('Category: e.g. "DRY Violation", "Missing Error Handling", "Gestalt: Proximity"'),
-  section: z.string().max(120).describe('Which plan/code section or file this relates to'),
-  detail: z.string().max(600).describe('What is wrong and why it matters'),
-  risk: z.string().max(300).describe('What could go wrong if not fixed'),
-  recommendation: z.string().max(600).describe('Specific, actionable fix — NOT a quick fix, must be sustainable'),
-  is_quick_fix: z.boolean().describe('TRUE if the recommendation is a band-aid rather than a proper fix.'),
-  is_mechanical: z.boolean().describe('TRUE if fix is deterministic with exactly one correct answer (missing await, wrong operator, missing import). FALSE for architectural/design judgment calls.'),
-  principle: z.string().max(80).describe('Which engineering/UX principle this violates')
-});
+// ── Schemas (FindingSchema imported from shared.mjs) ─────────────────────────
 
 // ── Plan Audit Schema ──────────────────────────────────────────────────────────
 
@@ -171,12 +152,7 @@ const StructurePassSchema = z.object({
 
 const WiringPassSchema = z.object({
   pass_name: z.literal('wiring'),
-  wiring_issues: z.array(z.object({
-    frontend_call: z.string().max(120),
-    backend_route: z.string().max(120),
-    status: z.enum(['wired', 'broken', 'missing']),
-    detail: z.string().max(300)
-  })).max(20),
+  wiring_issues: z.array(WiringIssueSchema).max(20),
   findings: z.array(FindingSchema).max(10),
   summary: z.string().max(500)
 });
@@ -197,12 +173,7 @@ const CodeAuditResultSchema = z.object({
   files_found: z.number().int(),
   files_missing: z.number().int(),
   findings: z.array(FindingSchema).max(50),
-  wiring_issues: z.array(z.object({
-    frontend_call: z.string().max(120),
-    backend_route: z.string().max(120),
-    status: z.enum(['wired', 'broken', 'missing']),
-    detail: z.string().max(300)
-  })).max(20),
+  wiring_issues: z.array(WiringIssueSchema).max(20),
   quick_fix_warnings: z.array(z.string().max(300)).max(10),
   dead_code: z.array(z.string().max(200)).max(20),
   overall_reasoning: z.string().max(1000)
@@ -283,9 +254,11 @@ FOCUS ONLY on: Does every frontend API call have a matching backend route? Do HT
 Are request/response shapes compatible? Are auth headers included (apiFetch, not raw fetch)?
 Do NOT check code quality or logic — other passes handle that.`;
 
-const PASS_BACKEND_SYSTEM = `You are auditing BACKEND CODE quality against engineering principles.
+const PASS_BACKEND_OBJECTIVE_R1 = `You are auditing BACKEND CODE quality against engineering principles.
 FOCUS ONLY on these files: routes, services, DB queries, config, schemas.
-Check: SOLID (all 5), DRY, async/await correctness, error handling, input validation,
+Be ruthlessly honest about finding REAL issues that will cause bugs or technical debt.`;
+
+const PASS_BACKEND_RUBRIC = `Check: SOLID (all 5), DRY, async/await correctness, error handling, input validation,
 transaction safety, cellar_id scoping on ALL queries, auth middleware, N+1 queries,
 hardcoded values, dead code, single source of truth.
 Do NOT check frontend files or wiring — other passes handle that.
@@ -293,9 +266,13 @@ Every recommendation must be a PROPER sustainable solution, not a band-aid.
 
 SEVERITY: HIGH = bugs/security/data-loss. MEDIUM = quality/maintainability. LOW = hygiene.`;
 
-const PASS_FRONTEND_SYSTEM = `You are auditing FRONTEND CODE quality against UX and engineering principles.
+const PASS_BACKEND_SYSTEM = PASS_BACKEND_OBJECTIVE_R1 + '\n\n' + PASS_BACKEND_RUBRIC;
+
+const PASS_FRONTEND_OBJECTIVE_R1 = `You are auditing FRONTEND CODE quality against UX and engineering principles.
 FOCUS ONLY on these files: public/js/*, public/css/*, HTML templates.
-Check: CSP compliance (no inline handlers), apiFetch (not raw fetch), event listener cleanup,
+Be ruthlessly honest about finding REAL issues that will cause UX bugs or technical debt.`;
+
+const PASS_FRONTEND_RUBRIC = `Check: CSP compliance (no inline handlers), apiFetch (not raw fetch), event listener cleanup,
 loading/error/empty state handling, accessibility (ARIA, keyboard, focus management),
 Gestalt principles (proximity, similarity, continuity, closure, figure-ground),
 cognitive load, consistency, responsive design, CSS variables, debounce on scroll/resize.
@@ -304,8 +281,12 @@ Every recommendation must be a PROPER sustainable solution, not a band-aid.
 
 SEVERITY: HIGH = broken UX/accessibility. MEDIUM = degraded quality. LOW = polish.`;
 
-const PASS_SUSTAINABILITY_SYSTEM = `You are auditing CODE SUSTAINABILITY and long-term health.
-FOCUS on: Quick fixes that paper over problems, dead code (unused exports, unreachable branches),
+const PASS_FRONTEND_SYSTEM = PASS_FRONTEND_OBJECTIVE_R1 + '\n\n' + PASS_FRONTEND_RUBRIC;
+
+const PASS_SUSTAINABILITY_OBJECTIVE_R1 = `You are auditing CODE SUSTAINABILITY and long-term health.
+Be ruthlessly honest about finding REAL architectural issues that will cause long-term pain.`;
+
+const PASS_SUSTAINABILITY_RUBRIC = `FOCUS on: Quick fixes that paper over problems, dead code (unused exports, unreachable branches),
 hardcoded values that should be config, copy-pasted logic that should be extracted,
 error swallowing (catch + ignore), coupling assessment, extension points, migration paths,
 TODO/FIXME/HACK comments, console.log in production, file/function size (>500 lines / >50 lines).
@@ -314,347 +295,7 @@ Check if the implementation will accommodate change in 6 months without major re
 
 SEVERITY: HIGH = architectural debt that blocks change. MEDIUM = quality erosion. LOW = hygiene.`;
 
-// ── File Helpers ───────────────────────────────────────────────────────────────
-
-function readFileOrDie(filePath) {
-  const resolved = path.resolve(filePath);
-  if (!fs.existsSync(resolved)) {
-    console.error(`Error: File not found: ${resolved}`);
-    process.exit(1);
-  }
-  return fs.readFileSync(resolved, 'utf-8');
-}
-
-// ── Project Context (Targeted) ───────────────────────────────────────────────
-// Instead of sending 8000 chars of CLAUDE.md to every pass, extract only the
-// sections relevant to each pass type. Saves ~2000 tokens per pass.
-
-let _claudeMdCache = null;
-function _getClaudeMd() {
-  if (_claudeMdCache !== null) return _claudeMdCache;
-  // Check both CLAUDE.md (Claude Code) and Agents.md (VS Code Copilot)
-  for (const name of ['CLAUDE.md', 'Agents.md', '.github/copilot-instructions.md']) {
-    const p = path.resolve(name);
-    if (fs.existsSync(p)) {
-      _claudeMdCache = fs.readFileSync(p, 'utf-8');
-      return _claudeMdCache;
-    }
-  }
-  _claudeMdCache = '';
-  return _claudeMdCache;
-}
-
-/**
- * Extract targeted CLAUDE.md sections for a specific audit pass.
- * Each pass gets only ~800-1500 chars instead of 8000.
- * @param {string} passName - structure|wiring|backend|frontend|sustainability|plan|rebuttal
- * @returns {string}
- */
-function readProjectContextForPass(passName) {
-  const content = _getClaudeMd();
-  if (!content) return '(No CLAUDE.md found)';
-
-  // Extract sections by heading (## Heading ... up to next ## or end)
-  function extractSections(patterns) {
-    const results = [];
-    for (const pat of patterns) {
-      const regex = new RegExp(`(## ${pat}[\\s\\S]*?)(?=\\n## [A-Z]|$)`, 'i');
-      const match = content.match(regex);
-      if (match) results.push(match[1].slice(0, 1500));
-    }
-    return results.join('\n\n').slice(0, 3000) || content.slice(0, 1500);
-  }
-
-  switch (passName) {
-    case 'structure':
-      return extractSections(['Code Organisation', 'Naming Conventions']);
-    case 'wiring':
-      return extractSections(['API Design', 'Frontend.*(API|Patterns)', 'Frontend API']);
-    case 'backend':
-      return extractSections(['Data Integrity', 'Multi-User', 'PostgreSQL', 'Code Style']);
-    case 'frontend':
-      return extractSections(['Frontend Patterns', 'Content Security Policy', 'CSP']);
-    case 'sustainability':
-      return extractSections(['Testing', 'Do NOT', 'Do ']);
-    case 'plan': case 'rebuttal':
-      // Plan audit gets a broader but still trimmed context
-      return content.slice(0, 4000);
-    default:
-      return content.slice(0, 2000);
-  }
-}
-
-// Backward compat: full context for single-call modes (plan, rebuttal)
-function readProjectContext() {
-  const content = _getClaudeMd();
-  return content ? content.slice(0, 4000) : '(No CLAUDE.md found — auditing without project context)';
-}
-
-// ── Plan Section Extraction ──────────────────────────────────────────────────
-// Instead of sending 6000 chars of plan to every pass, extract targeted sections.
-
-/**
- * Extract plan sections relevant to a specific audit pass.
- * Falls back to truncated full plan if sections can't be found.
- * @param {string} planContent - Full plan text
- * @param {string} passName - structure|wiring|backend|frontend|sustainability
- * @returns {string}
- */
-function extractPlanForPass(planContent, passName) {
-  const sectionPatterns = {
-    structure: ['File.Level Plan', 'Architecture', 'Files', 'Structure'],
-    wiring: ['API', 'Route', 'Endpoint', 'Contract', 'Wiring'],
-    backend: ['Backend', 'Database', 'Service', 'Logic', 'Schema'],
-    frontend: ['Frontend', 'UI', 'User Flow', 'Component', 'Layout', 'UX'],
-    sustainability: ['Sustainability', 'Testing', 'Risk', 'Trade.off', 'Error']
-  };
-
-  const patterns = sectionPatterns[passName];
-  if (!patterns) return planContent.length > 4000 ? planContent.slice(0, 4000) : planContent;
-
-  const sections = [];
-  for (const pat of patterns) {
-    const regex = new RegExp(`(##+ .*${pat}[\\s\\S]*?)(?=\\n##+ |$)`, 'i');
-    const match = planContent.match(regex);
-    if (match) sections.push(match[1]);
-  }
-
-  if (sections.length > 0) {
-    const combined = sections.join('\n\n');
-    return combined.length > 4000 ? combined.slice(0, 4000) + '\n...[truncated]' : combined;
-  }
-  // Fallback: truncated full plan
-  return planContent.length > 3000 ? planContent.slice(0, 3000) + '\n...[plan truncated]' : planContent;
-}
-
-// ── History Context Builder ─────────────────────────────────────────────────
-// Compresses prior round results into an efficient context block for GPT,
-// so it knows what was already found, fixed, challenged, and resolved.
-
-/**
- * Build a compact audit history block from a history JSON file.
- * @param {string} historyPath - Path to history JSON file
- * @returns {string} Markdown block for injection into prompt, or empty string
- */
-function buildHistoryContext(historyPath) {
-  if (!historyPath) return '';
-  const abs = path.resolve(historyPath);
-  if (!fs.existsSync(abs)) {
-    process.stderr.write(`  [history] File not found: ${abs} — proceeding without history\n`);
-    return '';
-  }
-
-  let rounds;
-  try {
-    rounds = JSON.parse(fs.readFileSync(abs, 'utf-8'));
-  } catch (err) {
-    process.stderr.write(`  [history] Failed to parse: ${err.message}\n`);
-    return '';
-  }
-
-  if (!Array.isArray(rounds) || rounds.length === 0) return '';
-
-  const lines = ['## Prior Audit History (DO NOT re-raise resolved items)\n'];
-  lines.push(`${rounds.length} prior round(s). Only raise GENUINELY NEW or UNFIXED findings.\n`);
-
-  for (const round of rounds) {
-    lines.push(`### Round ${round.round ?? '?'}`);
-    const findings = round.findings ?? [];
-    if (findings.length > 0) {
-      lines.push(`Findings (${findings.length}):`);
-      for (const f of findings) lines.push(`  ${f.id} [${f.severity}] ${(f.detail ?? f.category ?? '').slice(0, 120)}`);
-    }
-    if (round.fixed_ids?.length) lines.push(`Fixed: ${round.fixed_ids.join(', ')}`);
-    if (round.dismissed_ids?.length) lines.push(`Dismissed: ${round.dismissed_ids.join(', ')}`);
-    if (round.resolutions?.length) {
-      for (const r of round.resolutions) lines.push(`  ${r.finding_id}: ${r.gpt_ruling} → ${r.final_severity}`);
-    }
-    lines.push('');
-  }
-
-  lines.push('IMPORTANT: Do NOT re-raise findings in the Fixed or Dismissed lists above.\n');
-  const block = lines.join('\n');
-  process.stderr.write(`  [history] Loaded ${rounds.length} round(s), ${block.length} chars\n`);
-  return block;
-}
-
-// ── Output Helpers ──────────────────────────────────────────────────────────
-
-/**
- * Write output to file or stdout. When --out is specified, JSON goes to file
- * and only a 1-line summary goes to stdout (keeps terminal clean for copilots).
- */
-function writeOutput(data, outPath, summaryLine) {
-  const json = JSON.stringify(data, null, 2);
-  if (outPath) {
-    const abs = path.resolve(outPath);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, json, 'utf-8');
-    process.stderr.write(`  [out] Results written to ${abs}\n`);
-    console.log(summaryLine);
-  } else {
-    console.log(json);
-  }
-}
-
-/**
- * Extract source file paths from a plan. Purely regex-driven, works for any plan.
- * @param {string} planContent
- * @returns {{found: string[], missing: string[], allPaths: Set<string>}}
- */
-function extractPlanPaths(planContent) {
-  const paths = new Set();
-  let match;
-
-  // Code file extensions to match
-  const EXT = 'js|mjs|ts|tsx|jsx|sql|css|html|json|md|py|rs|go|java|rb|sh';
-
-  // 1. Any relative path with at least one directory separator and a code extension
-  //    Matches: src/foo.js, scripts/bar.mjs, .claude/skills/x/SKILL.md, lib/utils/helper.ts
-  const genericPathRegex = new RegExp(`(?:^|\\s|\\\`|\\()((?:\\.?[\\w.-]+\\/)+[\\w.-]+\\.(?:${EXT}))`, 'gm');
-  while ((match = genericPathRegex.exec(planContent)) !== null) {
-    const p = match[1].replace(/^\.\//,''); // Normalize ./foo → foo
-    if (!p.startsWith('http') && !p.startsWith('node_modules')) paths.add(p);
-  }
-
-  // 2. Backtick-quoted paths (highest confidence — explicitly referenced in plan)
-  const btRegex = new RegExp(`\\\`((?:\\.?[\\w.-]+\\/)+[\\w.-]+\\.(?:${EXT}))\\\``, 'gm');
-  while ((match = btRegex.exec(planContent)) !== null) {
-    const p = match[1].replace(/^\.\//,'');
-    if (!p.startsWith('http') && !p.startsWith('node_modules')) paths.add(p);
-  }
-
-  // 3. Filename-only headers (#### `foo.js`) — try to resolve in common dirs
-  const fnRegex = /####\s+`([^/`]+\.(?:js|mjs|ts|md))`/gm;
-  while ((match = fnRegex.exec(planContent)) !== null) {
-    const filename = match[1];
-    if ([...paths].some(p => p.endsWith('/' + filename) || p === filename)) continue;
-    // Search common project directories
-    const searchDirs = [
-      'src/config', 'src/routes', 'src/services', 'src/schemas',
-      'scripts', 'lib', 'utils', '.claude/skills', '.github/skills'
-    ];
-    for (const dir of searchDirs) {
-      const candidate = `${dir}/${filename}`;
-      if (fs.existsSync(path.resolve(candidate))) { paths.add(candidate); break; }
-    }
-  }
-
-  // 4. Deduplicate paths that resolve to the same file
-  const resolved = new Map();
-  for (const p of paths) {
-    const abs = path.resolve(p);
-    if (!resolved.has(abs)) resolved.set(abs, p);
-  }
-
-  const found = [];
-  const missing = [];
-  for (const p of [...resolved.values()].sort()) {
-    (fs.existsSync(path.resolve(p)) ? found : missing).push(p);
-  }
-  return { found, missing, allPaths: new Set(resolved.values()) };
-}
-
-/**
- * Read file contents, truncated per file, capped total.
- * @param {string[]} filePaths - Relative paths to read
- * @param {object} opts
- * @param {number} [opts.maxPerFile=10000]
- * @param {number} [opts.maxTotal=120000]
- * @returns {string} Markdown block with file contents
- */
-// Sensitive file patterns — never send to external API
-const SENSITIVE_PATTERNS = [
-  /\.env$/i, /\.env\./i, /secret/i, /credential/i, /\.pem$/i, /\.key$/i,
-  /password/i, /token/i, /\.pfx$/i, /\.p12$/i, /id_rsa/i, /id_ed25519/i
-];
-
-function isSensitiveFile(relPath) {
-  const basename = path.basename(relPath);
-  return SENSITIVE_PATTERNS.some(p => p.test(basename));
-}
-
-function readFilesAsContext(filePaths, { maxPerFile = 10000, maxTotal = 120000 } = {}) {
-  let total = '';
-  let omitted = 0;
-  let sensitive = 0;
-
-  const cwdBoundary = path.resolve('.'); // Defence-in-depth: don't read outside project
-
-  for (const relPath of filePaths) {
-    if (isSensitiveFile(relPath)) { sensitive++; continue; }
-
-    const absPath = path.resolve(relPath);
-    if (!absPath.startsWith(cwdBoundary)) { omitted++; continue; } // Path traversal guard
-    if (!fs.existsSync(absPath)) continue;
-
-    const raw = fs.readFileSync(absPath, 'utf-8');
-    const ext = relPath.split('.').pop();
-    const lang = { sql: 'sql', css: 'css', html: 'html', md: 'markdown', json: 'json', py: 'python', rs: 'rust', go: 'go', java: 'java', rb: 'ruby', sh: 'bash' }[ext] ?? 'js';
-    const content = raw.length > maxPerFile
-      ? raw.slice(0, maxPerFile) + `\n... [TRUNCATED — ${raw.length} chars total]`
-      : raw;
-    const block = `### ${relPath}\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
-
-    if (total.length + block.length > maxTotal) { omitted++; continue; }
-    total += block;
-  }
-
-  if (omitted > 0) total += `\n... [${omitted} file(s) omitted — context budget reached]\n`;
-  if (sensitive > 0) total += `\n... [${sensitive} sensitive file(s) excluded (.env, secrets, keys)]\n`;
-  return total;
-}
-
-/**
- * Classify files as backend, frontend, or shared.
- * @param {string[]} filePaths
- * @returns {{backend: string[], frontend: string[], shared: string[]}}
- */
-function classifyFiles(filePaths) {
-  const backend = [];
-  const frontend = [];
-  const shared = [];
-
-  // Frontend indicators
-  const fePatterns = [/^public\//, /\/css\//, /\/html\//, /\.css$/, /\.html$/, /\/components\//];
-  // Shared indicators (config, schemas, types used by both)
-  const sharedPatterns = [/\/config\//, /\/schemas\//, /\/types\//, /\/shared\//, /\.json$/];
-
-  for (const p of filePaths) {
-    if (fePatterns.some(rx => rx.test(p))) {
-      frontend.push(p);
-    } else if (sharedPatterns.some(rx => rx.test(p))) {
-      shared.push(p);
-    } else {
-      backend.push(p); // Default: routes, services, scripts, lib, etc.
-    }
-  }
-
-  return { backend, frontend, shared };
-}
-
-function formatFindings(findings) {
-  const groups = { HIGH: [], MEDIUM: [], LOW: [] };
-  for (const f of findings) (groups[f.severity] ?? groups.LOW).push(f);
-
-  let output = '';
-  for (const [sev, items] of Object.entries(groups)) {
-    if (!items.length) continue;
-    output += `\n### ${sev} Severity\n\n`;
-    for (const f of items) {
-      output += `#### [${f.id}] ${f.category}: ${f.section}\n`;
-      output += `- **Detail**: ${f.detail}\n`;
-      if (sev !== 'LOW') {
-        output += `- **Risk**: ${f.risk}\n`;
-        output += `- **Principle**: ${f.principle}\n`;
-      }
-      output += `- **Recommendation**: ${f.recommendation}\n`;
-      if (f.is_quick_fix) output += `- **WARNING**: Quick fix — needs proper sustainable solution\n`;
-      output += '\n';
-    }
-  }
-  return output;
-}
+const PASS_SUSTAINABILITY_SYSTEM = PASS_SUSTAINABILITY_OBJECTIVE_R1 + '\n\n' + PASS_SUSTAINABILITY_RUBRIC;
 
 // ── GPT API Call Helper ────────────────────────────────────────────────────────
 
@@ -755,6 +396,119 @@ async function safeCallGPT(openai, opts, emptyResult) {
   }
 }
 
+// ── Map-Reduce Pass ──────────────────────────────────────────────────────────
+
+/**
+ * Run a single pass using map-reduce when file count exceeds MAP_REDUCE_THRESHOLD.
+ * MAP: parallel GPT calls per audit unit (chunked file groups).
+ * REDUCE: single synthesis call to deduplicate, elevate patterns, rank findings.
+ *
+ * @param {OpenAI} openai - OpenAI client
+ * @param {string[]} files - Files to audit in this pass
+ * @param {string} systemPrompt - System prompt for map units
+ * @param {string} projectBrief - Project context brief
+ * @param {string} planContent - Plan content for context
+ * @param {string} passName - Name of the pass (for logging)
+ * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
+ */
+async function runMapReducePass(openai, files, systemPrompt, projectBrief, planContent, passName) {
+  const units = buildAuditUnits(files);
+
+  // MAP phase: parallel calls with concurrency limit
+  const CONCURRENCY_LIMIT = safeInt(process.env.MAP_REDUCE_CONCURRENCY, 5);
+  let active = 0;
+  const queue = [];
+  const acquireSlot = () => active < CONCURRENCY_LIMIT ? (active++, Promise.resolve()) : new Promise(r => queue.push(r));
+  const releaseSlot = () => queue.length > 0 ? queue.shift()() : active--;
+
+  process.stderr.write(`  [${passName}] MAP: ${units.length} units, concurrency=${CONCURRENCY_LIMIT}\n`);
+  const mapStart = Date.now();
+
+  const results = await Promise.allSettled(
+    units.map(async (unit, i) => {
+      await acquireSlot();
+      try {
+        const context = unit.chunk
+          ? `// ${unit.files[0]} (chunk)\n${unit.chunk.imports}\n\n${unit.chunk.items.map(it => it.source).join('\n\n')}`
+          : readFilesAsContext(unit.files, { maxPerFile: 10000, maxTotal: 80000 });
+
+        const limits = computePassLimits(context.length, 'high');
+        return await callGPT(openai, {
+          systemPrompt,
+          userPrompt: `## Project Brief\n${projectBrief}\n\n## Audit Unit ${i + 1}/${units.length} (${unit.files.length} files)\n\n## Code\n${context}`,
+          schema: PassFindingsSchema,
+          schemaName: `map_${passName}_${i}`,
+          reasoning: 'high',
+          ...limits,
+          passName: `map-${passName}-${i}`
+        });
+      } finally {
+        releaseSlot();
+      }
+    })
+  );
+
+  // Collect findings
+  const allFindings = [];
+  let failedUnits = 0;
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].status === 'fulfilled') {
+      for (const f of (results[i].value.result.findings || [])) {
+        f._mapUnit = i;
+        allFindings.push(f);
+      }
+    } else {
+      failedUnits++;
+      process.stderr.write(`  [map-${passName}-${i}] FAILED: ${results[i].reason?.message || 'unknown'}\n`);
+    }
+  }
+
+  process.stderr.write(`  [${passName}] MAP done: ${allFindings.length} findings from ${units.length - failedUnits}/${units.length} units (${((Date.now() - mapStart) / 1000).toFixed(1)}s)\n`);
+
+  if (allFindings.length === 0) {
+    return {
+      result: { pass_name: passName, findings: [], quick_fix_warnings: [], summary: `Map-reduce: ${units.length} units, 0 findings. ${failedUnits} units failed.` },
+      usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 },
+      latencyMs: Date.now() - mapStart
+    };
+  }
+
+  // REDUCE phase: single synthesis call
+  process.stderr.write(`  [${passName}] REDUCE: synthesizing ${allFindings.length} findings\n`);
+
+  // Token budget: cap findings at ~30K tokens
+  const findingsForReduce = allFindings.sort((a, b) => {
+    const sevOrder = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+    return (sevOrder[a.severity] ?? 2) - (sevOrder[b.severity] ?? 2);
+  });
+  let findingsJson = JSON.stringify(findingsForReduce.map(f => ({
+    id: f.id, severity: f.severity, category: f.category,
+    section: f.section, detail: f.detail?.slice(0, 200),
+    is_quick_fix: f.is_quick_fix, _mapUnit: f._mapUnit
+  })), null, 2);
+  if (findingsJson.length > 120000) {
+    findingsJson = findingsJson.slice(0, 120000) + '\n... [truncated]';
+  }
+
+  const reduceLimits = computePassLimits(findingsJson.length + 2000, 'medium');
+  const reduceResult = await safeCallGPT(openai, {
+    systemPrompt: REDUCE_SYSTEM_PROMPT,
+    userPrompt: `## Findings from ${units.length} audit units (${failedUnits} failed):\n\n${findingsJson}\n\n## Tasks:\n1. Deduplicate\n2. Elevate systemic patterns (3+ occurrences)\n3. Flag cross-file issues\n4. Rank by severity`,
+    schema: PassFindingsSchema,
+    schemaName: `reduce_${passName}`,
+    reasoning: 'medium',
+    ...reduceLimits,
+    passName: `reduce-${passName}`
+  }, { pass_name: passName, findings: allFindings, quick_fix_warnings: [], summary: 'Reduce phase failed — returning raw map findings' });
+
+  const totalLatency = Date.now() - mapStart;
+  return {
+    result: reduceResult.result,
+    usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: totalLatency },
+    latencyMs: totalLatency
+  };
+}
+
 // ── Multi-Pass Code Audit ──────────────────────────────────────────────────────
 
 /**
@@ -762,7 +516,7 @@ async function safeCallGPT(openai, opts, emptyResult) {
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null } = {}) {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -773,10 +527,57 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   const { found, missing, allPaths } = extractPlanPaths(planContent);
   const { backend, frontend, shared } = classifyFiles(found);
 
+  // Record audit start in cloud store (fire-and-forget)
+  let cloudRunId = null;
+  if (isCloudEnabled() && repoProfile) {
+    const repoId = await upsertRepo(repoProfile, path.basename(path.resolve('.'))).catch(() => null);
+    if (repoId) {
+      cloudRunId = await recordRunStart(repoId, 'plan', 'code').catch(() => null);
+    }
+  }
+
   // Split backend into routes vs services for manageable chunk sizes
   const backendRoutes = backend.filter(f => f.includes('/routes/'));
   const backendServices = backend.filter(f => !f.includes('/routes/'));
   const splitBackend = backend.length > BACKEND_SPLIT_THRESHOLD;
+
+  // ── R2+ initialization ──────────────────────────────────────────────────────
+  const isR2Plus = round >= 2;
+  let ledger = null, diffMap = null, impactSet = [];
+
+  if (isR2Plus) {
+    process.stderr.write(`\n═══ R${round} MODE ═══\n`);
+
+    // Load ledger
+    if (ledgerFile) {
+      try {
+        ledger = JSON.parse(fs.readFileSync(path.resolve(ledgerFile), 'utf-8'));
+        process.stderr.write(`  [ledger] Loaded ${ledger.entries?.length ?? 0} entries\n`);
+      } catch (err) {
+        process.stderr.write(`  [ledger] Failed: ${err.message} — proceeding without suppression\n`);
+        ledger = { version: 1, entries: [] };
+      }
+    } else {
+      process.stderr.write(`  [ledger] No --ledger provided; R2+ suppression disabled\n`);
+      ledger = { version: 1, entries: [] };
+    }
+
+    // Parse diff
+    if (diffFile) {
+      diffMap = parseDiffFile(diffFile);
+    }
+
+    // Compute impact set
+    impactSet = computeImpactSet(changedFiles, found);
+    process.stderr.write(`  [R2+] Impact: ${impactSet.length} files (${changedFiles.length} changed + ${impactSet.length - changedFiles.length} dependents)\n`);
+  }
+
+  // Phase 6: Register default prompt variants as bandit arms (if not already)
+  if (bandit) {
+    for (const pass of ['structure', 'wiring', 'backend', 'frontend', 'sustainability']) {
+      bandit.addArm(pass, 'default');
+    }
+  }
 
   process.stderr.write(`\nMulti-pass code audit: ${found.length} files found, ${missing.length} missing, ${allPaths.size} referenced\n`);
   process.stderr.write(`  Backend: ${backend.length} files (${backendRoutes.length} routes, ${backendServices.length} services) + ${shared.length} shared\n`);
@@ -801,8 +602,20 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  File scope: ${fileFilter.length} files → ${scopedBackend.length} BE + ${scopedFrontend.length} FE in scope\n`);
   }
 
-  // Helper: should a pass run?
-  const shouldRun = (name) => !passFilter || passFilter.includes(name);
+  // Helper: should a pass run? Checks --passes filter + repo profile relevance
+  const shouldRunPass = (name) => {
+    if (passFilter && !passFilter.includes(name)) return false;
+    if (repoProfile?.passRelevance && repoProfile.passRelevance[name] === false) {
+      process.stderr.write(`  ${name} SKIPPED (repo profile: not relevant)\n`);
+      return false;
+    }
+    return true;
+  };
+
+  // Inject priority focus areas from repo profile into system prompts
+  const focusBlock = repoProfile?.focusAreas?.length > 0
+    ? `\n\nPRIORITY CHECKS for this codebase:\n${repoProfile.focusAreas.map(f => `- ${f}`).join('\n')}\n`
+    : '';
 
   // Read shared files ONCE — reuse across passes that need them
   const sharedContext = shared.length > 0 ? readFilesAsContext(shared, { maxPerFile: 6000, maxTotal: 20000 }) : '';
@@ -814,14 +627,14 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   // Skippable on Round 2+ via --passes (structure rarely changes after R1)
   const wave1Promises = [];
 
-  if (shouldRun('structure')) {
+  if (shouldRunPass('structure')) {
     const structureContextChars = baseContextChars + measureContextChars(found, 2000);
     const structureLimits = computePassLimits(structureContextChars, 'low');
     process.stderr.write(`\n── Wave 1: Structure + Wiring (parallel, reasoning: low) ──\n`);
     const structureFiles = readFilesAsContext(found, { maxPerFile: 2000, maxTotal: 30000 });
     wave1Promises.push(
       safeCallGPT(openai, {
-        systemPrompt: PASS_STRUCTURE_SYSTEM,
+        systemPrompt: PASS_STRUCTURE_SYSTEM + focusBlock,
         userPrompt: `## Project Context\n${readProjectContextForPass('structure')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'structure')}\n\n${fileListContext}\n\n## File Signatures\n${structureFiles}`,
         schema: StructurePassSchema,
         schemaName: 'structure_pass',
@@ -835,13 +648,13 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     wave1Promises.push(Promise.resolve({ result: EMPTY_STRUCTURE, usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: 0 }, latencyMs: 0 }));
   }
 
-  if (shouldRun('wiring')) {
+  if (shouldRunPass('wiring')) {
     const wiringFiles = found.filter(f => f.includes('/api/') || f.includes('/routes/'));
     const wiringContextChars = baseContextChars + measureContextChars(wiringFiles, 8000) + sharedContext.length;
     const wiringLimits = computePassLimits(wiringContextChars, 'low');
     wave1Promises.push(
       safeCallGPT(openai, {
-        systemPrompt: PASS_WIRING_SYSTEM,
+        systemPrompt: PASS_WIRING_SYSTEM + focusBlock,
         userPrompt: `## Project Context\n${readProjectContextForPass('wiring')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'wiring')}\n\n${fileListContext}\n\n## API & Route Files\n${readFilesAsContext(wiringFiles, { maxPerFile: 8000, maxTotal: 60000 })}\n\n## Shared Files\n${sharedContext}`,
         schema: WiringPassSchema,
         schemaName: 'wiring_pass',
@@ -871,75 +684,125 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   const effectiveBackend = fileFilter ? scopedBackend : backend;
   const effectiveFrontend = fileFilter ? scopedFrontend : frontend;
 
-  if (shouldRun('backend')) {
+  if (shouldRunPass('backend')) {
     if (splitBackend) {
       if (effectiveRoutes.length > 0) {
-        const limits = computePassLimits(baseContextChars + measureContextChars(effectiveRoutes, 8000) + sharedContext.length, 'high');
-        process.stderr.write(`  be-routes: ${effectiveRoutes.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
         backendPassNames.push('be-routes');
-        wave2Promises.push(
-          safeCallGPT(openai, {
-            systemPrompt: PASS_BACKEND_SYSTEM,
-            userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend ROUTES\n${readFilesAsContext(effectiveRoutes, { maxPerFile: 8000, maxTotal: 60000 })}\n\n## Shared Files\n${sharedContext}`,
-            schema: PassFindingsSchema,
-            schemaName: 'backend_routes_pass',
-            reasoning: 'high',
-            ...limits,
-            passName: 'be-routes'
-          }, EMPTY_FINDINGS)
-        );
+        if (effectiveRoutes.length > MAP_REDUCE_THRESHOLD) {
+          process.stderr.write(`  [be-routes] ${effectiveRoutes.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+          const beRoutesSystemPrompt = (isR2Plus
+            ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
+            : PASS_BACKEND_SYSTEM) + focusBlock;
+          wave2Promises.push(
+            runMapReducePass(openai, effectiveRoutes, beRoutesSystemPrompt, beCtx, bePlan, 'be-routes')
+          );
+        } else {
+          const limits = computePassLimits(baseContextChars + measureContextChars(effectiveRoutes, 8000) + sharedContext.length, 'high');
+          process.stderr.write(`  be-routes: ${effectiveRoutes.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
+          wave2Promises.push(
+            safeCallGPT(openai, {
+              systemPrompt: (isR2Plus
+                ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
+                : PASS_BACKEND_SYSTEM) + focusBlock,
+              userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend ROUTES\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(effectiveRoutes, diffMap, { maxPerFile: 8000, maxTotal: 60000 }) : readFilesAsContext(effectiveRoutes, { maxPerFile: 8000, maxTotal: 60000 })}\n\n## Shared Files\n${sharedContext}`,
+              schema: PassFindingsSchema,
+              schemaName: 'backend_routes_pass',
+              reasoning: 'high',
+              ...limits,
+              passName: 'be-routes'
+            }, EMPTY_FINDINGS)
+          );
+        }
       }
       if (effectiveServices.length > 0) {
-        const limits = computePassLimits(baseContextChars + measureContextChars(effectiveServices, 8000), 'high');
-        process.stderr.write(`  be-services: ${effectiveServices.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
         backendPassNames.push('be-services');
+        if (effectiveServices.length > MAP_REDUCE_THRESHOLD) {
+          process.stderr.write(`  [be-services] ${effectiveServices.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+          const beServicesSystemPrompt = (isR2Plus
+            ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
+            : PASS_BACKEND_SYSTEM) + focusBlock;
+          wave2Promises.push(
+            runMapReducePass(openai, effectiveServices, beServicesSystemPrompt, beCtx, bePlan, 'be-services')
+          );
+        } else {
+          const limits = computePassLimits(baseContextChars + measureContextChars(effectiveServices, 8000), 'high');
+          process.stderr.write(`  be-services: ${effectiveServices.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
+          wave2Promises.push(
+            safeCallGPT(openai, {
+              systemPrompt: (isR2Plus
+                ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
+                : PASS_BACKEND_SYSTEM) + focusBlock,
+              userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend SERVICES\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(effectiveServices, diffMap, { maxPerFile: 8000, maxTotal: 80000 }) : readFilesAsContext(effectiveServices, { maxPerFile: 8000, maxTotal: 80000 })}`,
+              schema: PassFindingsSchema,
+              schemaName: 'backend_services_pass',
+              reasoning: 'high',
+              ...limits,
+              passName: 'be-services'
+            }, EMPTY_FINDINGS)
+          );
+        }
+      }
+    } else if (effectiveBackend.length > 0) {
+      backendPassNames.push('backend');
+      if (effectiveBackend.length > MAP_REDUCE_THRESHOLD) {
+        process.stderr.write(`  [backend] ${effectiveBackend.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+        const beSystemPrompt = (isR2Plus
+          ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
+          : PASS_BACKEND_SYSTEM) + focusBlock;
+        wave2Promises.push(
+          runMapReducePass(openai, effectiveBackend, beSystemPrompt, beCtx, bePlan, 'backend')
+        );
+      } else {
+        const limits = computePassLimits(baseContextChars + measureContextChars(effectiveBackend, 8000) + sharedContext.length, 'high');
+        process.stderr.write(`  backend: ${effectiveBackend.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
         wave2Promises.push(
           safeCallGPT(openai, {
-            systemPrompt: PASS_BACKEND_SYSTEM,
-            userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend SERVICES\n${readFilesAsContext(effectiveServices, { maxPerFile: 8000, maxTotal: 80000 })}`,
+            systemPrompt: (isR2Plus
+              ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
+              : PASS_BACKEND_SYSTEM) + focusBlock,
+            userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend Implementation Files\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(effectiveBackend, diffMap, { maxPerFile: 8000, maxTotal: 80000 }) : readFilesAsContext(effectiveBackend, { maxPerFile: 8000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
             schema: PassFindingsSchema,
-            schemaName: 'backend_services_pass',
+            schemaName: 'backend_pass',
             reasoning: 'high',
             ...limits,
-            passName: 'be-services'
+            passName: 'backend'
           }, EMPTY_FINDINGS)
         );
       }
-    } else if (effectiveBackend.length > 0) {
-      const limits = computePassLimits(baseContextChars + measureContextChars(effectiveBackend, 8000) + sharedContext.length, 'high');
-      process.stderr.write(`  backend: ${effectiveBackend.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
-      backendPassNames.push('backend');
-      wave2Promises.push(
-        safeCallGPT(openai, {
-          systemPrompt: PASS_BACKEND_SYSTEM,
-          userPrompt: `## Project Context\n${beCtx}\n${historyBlock}\n## Plan\n${bePlan}\n\n## Backend Implementation Files\n${readFilesAsContext(effectiveBackend, { maxPerFile: 8000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
-          schema: PassFindingsSchema,
-          schemaName: 'backend_pass',
-          reasoning: 'high',
-          ...limits,
-          passName: 'backend'
-        }, EMPTY_FINDINGS)
-      );
     }
   } else {
     process.stderr.write(`  backend SKIPPED (--passes)\n`);
   }
 
-  if (shouldRun('frontend') && effectiveFrontend.length > 0) {
-    const limits = computePassLimits(baseContextChars + measureContextChars(effectiveFrontend, 10000) + sharedContext.length, 'high');
-    process.stderr.write(`  frontend: ${effectiveFrontend.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
-    wave2Promises.push(
-      safeCallGPT(openai, {
-        systemPrompt: PASS_FRONTEND_SYSTEM,
-        userPrompt: `## Project Context\n${readProjectContextForPass('frontend')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'frontend')}\n\n## Frontend Implementation Files\n${readFilesAsContext(effectiveFrontend, { maxPerFile: 10000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
-        schema: PassFindingsSchema,
-        schemaName: 'frontend_pass',
-        reasoning: 'high',
-        ...limits,
-        passName: 'frontend'
-      }, EMPTY_FINDINGS)
-    );
-  } else if (!shouldRun('frontend')) {
+  if (shouldRunPass('frontend') && effectiveFrontend.length > 0) {
+    if (effectiveFrontend.length > MAP_REDUCE_THRESHOLD) {
+      process.stderr.write(`  [frontend] ${effectiveFrontend.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+      const feSystemPrompt = (isR2Plus
+        ? buildR2SystemPrompt(PASS_FRONTEND_RUBRIC, buildRulingsBlock(ledgerFile, 'frontend', impactSet))
+        : PASS_FRONTEND_SYSTEM) + focusBlock;
+      const feCtx = readProjectContextForPass('frontend');
+      const fePlan = extractPlanForPass(planContent, 'frontend');
+      wave2Promises.push(
+        runMapReducePass(openai, effectiveFrontend, feSystemPrompt, feCtx, fePlan, 'frontend')
+      );
+    } else {
+      const limits = computePassLimits(baseContextChars + measureContextChars(effectiveFrontend, 10000) + sharedContext.length, 'high');
+      process.stderr.write(`  frontend: ${effectiveFrontend.length} files → ${limits.maxTokens} tok / ${(limits.timeoutMs/1000).toFixed(0)}s\n`);
+      wave2Promises.push(
+        safeCallGPT(openai, {
+          systemPrompt: (isR2Plus
+            ? buildR2SystemPrompt(PASS_FRONTEND_RUBRIC, buildRulingsBlock(ledgerFile, 'frontend', impactSet))
+            : PASS_FRONTEND_SYSTEM) + focusBlock,
+          userPrompt: `## Project Context\n${readProjectContextForPass('frontend')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'frontend')}\n\n## Frontend Implementation Files\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(effectiveFrontend, diffMap, { maxPerFile: 10000, maxTotal: 80000 }) : readFilesAsContext(effectiveFrontend, { maxPerFile: 10000, maxTotal: 80000 })}\n\n## Shared Files\n${sharedContext}`,
+          schema: PassFindingsSchema,
+          schemaName: 'frontend_pass',
+          reasoning: 'high',
+          ...limits,
+          passName: 'frontend'
+        }, EMPTY_FINDINGS)
+      );
+    }
+  } else if (!shouldRunPass('frontend')) {
     process.stderr.write(`  frontend SKIPPED (--passes)\n`);
   }
 
@@ -953,23 +816,36 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   // 4. Wave 3: Sustainability (reasoning: medium)
   let sustainResult;
-  if (shouldRun('sustainability')) {
+  if (shouldRunPass('sustainability')) {
     const sustainFiles = fileFilter ? found.filter(f => fileFilter.some(ff => f.includes(ff) || ff.includes(f))) : found;
-    const sustainContextChars = baseContextChars + measureContextChars(sustainFiles, 4000);
-    const sustainLimits = computePassLimits(sustainContextChars, 'medium');
 
     process.stderr.write(`\n── Wave 3: Sustainability (reasoning: medium) ──\n`);
-    process.stderr.write(`  ${sustainFiles.length} files → ${sustainLimits.maxTokens} tok / ${(sustainLimits.timeoutMs/1000).toFixed(0)}s\n`);
 
-    sustainResult = await safeCallGPT(openai, {
-      systemPrompt: PASS_SUSTAINABILITY_SYSTEM,
-      userPrompt: `## Project Context\n${readProjectContextForPass('sustainability')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'sustainability')}\n\n## All Implementation Files\n${readFilesAsContext(sustainFiles, { maxPerFile: 4000, maxTotal: 60000 })}`,
-      schema: SustainabilityPassSchema,
-      schemaName: 'sustainability_pass',
-      reasoning: 'medium',
-      ...sustainLimits,
-      passName: 'sustainability'
-    }, EMPTY_SUSTAIN);
+    if (sustainFiles.length > MAP_REDUCE_THRESHOLD) {
+      process.stderr.write(`  [sustainability] ${sustainFiles.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+      const sustainSystemPrompt = (isR2Plus
+        ? buildR2SystemPrompt(PASS_SUSTAINABILITY_RUBRIC, buildRulingsBlock(ledgerFile, 'sustainability', impactSet))
+        : PASS_SUSTAINABILITY_SYSTEM) + focusBlock;
+      const sustainCtx = readProjectContextForPass('sustainability');
+      const sustainPlan = extractPlanForPass(planContent, 'sustainability');
+      sustainResult = await runMapReducePass(openai, sustainFiles, sustainSystemPrompt, sustainCtx, sustainPlan, 'sustainability');
+    } else {
+      const sustainContextChars = baseContextChars + measureContextChars(sustainFiles, 4000);
+      const sustainLimits = computePassLimits(sustainContextChars, 'medium');
+      process.stderr.write(`  ${sustainFiles.length} files → ${sustainLimits.maxTokens} tok / ${(sustainLimits.timeoutMs/1000).toFixed(0)}s\n`);
+
+      sustainResult = await safeCallGPT(openai, {
+        systemPrompt: (isR2Plus
+          ? buildR2SystemPrompt(PASS_SUSTAINABILITY_RUBRIC, buildRulingsBlock(ledgerFile, 'sustainability', impactSet))
+          : PASS_SUSTAINABILITY_SYSTEM) + focusBlock,
+        userPrompt: `## Project Context\n${readProjectContextForPass('sustainability')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'sustainability')}\n\n## All Implementation Files\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(sustainFiles, diffMap, { maxPerFile: 4000, maxTotal: 60000 }) : readFilesAsContext(sustainFiles, { maxPerFile: 4000, maxTotal: 60000 })}`,
+        schema: SustainabilityPassSchema,
+        schemaName: 'sustainability_pass',
+        reasoning: 'medium',
+        ...sustainLimits,
+        passName: 'sustainability'
+      }, EMPTY_SUSTAIN);
+    }
   } else {
     process.stderr.write(`\n── Sustainability SKIPPED (--passes) ──\n`);
     sustainResult = { result: EMPTY_SUSTAIN, usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: 0 }, latencyMs: 0 };
@@ -983,13 +859,6 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   process.stderr.write(`\n── Merge (${allResults.length} passes, ${failedPasses.length} failed) ──\n`);
   if (failedPasses.length > 0) {
     process.stderr.write(`  Failed passes: ${failedPasses.join('; ')}\n`);
-  }
-
-  // Semantic finding ID: content-hash of category+section+detail (first 8 hex chars)
-  // Same issue keeps the same ID across rounds, making history matching exact
-  function semanticId(f) {
-    const content = `${f.category}|${f.section}|${f.detail}`.toLowerCase().trim();
-    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 8);
   }
 
   // Cross-pass dedup: if two passes flag the same issue (>80% word overlap on
@@ -1054,6 +923,50 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  Deduped ${dedupCount} cross-pass duplicate(s)\n`);
   }
 
+  // 5.5 Post-output suppression (R2+ only)
+  if (isR2Plus && ledger && ledger.entries.length > 0) {
+    // Enrich findings with structured metadata
+    for (const f of allFindings) {
+      populateFindingMetadata(f, f._pass);
+    }
+
+    let { kept, suppressed, reopened } = suppressReRaises(allFindings, ledger, { changedFiles, impactSet });
+
+    process.stderr.write(`\n═══════════════════════════════════════\n`);
+    process.stderr.write(`  R${round} POST-PROCESSING\n`);
+    process.stderr.write(`  Kept: ${kept.length} | Suppressed: ${suppressed.length} | Reopened: ${reopened.length}\n`);
+    if (suppressed.length > 0) {
+      for (const s of suppressed.slice(0, 5)) {
+        process.stderr.write(`    [suppressed] ${s.matchedTopic.slice(0,8)} score=${s.matchScore.toFixed(2)}\n`);
+      }
+    }
+    process.stderr.write(`═══════════════════════════════════════\n\n`);
+
+    // Phase 4: FP tracker — suppress patterns with historically high dismiss rates
+    if (fpTracker) {
+      const fpSuppressed = [];
+      const finalKept = [];
+      for (const f of kept) {
+        if (fpTracker.shouldSuppress(f)) {
+          fpSuppressed.push(f);
+          process.stderr.write(`    [fp-tracker] Auto-suppressed: ${f.category?.slice(0, 60)} (EMA < 0.15)\n`);
+        } else {
+          finalKept.push(f);
+        }
+      }
+      if (fpSuppressed.length > 0) {
+        process.stderr.write(`  [fp-tracker] Suppressed ${fpSuppressed.length} historically noisy findings\n`);
+        kept = finalKept;
+      }
+    }
+
+    // Replace findings with kept + reopened only
+    allFindings.length = 0;
+    allFindings.push(...kept, ...reopened);
+
+    // Recalculate counts (the existing code after this point uses allFindings for counting)
+  }
+
   const high = allFindings.filter(f => f.severity === 'HIGH').length;
   const medium = allFindings.filter(f => f.severity === 'MEDIUM').length;
   const low = allFindings.filter(f => f.severity === 'LOW').length;
@@ -1061,6 +974,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   let verdict = 'PASS';
   if (high > 0) verdict = 'SIGNIFICANT_ISSUES';
   else if (medium > 2) verdict = 'NEEDS_FIXES';
+  // Failed passes mean incomplete audit — don't report PASS with 0 findings if passes failed
+  if (verdict === 'PASS' && failedPasses.length > 0) verdict = 'INCOMPLETE';
 
   const totalUsage = {
     input_tokens: allResults.reduce((s, r) => s + (r.usage?.input_tokens ?? 0), 0),
@@ -1113,6 +1028,56 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     _usage: totalUsage
   };
 
+  // Phase 3-4: Record outcomes for learning
+  for (const f of allFindings) {
+    // Log locally (JSONL)
+    appendOutcome('.audit/outcomes.jsonl', {
+      findingId: f.id,
+      severity: f.severity,
+      category: f.category,
+      section: f.section,
+      pass: f._pass,
+      accepted: true, // Will be updated by orchestrator after deliberation
+      round,
+      promptVariant: 'default'
+    });
+  }
+
+  // Phase 3: Cloud store — record findings + pass stats (fire-and-forget)
+  if (cloudRunId) {
+    recordFindings(cloudRunId, allFindings, 'merged', round).catch(() => {});
+
+    // Record per-pass stats
+    const passResults = [
+      { name: 'structure', result: structureResult },
+      { name: 'wiring', result: wiringResult },
+      ...backendResults.map((r, i) => ({ name: backendPassNames[i] ?? 'backend', result: r })),
+      { name: 'frontend', result: frontendResult },
+      { name: 'sustainability', result: sustainResult }
+    ];
+    for (const pr of passResults) {
+      const findings = pr.result?.result?.findings ?? [];
+      recordPassStats(cloudRunId, pr.name, {
+        raised: findings.length,
+        accepted: 0, // Updated after deliberation
+        dismissed: 0,
+        compromised: 0,
+        inputTokens: pr.result?.usage?.input_tokens,
+        outputTokens: pr.result?.usage?.output_tokens,
+        latencyMs: pr.result?.latencyMs,
+        reasoning: pr.name === 'sustainability' ? 'medium' : 'high'
+      }).catch(() => {});
+    }
+
+    // Record suppression events if R2+
+    if (isR2Plus && mergedResult._suppression) {
+      recordSuppressionEvents(cloudRunId, mergedResult._suppression).catch(() => {});
+    }
+  }
+
+  // Attach cloud run ID to result for orchestrator reference
+  if (cloudRunId) mergedResult._cloudRunId = cloudRunId;
+
   // 6. Output
   if (outFile) {
     const summaryLine = `Verdict: ${verdict} | H:${high} M:${medium} L:${low} | ${(totalLatency / 1000).toFixed(0)}s`;
@@ -1158,6 +1123,17 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     console.log('\n## Pass Summaries\n');
     console.log(mergedResult.overall_reasoning);
   }
+
+  // Phase 7 readiness nudge (every 10 runs)
+  try {
+    const outcomes = loadOutcomes('.audit/outcomes.jsonl');
+    const runCount = new Set(outcomes.map(o => Math.floor(o.timestamp / 300000))).size;
+    if (runCount > 0 && runCount % 10 === 0 && runCount < 50) {
+      process.stderr.write(`\n  [phase-7] ${runCount}/50 audit runs completed — ${50 - runCount} more for predictive strategy\n`);
+    } else if (runCount >= 50) {
+      process.stderr.write(`\n  [phase-7] ✓ ${runCount} runs — Phase 7 (predictive strategy) is ready to implement!\n`);
+    }
+  } catch { /* ignore */ }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────────
@@ -1187,8 +1163,25 @@ async function main() {
   const filesIdx = args.indexOf('--files');
   const fileFilter = filesIdx !== -1 && args[filesIdx + 1] ? args[filesIdx + 1].split(',').map(s => s.trim()) : null;
 
+  // --round <n>: audit round number (default: 1). R2+ enables suppression, diff annotation, impact scoping
+  const roundIdx = args.indexOf('--round');
+  const round = roundIdx !== -1 && args[roundIdx + 1] ? parseInt(args[roundIdx + 1], 10) : 1;
+
+  // --ledger <file>: adjudication ledger for R2+ suppression of previously resolved findings
+  const ledgerIdx = args.indexOf('--ledger');
+  const ledgerFile = ledgerIdx !== -1 && args[ledgerIdx + 1] ? args[ledgerIdx + 1] : null;
+
+  // --diff <file>: unified diff file for R2+ annotated context (highlights changed lines)
+  const diffIdx = args.indexOf('--diff');
+  const diffFile = diffIdx !== -1 && args[diffIdx + 1] ? args[diffIdx + 1] : null;
+
+  // --changed <list>: comma-separated changed file paths for R2+ impact set computation
+  const changedIdx = args.indexOf('--changed');
+  const changedFiles = changedIdx !== -1 && args[changedIdx + 1] ? args[changedIdx + 1].split(',').map(s => s.trim()) : [];
+
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
     console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>] [--passes <list>] [--files <list>]');
+    console.error('       node scripts/openai-audit.mjs code <plan-file> --round 2 --ledger <ledger.json> --diff <diff.patch> --changed <file1,file2>');
     console.error('       node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> [--json] [--out <file>]');
     process.exit(1);
   }
@@ -1205,13 +1198,21 @@ async function main() {
   }
 
   const planContent = readFileOrDie(planFile);
+  await initAuditBrief(); // Pre-generate context brief (Gemini Flash → Claude Haiku → regex)
+  const repoProfile = generateRepoProfile();
   const projectContext = readProjectContext();
   const historyContext = buildHistoryContext(historyFile);
+  // Initialize learning systems (graceful — never blocks audit)
+  const startMs = Date.now();
+  await initLearningStore().catch(() => {}); // Cloud store (optional)
+  const bandit = new PromptBandit();
+  const fpTracker = new FalsePositiveTracker();
+
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   // Code mode → multi-pass parallel audit
   if (mode === 'code') {
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter, round, ledgerFile, diffFile, changedFiles, repoProfile, bandit, fpTracker });
     return;
   }
 

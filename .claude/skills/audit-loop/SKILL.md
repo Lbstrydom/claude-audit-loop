@@ -1,10 +1,10 @@
 ---
 name: audit-loop
 description: |
-  Self-driving plan-audit-fix loop using Claude for planning and GPT-5.4 for independent auditing.
-  Claude and GPT-5.4 operate as PEERS — Claude can accept, partially accept, or challenge any finding.
-  Challenged findings go through a deliberation round where GPT-5.4 can sustain, overrule, or compromise.
-  Automates the full cycle: plan creation → GPT-5.4 audit → Claude deliberation → fix → re-audit → repeat.
+  Self-driving plan-audit-fix loop with adaptive learning.
+  Three-model system: Claude (author) + GPT-5.4 (auditor) + Gemini 3.1 Pro (final arbiter).
+  Features: R2+ suppression via adjudication ledger, map-reduce for large codebases,
+  repo-aware prompt tuning, cloud learning store (Supabase), Thompson Sampling prompt selection.
   Triggers on: "audit loop", "plan and audit", "run the audit loop", "auto-audit",
   "plan-audit-fix loop", "iterate on the plan", "GPT audit".
   Usage: /audit-loop <task-description>           — Full cycle: plan + audit loop
@@ -15,7 +15,7 @@ description: |
 
 # Self-Driving Audit Loop
 
-Orchestrate an automated plan-audit-fix quality loop. Show clear progress, not raw JSON.
+Orchestrate an automated plan-audit-fix quality loop with adaptive learning.
 
 **Input**: `$ARGUMENTS` — task description or `plan|code|full <path>`.
 
@@ -31,12 +31,15 @@ Orchestrate an automated plan-audit-fix quality loop. Show clear progress, not r
 | `<description>` | PLAN_CYCLE — plan → audit → fix → repeat |
 
 Validate: plan file exists (if applicable), `OPENAI_API_KEY` is set.
+Optional: `GEMINI_API_KEY` for final review (Step 6.5). `SUPABASE_AUDIT_URL` for cloud learning.
+
+Initialize session ID: `SID=audit-$(date +%s)`
 
 Show kickoff card:
 ```
 ═══════════════════════════════════════
   AUDIT LOOP — [MODE] — Starting
-  Plan: <path> | Max 6 rounds
+  Plan: <path> | Max 6 rounds | SID: $SID
 ═══════════════════════════════════════
 ```
 
@@ -50,59 +53,83 @@ Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<nam
 
 ## Step 2 — Run GPT-5.4 Audit
 
-Use `--out` for file output (clean terminal). Use `--history` from R2+ to prevent re-raising resolved findings.
-Use `--passes` and `--files` on R2+ for smart pass selection (skip redundant passes, scope to changed files).
+### Round 1 — Full audit
 
 ```bash
-# Round 1 — full audit, all passes
-node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json 2>/tmp/audit-$$-stderr.log
-
-# Round 2+ — delta audit: skip structure, scope to changed files, with history
-node scripts/openai-audit.mjs code <plan-file> --out /tmp/audit-$$-result.json \
-  --history /tmp/audit-$$-history.json \
-  --passes wiring,backend,frontend,sustainability \
-  --files src/routes/wines.js,src/services/wine/parser.js \
-  2>/tmp/audit-$$-stderr.log
+node scripts/openai-audit.mjs code <plan-file> \
+  --out /tmp/$SID-r1-result.json \
+  2>/tmp/$SID-r1-stderr.log
 ```
 
-Read result from the JSON file: `cat /tmp/audit-$$-result.json`
+### Round 2+ — R2+ mode with ledger, diff, and changed files
+
+```bash
+# Generate diff from fixes
+git diff HEAD~1 -- . > /tmp/$SID-diff.patch
+
+# Build changed + files lists from Step 4 fix list
+CHANGED="scripts/shared.mjs,scripts/openai-audit.mjs"
+FILES="$CHANGED,scripts/gemini-review.mjs"  # changed + dependents
+
+# Determine passes
+PASSES="sustainability"  # always include
+# Add backend if any backend file changed, frontend if frontend changed, etc.
+
+node scripts/openai-audit.mjs code <plan-file> \
+  --round 2 \
+  --ledger /tmp/$SID-ledger.json \
+  --diff /tmp/$SID-diff.patch \
+  --changed $CHANGED \
+  --files $FILES \
+  --passes $PASSES \
+  --out /tmp/$SID-r2-result.json \
+  2>/tmp/$SID-r2-stderr.log
+```
+
+### CLI Flag Contract
+
+| Flag | Source | Purpose |
+|------|--------|---------|
+| `--round <n>` | Orchestrator | Triggers R2+ mode (rulings, suppression, annotations) |
+| `--ledger <path>` | Step 3.5 output | Adjudication ledger for rulings injection + suppression |
+| `--diff <path>` | `git diff` output | Line-level change annotations in code context |
+| `--changed <list>` | Step 4 fix list | **Authoritative** source for what was modified (reopen detection) |
+| `--files <list>` | changed + dependents | Audit scope — what GPT sees in context |
+| `--passes <list>` | Smart selection | Which passes to run |
 
 ### Smart Pass Selection (Round 2+)
 
 | Pass | When to skip on R2+ |
 |------|-------------------|
-| `structure` | Always skip (file existence doesn't change from fixes) |
+| `structure` | Skip ONLY if zero file additions/deletions/renames in the diff. Re-run if fixes created or deleted files. |
 | `wiring` | Skip unless a route or API file was changed |
-| `backend` | Run if any backend file changed — scope with `--files` |
-| `frontend` | Run if any frontend file changed — scope with `--files` |
-| `sustainability` | Always run (cross-cutting, catches fix regressions) |
+| `backend` | Run if any backend file changed |
+| `frontend` | Run if any frontend file changed |
+| `sustainability` | Always run (cross-cutting) |
 
-Build the `--passes` and `--files` args from your fix list:
-1. Collect all files you modified in Step 4
-2. Classify: route/API files → include `wiring`. Backend files → include `backend`. Frontend → `frontend`.
-3. Always include `sustainability`. Skip `structure`.
+### R2+ Automatic Behavior
 
-### History File
+When `--round >= 2`, the script automatically:
+1. **Loads ledger** → injects GPT's own prior rulings into system prompts
+2. **Parses diff** → annotates changed lines with `// ── CHANGED ──` markers
+3. **Computes impact set** → changed files + files that import from them
+4. **Uses R2+ prompts** → "verify fixes + check regressions" instead of "find all issues"
+5. **Post-output suppression** → fuzzy-matches findings against ledger, suppresses re-raises of dismissed items
+6. **FP tracker** → auto-suppresses finding patterns with historically high dismiss rates
 
-Maintain `/tmp/audit-$$-history.json` — append after each round's deliberation + fixes:
+### Handle Results
 
-```json
-[{
-  "round": 1,
-  "findings": [{"id": "H1", "severity": "HIGH", "detail": "Missing auth..."}],
-  "fixed_ids": ["H1", "M2"],
-  "dismissed_ids": ["M4"],
-  "resolutions": [{"finding_id": "M3", "gpt_ruling": "compromise", "final_severity": "LOW"}]
-}]
+Read stderr for pass timings and suppression stats:
+```bash
+cat /tmp/$SID-r1-stderr.log
 ```
 
-### Semantic Finding IDs
+Read result JSON:
+```bash
+cat /tmp/$SID-r1-result.json
+```
 
-The script assigns content-hashed IDs (`_hash` field) to each finding. Use these for exact cross-round matching instead of fuzzy word overlap. Same issue keeps the same hash across rounds.
-
-### Handle Failed Passes
-
-If `_failed_passes` is non-empty, show and offer: re-run with lower reasoning, continue with partial results, or split further.
+If `verdict` is `INCOMPLETE` (passes timed out), offer: re-run with higher timeout, or continue with partial results.
 
 ### Show Results
 
@@ -126,69 +153,103 @@ If `_failed_passes` is non-empty, show and offer: re-run with lower reasoning, c
 ### Finding Classification
 
 Each finding has `is_mechanical: true/false` set by GPT:
-- **Mechanical** (`is_mechanical: true`): deterministic fix — missing await, wrong operator, missing import. Fix immediately, no deliberation needed. These do NOT reset the stability counter.
-- **Architectural** (`is_mechanical: false`): judgment call — wrong abstraction, missing pattern, design issue. These need deliberation and DO reset stability if new.
+- **Mechanical** (`is_mechanical: true`): deterministic fix. Fix immediately, no deliberation needed.
+- **Architectural** (`is_mechanical: false`): judgment call. Needs deliberation, resets stability if new.
 
-### Tiered Rebuttal (Production-Grade)
+### Tiered Rebuttal
 
 | Finding Severity | Deliberation |
 |-----------------|-------------|
-| **HIGH** challenged/partial | ALWAYS send to GPT deliberation — stakes too high for single-model judgment |
-| **MEDIUM** challenged/partial | ALWAYS send to GPT deliberation — prod-critical issues like missing transactions |
-| **LOW** challenged | Claude decides locally — cosmetic/hygiene, not worth API call |
+| **HIGH** challenged/partial | ALWAYS send to GPT deliberation |
+| **MEDIUM** challenged/partial | ALWAYS send to GPT deliberation |
+| **LOW** challenged | Claude decides locally |
 
 Only send rebuttal if there are challenged/partial HIGH or MEDIUM findings:
 ```bash
-node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> --out /tmp/resolution-$$-result.json 2>/tmp/rebuttal-$$-stderr.log
+node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> \
+  --out /tmp/$SID-resolution.json 2>/tmp/$SID-rebuttal-stderr.log
 ```
 
 ### Convergence
 
 Quality threshold: `HIGH == 0 && MEDIUM <= 2 && quickFix == 0`
 
-Stability uses `_hash` for exact cross-round matching (no fuzzy overlap needed):
-- Compare finding hashes against prior round's hash set
-- New hash not in prior set = genuinely new finding → resets stability counter
-- Mechanical-only findings do NOT require stability rounds — they converge in 1 fix+verify
+Stability uses `_hash` for exact cross-round matching:
+- New hash not in prior set = genuinely new → resets stability
+- Mechanical-only findings do NOT require stability rounds
 
 | Condition | Action |
 |-----------|--------|
 | Threshold NOT met | Fix → re-audit |
-| Threshold met, new architectural findings | Fix → re-audit (stability resets) |
-| Threshold met, only new mechanical findings | Fix mechanicals → re-audit (stability NOT reset) |
+| Threshold met, new architectural | Fix → re-audit (stability resets) |
+| Threshold met, mechanical only | Fix → re-audit (stability NOT reset) |
 | Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6 |
 | Round 6, not stable | Present to user |
 
 Max 6 rounds.
 
-Show status:
+---
+
+## Step 3.5 — Update Adjudication Ledger
+
+**After each deliberation round**, write the ledger for R2+ suppression.
+
+For EACH finding, record its adjudication outcome:
+
+```bash
+node -e "
+import { writeLedgerEntry, generateTopicId, populateFindingMetadata } from './scripts/shared.mjs';
+
+// Example: dismissed finding
+const finding = { section: 'scripts/shared.mjs', category: 'SOLID-SRP Violation', principle: 'SRP', _pass: 'backend' };
+populateFindingMetadata(finding, 'backend');
+
+writeLedgerEntry('/tmp/$SID-ledger.json', {
+  topicId: generateTopicId(finding),
+  semanticHash: 'abcd1234',
+  adjudicationOutcome: 'dismissed',   // 'dismissed' | 'accepted' | 'severity_adjusted'
+  remediationState: 'pending',        // 'pending' | 'planned' | 'fixed' | 'verified'
+  severity: 'MEDIUM',
+  originalSeverity: 'MEDIUM',
+  category: finding.category,
+  section: finding.section,
+  detailSnapshot: 'shared.mjs mixes concerns...',
+  affectedFiles: ['scripts/shared.mjs'],
+  affectedPrinciples: ['SRP'],
+  ruling: 'overrule',
+  rulingRationale: '300-line file, 2 consumers, acceptable',
+  resolvedRound: 1,
+  pass: 'backend'
+});
+" --input-type=module
 ```
-═══════════════════════════════════════
-  ROUND 1 DELIBERATION
-  Accepted: 12 | Partial: 4 | Challenged: 5
-  Mechanical: 8 (auto-fix) | Architectural: 9
-  Rebuttal: HIGH+MEDIUM only (3 findings)
-═══════════════════════════════════════
-```
+
+**Status values**:
+- `adjudicationOutcome`: `dismissed` (GPT overruled), `accepted` (will fix), `severity_adjusted` (compromise)
+- `remediationState`: `pending` → `planned` → `fixed` → `verified` (or `regressed`)
+
+**CRITICAL**: Write the ledger BEFORE proceeding to Step 4. The ledger is the source of truth for R2+.
 
 ---
 
-## Parallel Execution
+## Execution Order
 
-**Safe to parallelise:**
-- Fix accepted findings WHILE waiting for rebuttal response
-- Fix mechanical issues (await, fetch, CSP) alongside recommendation fixes
-- Run tests alongside writing summary notes
+**CRITICAL: Wait for rebuttal BEFORE fixing.**
 
-**Must be sequential:**
-- Sustained/compromise fixes depend on rebuttal response
-- Verification audit must run AFTER all fixes complete
+1. Send rebuttal (if challenged HIGH/MEDIUM findings)
+2. Wait for rebuttal response
+3. **Write adjudication ledger** (Step 3.5)
+4. Fix ALL findings together (Step 4)
+5. Run tests
+6. Verification audit (Step 5)
 
 ---
 
 ## Step 4 — Fix Findings
 
 ALL HIGH must be fixed. MEDIUM until ≤2 remain. LOW if mechanical.
+
+**Track which files you modify** — you'll need this for `--changed` in Step 5.
 
 Show what changed:
 ```
@@ -198,33 +259,49 @@ Show what changed:
   Fixed per recommendation: 8
   Compromises: 2
   Skipped (LOW): 4
+  Files modified: shared.mjs, openai-audit.mjs
 ═══════════════════════════════════════
 ```
 
 List each fix: `[ID] description → file:lines`
 
-Batch genuine design decisions into one user prompt.
+After fixing, update ledger entries to `remediationState: 'fixed'` for fixed items.
 
 ---
 
-## Step 5 — Verify and Loop
+## Step 5 — Verify and Loop (R2+ Mode)
 
-After fixes, re-audit using **delta mode** (back to Step 2 with `--passes` and `--files`).
+After fixes, re-audit using **R2+ mode** (back to Step 2).
 
-1. Collect files modified during Step 4
-2. Build `--passes` from file types (see Smart Pass Selection table)
-3. Build `--files` from modified file list
-4. Run delta audit with `--history`
+1. Collect files modified during Step 4 → `--changed`
+2. Compute scope: changed + their importers → `--files`
+3. Generate diff: `git diff HEAD~1 -- . > /tmp/$SID-diff.patch`
+4. Build `--passes` from file types (see Smart Pass Selection)
+5. Run R2+ audit with `--round <N> --ledger --diff --changed --files`
 
-Track finding churn using `_hash` fields (exact matching):
+Track finding churn using `_hash` fields:
 - Resolved: hash in prior round but not current
 - Recurring: hash in both rounds
 - New: hash in current but not prior
 
+### R2+ Post-Processing Report
+
+The script automatically logs suppression stats to stderr:
 ```
 ═══════════════════════════════════════
-  ROUND 2 → ROUND 3 (delta: 3 files, 2 passes)
-  H:0 M:2 L:1 | New: 0 | Stable: 1/2
+  R2 POST-PROCESSING
+  Kept: 2 | Suppressed: 11 | Reopened: 1
+  Suppressed: a1b2c3 (0.82), 9f4d1e (0.78)...
+═══════════════════════════════════════
+```
+
+Review suppressed topics to validate no legitimate findings were over-suppressed.
+
+```
+═══════════════════════════════════════
+  ROUND 2 → ROUND 3 (R2+ mode)
+  H:0 M:2 L:1 | New: 0 | Suppressed: 11
+  Stable: 1/2
 ═══════════════════════════════════════
 ```
 
@@ -246,18 +323,36 @@ Save full report to `docs/plans/<name>-audit-summary.md`.
 
 ---
 
-## Step 6.5 — Opus Deep Review (Final Gate)
+## Step 6.5 — Gemini Independent Review (Final Gate)
 
-After GPT-5.4 convergence, run a single holistic review using the highest-capability model.
+After GPT-5.4 convergence, run Gemini 3.1 Pro as an independent third reviewer.
 
-**Opus checks what passes miss:**
-- Architectural coherence across files
-- Over-engineering from audit pressure
-- Cross-file naming/pattern consistency
-- Missing integration tests
-- User-facing impact
+**If `GEMINI_API_KEY` is not set**, skip with a warning.
 
-Deliberate on Opus findings locally (ACCEPT/PARTIAL/CHALLENGE). Fix accepted items, verify once. Max 3 Opus rounds.
+### Build Transcript
+
+Assemble `/tmp/$SID-transcript.json` with the full audit trail:
+- Plan content, code files list
+- All rounds: GPT findings, Claude positions, GPT rulings, fixes applied
+- Final state: remaining findings, dismissed findings
+- Suppression data: kept/suppressed/reopened counts per round
+
+### Run Review
+
+```bash
+node scripts/gemini-review.mjs review <plan-file> /tmp/$SID-transcript.json \
+  --out /tmp/$SID-gemini-result.json 2>/tmp/$SID-gemini-stderr.log
+```
+
+### Process Verdict
+
+| Verdict | Action |
+|---------|--------|
+| `APPROVE` | Done → final report |
+| `CONCERNS` | Fix new_findings + wrongly_dismissed, run ONE GPT verification |
+| `REJECT` | Present to user — needs human judgment |
+
+Max 2 Gemini rounds.
 
 ---
 
@@ -279,12 +374,14 @@ After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 ## Key Principles
 
 1. **Peer relationship** — neither model blindly defers
-2. **Three-model system** — work + iterate + final gate
+2. **Three-model system** — Claude (author) + GPT-5.4 (auditor) + Gemini 3.1 Pro (final arbiter)
 3. **Fix all HIGH**, MEDIUM until ≤2, LOW optional
 4. **Stability over speed** — 2 clean rounds required
 5. **No quick fixes** — band-aids rejected by all models
 6. **Deliberation is final** — no infinite debate
-7. **Graceful degradation** — failed passes offer recovery
+7. **Graceful degradation** — failed passes, missing keys, missing ledger all skip cleanly
+8. **No self-review** — Gemini reviews Claude-GPT transcript. GPT verifies after Gemini fixes.
+9. **Adaptive learning** — outcomes logged, FP patterns tracked, prompts improve over time
 
 ---
 

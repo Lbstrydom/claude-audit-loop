@@ -1,0 +1,452 @@
+#!/usr/bin/env node
+/**
+ * @fileoverview Gemini 3.1 Pro independent final reviewer for the audit loop.
+ *
+ * This script provides an unbiased third-model perspective after Claude (author)
+ * and GPT-5.4 (auditor) have converged. Gemini reviews the full deliberation
+ * transcript and renders an independent verdict — detecting bias, false consensus,
+ * and issues both models missed.
+ *
+ * Usage:
+ *   node scripts/gemini-review.mjs review <plan-file> <transcript-file>         # Full review
+ *   node scripts/gemini-review.mjs review <plan-file> <transcript-file> --json   # JSON output
+ *   node scripts/gemini-review.mjs review <plan-file> <transcript-file> --out <file>  # File output
+ *   node scripts/gemini-review.mjs ping                                          # Verify API connectivity
+ *
+ * Requires: GEMINI_API_KEY in .env or environment
+ *
+ * @module scripts/gemini-review
+ */
+
+import 'dotenv/config';
+import { GoogleGenAI } from '@google/genai';
+import { z } from 'zod';
+import {
+  safeInt, readFileOrDie, readProjectContext, extractPlanPaths,
+  readFilesAsContext, semanticId, writeOutput, formatFindings,
+  FindingSchema, FindingJsonSchema, verifySchemaSync, initAuditBrief
+} from './shared.mjs';
+
+// ── Configuration ──────────────────────────────────────────────────────────────
+
+const MODEL = process.env.GEMINI_REVIEW_MODEL || 'gemini-3.1-pro-preview';
+const TIMEOUT_MS = safeInt(process.env.GEMINI_REVIEW_TIMEOUT_MS, 120_000);
+const MAX_OUTPUT_TOKENS = safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 16_000);
+
+// ── Schemas ────────────────────────────────────────────────────────────────────
+// FindingSchema + FindingJsonSchema imported from shared.mjs (single source of truth).
+// Gemini-specific schemas use explicit JSON Schema — no Zod private API walking.
+
+const WronglyDismissedSchema = z.object({
+  original_finding_id: z.string().max(10).describe('The GPT finding ID that was dismissed (e.g. H3, M5)'),
+  reason_claude_was_wrong: z.string().max(400).describe('Why Claude should not have dismissed this'),
+  recommended_severity: z.enum(['HIGH', 'MEDIUM', 'LOW'])
+});
+
+const GeminiFinalReviewSchema = z.object({
+  verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
+
+  deliberation_quality: z.object({
+    claude_bias_detected: z.boolean().describe('Did Claude dismiss valid findings to protect its own code?'),
+    gpt_false_positive_count: z.number().describe('How many GPT findings were noise or incorrect?'),
+    deliberation_was_fair: z.boolean().describe('Was the Claude-GPT deliberation balanced overall?'),
+    quality_summary: z.string().max(500).describe('Brief assessment of the deliberation process')
+  }),
+
+  new_findings: z.array(FindingSchema).max(10).describe('Issues neither Claude nor GPT caught. Max 10, only genuinely new.'),
+
+  wrongly_dismissed: z.array(WronglyDismissedSchema).max(10).describe('GPT findings Claude dismissed but were actually valid'),
+
+  over_engineering_flags: z.array(z.string().max(300)).max(10).describe('Places where audit pressure caused unnecessary complexity'),
+
+  architectural_coherence: z.enum(['Strong', 'Adequate', 'Weak']),
+  overall_reasoning: z.string().max(1500).describe('Comprehensive final assessment')
+});
+
+/**
+ * Explicit JSON Schema for Gemini's responseSchema.
+ * Defined alongside Zod schema — no private API access needed.
+ * Must stay in sync with GeminiFinalReviewSchema above.
+ */
+const GeminiFinalReviewJsonSchema = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['APPROVE', 'CONCERNS', 'REJECT'] },
+    deliberation_quality: {
+      type: 'object',
+      properties: {
+        claude_bias_detected: { type: 'boolean' },
+        gpt_false_positive_count: { type: 'number' },
+        deliberation_was_fair: { type: 'boolean' },
+        quality_summary: { type: 'string' }
+      },
+      required: ['claude_bias_detected', 'gpt_false_positive_count', 'deliberation_was_fair', 'quality_summary']
+    },
+    new_findings: { type: 'array', items: FindingJsonSchema },
+    wrongly_dismissed: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          original_finding_id: { type: 'string' },
+          reason_claude_was_wrong: { type: 'string' },
+          recommended_severity: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] }
+        },
+        required: ['original_finding_id', 'reason_claude_was_wrong', 'recommended_severity']
+      }
+    },
+    over_engineering_flags: { type: 'array', items: { type: 'string' } },
+    architectural_coherence: { type: 'string', enum: ['Strong', 'Adequate', 'Weak'] },
+    overall_reasoning: { type: 'string' }
+  },
+  required: ['verdict', 'deliberation_quality', 'new_findings', 'wrongly_dismissed', 'over_engineering_flags', 'architectural_coherence', 'overall_reasoning']
+};
+
+// Verify Gemini review schemas are in sync — fail fast on import
+verifySchemaSync(GeminiFinalReviewSchema, GeminiFinalReviewJsonSchema, 'GeminiFinalReviewSchema ↔ GeminiFinalReviewJsonSchema');
+
+// ── System Prompt ──────────────────────────────────────────────────────────────
+
+const REVIEW_SYSTEM = `You are an independent code quality reviewer — the FINAL GATE in a multi-model audit pipeline.
+
+CONTEXT: A software engineer (Claude) wrote code based on a plan. A separate auditor (GPT-5.4) reviewed the code in multiple passes and raised findings. Claude then deliberated on each finding — accepting some, challenging others. GPT ruled on the challenges (sustain/overrule/compromise). The loop repeated until convergence.
+
+YOUR JOB: Review the FULL audit transcript (plan, code, all findings, all deliberations, all rulings) and render an independent verdict. You have NO stake in either model's output.
+
+WHAT TO LOOK FOR:
+
+1. **Claude Bias Detection** — Did Claude dismiss valid GPT findings with motivated reasoning?
+   Signs: vague rebuttals ("this is fine"), appeals to authority ("I know this codebase"),
+   severity downgrades without evidence, accepting the letter but not spirit of a finding.
+
+2. **GPT False Positives** — Did GPT raise findings that were genuinely wrong?
+   Not everything GPT flags is real. Count the noise.
+
+3. **Missed Issues** — What did BOTH models miss? Look for:
+   - Security: injection, auth bypass, data leaks, missing input validation
+   - Data integrity: race conditions, missing transactions, partial updates
+   - Error handling: swallowed errors, missing edge cases
+   - Architecture: god functions, tight coupling, leaky abstractions
+   - Performance: N+1 queries, unbounded loops, missing pagination
+
+4. **Wrongly Dismissed** — GPT findings that Claude dismissed but were actually valid.
+   Check the dismissed/overruled findings especially carefully.
+
+5. **Over-Engineering** — Did the audit pressure cause Claude to add unnecessary complexity?
+   Extra abstractions nobody asked for, premature optimisation, defensive code for impossible scenarios.
+
+6. **Architectural Coherence** — Does the final code hang together as a system?
+   Cross-file consistency, naming patterns, data flow clarity.
+
+VERDICT GUIDE:
+- APPROVE: Code is production-ready. Minor issues at most. Deliberation was fair.
+- CONCERNS: Fixable issues found. Nothing blocking, but items need attention before merge.
+- REJECT: Significant issues — either missed bugs, clear bias in deliberation, or architectural problems that need human judgment.
+
+RULES:
+1. Be ruthlessly honest but fair. Neither model is always right or always wrong.
+2. Only raise genuinely NEW findings — do not re-raise what GPT already found (even if phrased differently).
+3. Quality over quantity — 3 real findings beat 10 vague ones.
+4. Quick-fix detection still applies — flag band-aids.
+5. If the deliberation was fair and the code is good, say APPROVE. Don't manufacture issues.`;
+
+// ── Gemini API Helper ──────────────────────────────────────────────────────────
+
+/**
+ * Make a single Gemini call with structured JSON output.
+ * Follows the same {result, usage, latencyMs} contract as callGPT in openai-audit.mjs.
+ *
+ * @param {GoogleGenAI} ai - GoogleGenAI client instance
+ * @param {object} opts
+ * @param {string} opts.systemPrompt
+ * @param {string} opts.userPrompt
+ * @param {z.ZodType} opts.zodSchema - Zod schema for response validation
+ * @param {object} opts.jsonSchema - Explicit JSON Schema for Gemini's responseSchema
+ * @param {string} [opts.passName] - For logging
+ * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
+ */
+async function callGemini(ai, { systemPrompt, userPrompt, zodSchema, jsonSchema, passName }) {
+  const startMs = Date.now();
+
+  if (passName) {
+    process.stderr.write(`  [${passName}] Starting Gemini ${MODEL} (timeout: ${(TIMEOUT_MS / 1000).toFixed(0)}s)...\n`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: userPrompt,
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: 'application/json',
+        responseSchema: jsonSchema,
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
+        thinkingConfig: { thinkingBudget: 8192 }
+      }
+    }, { signal: controller.signal });
+    clearTimeout(timer);
+    const latencyMs = Date.now() - startMs;
+
+    // Parse the JSON response
+    const text = response.text;
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch (parseErr) {
+      throw new Error(`Failed to parse Gemini JSON response: ${parseErr.message}\nRaw: ${text.slice(0, 500)}`);
+    }
+
+    // Validate against Zod schema if provided
+    if (zodSchema) {
+      const validated = zodSchema.safeParse(result);
+      if (!validated.success) {
+        process.stderr.write(`  [${passName ?? 'gemini'}] Zod validation warning: ${validated.error.message.slice(0, 200)}\n`);
+      } else {
+        result = validated.data;
+      }
+    }
+
+    const usage = {
+      input_tokens: response.usageMetadata?.promptTokenCount ?? 0,
+      output_tokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+      thinking_tokens: response.usageMetadata?.thoughtsTokenCount ?? 0,
+      latency_ms: latencyMs
+    };
+
+    if (passName) {
+      process.stderr.write(`  [${passName}] Done in ${(latencyMs / 1000).toFixed(1)}s (${usage.input_tokens} in / ${usage.output_tokens} out / ${usage.thinking_tokens} thinking)\n`);
+    }
+
+    return { result, usage, latencyMs };
+
+  } catch (err) {
+    clearTimeout(timer);
+    const latencyMs = Date.now() - startMs;
+    const isAbort = err.name === 'AbortError' || err.message?.toLowerCase().includes('abort');
+    const msg = isAbort
+      ? `[${passName ?? 'gemini'}] Timeout after ${(TIMEOUT_MS / 1000).toFixed(0)}s`
+      : `[${passName ?? 'gemini'}] ${err.message} (${(latencyMs / 1000).toFixed(1)}s)`;
+    process.stderr.write(`  [${passName ?? 'gemini'}] FAILED: ${msg}\n`);
+    throw new Error(msg);
+  }
+}
+
+// ── Review Orchestrator ────────────────────────────────────────────────────────
+
+/**
+ * Run the Gemini final review.
+ * @param {GoogleGenAI} ai
+ * @param {string} planContent
+ * @param {string} transcriptContent - JSON string of full audit transcript
+ * @param {string} projectContext
+ * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
+ */
+async function runFinalReview(ai, planContent, transcriptContent, projectContext) {
+  // Parse transcript to extract code file paths for direct code inclusion
+  let transcript;
+  try {
+    transcript = JSON.parse(transcriptContent);
+  } catch {
+    // If not JSON, treat as markdown transcript
+    transcript = { raw: transcriptContent };
+  }
+
+  // Read code files if paths are listed in transcript
+  let codeContext = '';
+  if (transcript.code_files && Array.isArray(transcript.code_files)) {
+    const { found } = extractPlanPaths(planContent);
+    const allFiles = [...new Set([...found, ...transcript.code_files])];
+    codeContext = readFilesAsContext(allFiles, { maxPerFile: 8000, maxTotal: 100000 });
+  } else {
+    // Fall back to extracting from plan
+    const { found } = extractPlanPaths(planContent);
+    if (found.length > 0) {
+      codeContext = readFilesAsContext(found, { maxPerFile: 8000, maxTotal: 100000 });
+    }
+  }
+
+  const userPrompt = [
+    '## Project Context',
+    projectContext,
+    '',
+    '---',
+    '',
+    '## Plan',
+    planContent,
+    '',
+    '---',
+    '',
+    '## Audit Transcript (Claude-GPT Deliberation)',
+    typeof transcript === 'object' && transcript.raw
+      ? transcript.raw
+      : JSON.stringify(transcript, null, 2),
+    '',
+    '---',
+    '',
+    '## Code Files',
+    codeContext || '(No code files found — review based on transcript only)',
+  ].join('\n');
+
+  process.stderr.write(`\n── Gemini Final Review ──\n`);
+  process.stderr.write(`  Model: ${MODEL}\n`);
+  process.stderr.write(`  Context: ~${(userPrompt.length / 4).toFixed(0)} tokens (estimated)\n`);
+
+  return callGemini(ai, {
+    systemPrompt: REVIEW_SYSTEM,
+    userPrompt,
+    zodSchema: GeminiFinalReviewSchema,
+    jsonSchema: GeminiFinalReviewJsonSchema,
+    passName: 'gemini-review'
+  });
+}
+
+// ── Output Formatting ──────────────────────────────────────────────────────────
+
+function formatReviewResult(result, usage, latencyMs) {
+  const lines = [];
+  lines.push('# Gemini 3.1 Pro — Independent Final Review');
+  lines.push(`- **Model**: ${MODEL} | **Latency**: ${(latencyMs / 1000).toFixed(1)}s`);
+  lines.push(`- **Tokens**: ${usage.input_tokens} in / ${usage.output_tokens} out (${usage.thinking_tokens} thinking)`);
+  lines.push('');
+
+  // Verdict
+  const icon = result.verdict === 'APPROVE' ? '✅' : result.verdict === 'CONCERNS' ? '⚠️' : '❌';
+  lines.push(`## Verdict: ${icon} **${result.verdict}**`);
+  lines.push('');
+
+  // Deliberation quality
+  const dq = result.deliberation_quality;
+  lines.push('## Deliberation Quality');
+  lines.push(`- **Claude bias detected**: ${dq.claude_bias_detected ? 'YES' : 'No'}`);
+  lines.push(`- **GPT false positives**: ${dq.gpt_false_positive_count}`);
+  lines.push(`- **Deliberation fair**: ${dq.deliberation_was_fair ? 'Yes' : 'NO'}`);
+  lines.push(`- **Summary**: ${dq.quality_summary}`);
+  lines.push('');
+
+  // Architectural coherence
+  lines.push(`## Architectural Coherence: **${result.architectural_coherence}**`);
+  lines.push('');
+
+  // Wrongly dismissed
+  if (result.wrongly_dismissed?.length > 0) {
+    lines.push('## Wrongly Dismissed Findings');
+    lines.push('');
+    for (const wd of result.wrongly_dismissed) {
+      lines.push(`### [${wd.original_finding_id}] → Should be ${wd.recommended_severity}`);
+      lines.push(`- **Why**: ${wd.reason_claude_was_wrong}`);
+      lines.push('');
+    }
+  }
+
+  // New findings
+  if (result.new_findings?.length > 0) {
+    lines.push('## New Findings (missed by both models)');
+    lines.push(formatFindings(result.new_findings));
+  }
+
+  // Over-engineering
+  if (result.over_engineering_flags?.length > 0) {
+    lines.push('## Over-Engineering Flags');
+    lines.push('');
+    for (const flag of result.over_engineering_flags) {
+      lines.push(`- ${flag}`);
+    }
+    lines.push('');
+  }
+
+  // Overall reasoning
+  lines.push('## Overall Assessment');
+  lines.push('');
+  lines.push(result.overall_reasoning);
+
+  return lines.join('\n');
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const args = process.argv.slice(2);
+  const mode = args[0];
+
+  // Ping mode — quick connectivity test
+  if (mode === 'ping') {
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('Error: GEMINI_API_KEY environment variable required');
+      process.exit(1);
+    }
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: 'Reply with exactly: Gemini ready'
+      });
+      console.log(`✓ ${MODEL}: ${response.text.trim()}`);
+      process.exit(0);
+    } catch (err) {
+      console.error(`✗ ${MODEL}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  // Review mode
+  const planFile = args[1];
+  const transcriptFile = args[2];
+  const jsonMode = args.includes('--json');
+  const outIdx = args.indexOf('--out');
+  const outFile = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1] : null;
+
+  if (mode !== 'review' || !planFile || !transcriptFile) {
+    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>]');
+    console.error('       node scripts/gemini-review.mjs ping');
+    process.exit(1);
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    console.error('Error: GEMINI_API_KEY environment variable required');
+    console.error('Set it in .env or export GEMINI_API_KEY=AIza...');
+    process.exit(1);
+  }
+
+  const planContent = readFileOrDie(planFile);
+  const transcriptContent = readFileOrDie(transcriptFile);
+  await initAuditBrief(); // Pre-generate context brief
+  const projectContext = readProjectContext();
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+  try {
+    const { result, usage, latencyMs } = await runFinalReview(ai, planContent, transcriptContent, projectContext);
+
+    // Add semantic hashes to new findings for cross-model tracking
+    if (result.new_findings) {
+      for (let i = 0; i < result.new_findings.length; i++) {
+        const f = result.new_findings[i];
+        f.id = `G${i + 1}`;
+        f._hash = semanticId(f);
+        f._source = 'gemini';
+      }
+    }
+
+    if (jsonMode || outFile) {
+      const data = { ...result, _model: MODEL, _usage: usage };
+      if (outFile) {
+        const newCount = result.new_findings?.length ?? 0;
+        const dismissedCount = result.wrongly_dismissed?.length ?? 0;
+        const summaryLine = `Verdict: ${result.verdict} | New: ${newCount} | Wrongly dismissed: ${dismissedCount} | ${(latencyMs / 1000).toFixed(0)}s`;
+        writeOutput(data, outFile, summaryLine);
+      } else {
+        console.log(JSON.stringify(data, null, 2));
+      }
+    } else {
+      console.log(formatReviewResult(result, usage, latencyMs));
+    }
+
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+main();
