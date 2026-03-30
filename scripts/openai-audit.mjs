@@ -56,6 +56,14 @@ const MAX_OUTPUT_TOKENS_CAP = safeInt(process.env.OPENAI_AUDIT_MAX_TOKENS, 32000
 const TIMEOUT_MS_CAP = safeInt(process.env.OPENAI_AUDIT_TIMEOUT_MS, 300000); // 5 min absolute max
 const BACKEND_SPLIT_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_SPLIT_THRESHOLD, 12);
 const MAP_REDUCE_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_THRESHOLD, 15);
+const MAP_REDUCE_TOKEN_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_TOKEN_THRESHOLD, 50000); // ~12.5K tokens
+
+/** Check if a file set should use map-reduce (by count OR total size). */
+function shouldMapReduce(files) {
+  if (files.length > MAP_REDUCE_THRESHOLD) return true;
+  const totalChars = measureContextChars(files, 10000);
+  return totalChars > MAP_REDUCE_TOKEN_THRESHOLD;
+}
 
 // ── Adaptive Sizing ────────────────────────────────────────────────────────────
 
@@ -91,13 +99,14 @@ function computePassLimits(contextChars, reasoning = 'high') {
   );
 
   // Timeout: based on expected generation speed + reasoning overhead
-  // GPT-5.4 with reasoning: high spends 30-60s thinking BEFORE output starts
-  // low: ~250 tok/s, medium: ~200 tok/s, high: ~150 tok/s
-  const tokensPerSec = reasoning === 'high' ? 150 : reasoning === 'medium' ? 200 : 250;
+  // GPT-5.4 with reasoning: high spends 90-150s thinking BEFORE output starts
+  // low: ~250 tok/s, medium: ~150 tok/s, high: ~100 tok/s (conservative — includes reasoning pauses)
+  const tokensPerSec = reasoning === 'high' ? 100 : reasoning === 'medium' ? 150 : 250;
   const estimatedGenerationSec = maxTokens / tokensPerSec;
-  // Reasoning think-time floor: high=90s, medium=45s, low=30s (before output starts)
-  const reasoningFloorSec = reasoning === 'high' ? 90 : reasoning === 'medium' ? 45 : 30;
-  const minTimeoutMs = (reasoningFloorSec + 30) * 1000; // floor + network buffer
+  // Reasoning think-time floor: high=150s, medium=60s, low=30s (before output starts)
+  // Calibrated from real audit runs: 15K token input + high reasoning routinely takes 200s+
+  const reasoningFloorSec = reasoning === 'high' ? 150 : reasoning === 'medium' ? 60 : 30;
+  const minTimeoutMs = (reasoningFloorSec + 60) * 1000; // floor + generous network buffer
   const timeoutMs = Math.min(
     TIMEOUT_MS_CAP,
     Math.max(minTimeoutMs, Math.ceil((estimatedGenerationSec + reasoningFloorSec) * 1000))
@@ -688,8 +697,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     if (splitBackend) {
       if (effectiveRoutes.length > 0) {
         backendPassNames.push('be-routes');
-        if (effectiveRoutes.length > MAP_REDUCE_THRESHOLD) {
-          process.stderr.write(`  [be-routes] ${effectiveRoutes.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+        if (shouldMapReduce(effectiveRoutes)) {
+          process.stderr.write(`  [be-routes] ${effectiveRoutes.length} files — using map-reduce\n`);
           const beRoutesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
             : PASS_BACKEND_SYSTEM) + focusBlock;
@@ -716,8 +725,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       }
       if (effectiveServices.length > 0) {
         backendPassNames.push('be-services');
-        if (effectiveServices.length > MAP_REDUCE_THRESHOLD) {
-          process.stderr.write(`  [be-services] ${effectiveServices.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+        if (shouldMapReduce(effectiveServices)) {
+          process.stderr.write(`  [be-services] ${effectiveServices.length} files — using map-reduce\n`);
           const beServicesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
             : PASS_BACKEND_SYSTEM) + focusBlock;
@@ -744,8 +753,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       }
     } else if (effectiveBackend.length > 0) {
       backendPassNames.push('backend');
-      if (effectiveBackend.length > MAP_REDUCE_THRESHOLD) {
-        process.stderr.write(`  [backend] ${effectiveBackend.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+      if (shouldMapReduce(effectiveBackend)) {
+        process.stderr.write(`  [backend] ${effectiveBackend.length} files — using map-reduce\n`);
         const beSystemPrompt = (isR2Plus
           ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
           : PASS_BACKEND_SYSTEM) + focusBlock;
@@ -775,8 +784,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   }
 
   if (shouldRunPass('frontend') && effectiveFrontend.length > 0) {
-    if (effectiveFrontend.length > MAP_REDUCE_THRESHOLD) {
-      process.stderr.write(`  [frontend] ${effectiveFrontend.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+    if (shouldMapReduce(effectiveFrontend)) {
+      process.stderr.write(`  [frontend] ${effectiveFrontend.length} files — using map-reduce\n`);
       const feSystemPrompt = (isR2Plus
         ? buildR2SystemPrompt(PASS_FRONTEND_RUBRIC, buildRulingsBlock(ledgerFile, 'frontend', impactSet))
         : PASS_FRONTEND_SYSTEM) + focusBlock;
@@ -821,8 +830,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
     process.stderr.write(`\n── Wave 3: Sustainability (reasoning: medium) ──\n`);
 
-    if (sustainFiles.length > MAP_REDUCE_THRESHOLD) {
-      process.stderr.write(`  [sustainability] ${sustainFiles.length} files exceeds threshold (${MAP_REDUCE_THRESHOLD}) — using map-reduce\n`);
+    if (shouldMapReduce(sustainFiles)) {
+      process.stderr.write(`  [sustainability] ${sustainFiles.length} files — using map-reduce\n`);
       const sustainSystemPrompt = (isR2Plus
         ? buildR2SystemPrompt(PASS_SUSTAINABILITY_RUBRIC, buildRulingsBlock(ledgerFile, 'sustainability', impactSet))
         : PASS_SUSTAINABILITY_SYSTEM) + focusBlock;
