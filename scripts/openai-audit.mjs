@@ -499,13 +499,15 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
     findingsJson = findingsJson.slice(0, 120000) + '\n... [truncated]';
   }
 
-  const reduceLimits = computePassLimits(findingsJson.length + 2000, 'medium');
+  // Reduce uses low reasoning — it's dedup/ranking, not deep analysis. Higher timeout for large finding sets.
+  const reduceLimits = computePassLimits(findingsJson.length + 2000, 'low');
+  reduceLimits.timeoutMs = Math.max(reduceLimits.timeoutMs, 180000); // Min 3 min for reduce
   const reduceResult = await safeCallGPT(openai, {
     systemPrompt: REDUCE_SYSTEM_PROMPT,
     userPrompt: `## Findings from ${units.length} audit units (${failedUnits} failed):\n\n${findingsJson}\n\n## Tasks:\n1. Deduplicate\n2. Elevate systemic patterns (3+ occurrences)\n3. Flag cross-file issues\n4. Rank by severity`,
     schema: PassFindingsSchema,
     schemaName: `reduce_${passName}`,
-    reasoning: 'medium',
+    reasoning: 'low',
     ...reduceLimits,
     passName: `reduce-${passName}`
   }, { pass_name: passName, findings: allFindings, quick_fix_warnings: [], summary: 'Reduce phase failed — returning raw map findings' });
