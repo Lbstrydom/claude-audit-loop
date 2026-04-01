@@ -31,7 +31,7 @@ Orchestrate an automated plan-audit-fix quality loop with adaptive learning.
 | `<description>` | PLAN_CYCLE — plan → audit → fix → repeat |
 
 Validate: plan file exists (if applicable), `OPENAI_API_KEY` is set.
-Optional: `GEMINI_API_KEY` for final review (Step 6.5). `SUPABASE_AUDIT_URL` for cloud learning.
+Optional: `GEMINI_API_KEY` for final review (Step 7). `SUPABASE_AUDIT_URL` for cloud learning.
 
 Initialize session ID: `SID=audit-$(date +%s)`
 
@@ -183,7 +183,7 @@ Stability uses `_hash` for exact cross-round matching:
 | Threshold NOT met | Fix → re-audit |
 | Threshold met, new architectural | Fix → re-audit (stability resets) |
 | Threshold met, mechanical only | Fix → re-audit (stability NOT reset) |
-| Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6 |
+| Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6, then REQUIRED Step 7 |
 | Round 6, not stable | Present to user |
 
 Max 6 rounds.
@@ -307,7 +307,7 @@ Review suppressed topics to validate no legitimate findings were over-suppressed
 
 ---
 
-## Step 6 — Final Report
+## Step 6 — Convergence Report (Pre-Final)
 
 ```
 ═══════════════════════════════════════
@@ -319,17 +319,21 @@ Review suppressed topics to validate no legitimate findings were over-suppressed
 ═══════════════════════════════════════
 ```
 
-Save full report to `docs/plans/<name>-audit-summary.md`.
+Save convergence snapshot to `docs/plans/<name>-audit-summary.md`.
+
+Do not close the loop in Step 6. Completion requires Step 7 final review (or explicit "final gate unavailable" note when both provider keys are absent).
 
 ---
 
-## Step 6.5 — Gemini Independent Review (Final Gate)
+## Step 7 — Gemini Independent Review (Final Gate)
 
 After GPT-5.4 convergence, run Gemini 3.1 Pro as an independent third reviewer.
 
 **If `GEMINI_API_KEY` is not set**, run Claude Opus fallback (`ANTHROPIC_API_KEY`).
 
-**Only skip Step 6.5** if neither key is available.
+**Only skip Step 7** if neither key is available.
+
+When Step 7 is skipped, output `FINAL_GATE_SKIPPED` and do not claim full final-gate validation.
 
 ### Build Transcript
 
@@ -358,11 +362,11 @@ The script auto-selects provider in this order:
 | `CONCERNS` | Fix new_findings + wrongly_dismissed, run ONE GPT verification |
 | `REJECT` | Present to user — needs human judgment |
 
-Max 2 Gemini rounds.
+Max 2 final-review rounds.
 
 ---
 
-## Step 7 — Code Audit Transition (FULL_CYCLE only)
+## Step 8 — Code Audit Transition (FULL_CYCLE only)
 
 After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 
@@ -386,7 +390,7 @@ After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 5. **No quick fixes** — band-aids rejected by all models
 6. **Deliberation is final** — no infinite debate
 7. **Graceful degradation** — failed passes, missing keys, missing ledger all skip cleanly
-8. **No self-review** — Gemini reviews Claude-GPT transcript. GPT verifies after Gemini fixes.
+8. **No self-review** — Step 7 final gate reviews Claude-GPT transcript. GPT verifies after Step 7 fixes.
 9. **Adaptive learning** — outcomes logged, FP patterns tracked, prompts improve over time
 
 ---

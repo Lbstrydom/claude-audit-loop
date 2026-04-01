@@ -46,13 +46,13 @@ scripts/
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `OPENAI_API_KEY` | Yes | — | GPT-5.4 access |
-| `GEMINI_API_KEY` | No | — | Gemini final review (Step 6.5 falls back to Claude Opus if absent) |
+| `GEMINI_API_KEY` | No | — | Gemini final review (Step 7 falls back to Claude Opus if absent) |
 | `OPENAI_AUDIT_MODEL` | No | `gpt-5.4` | Override GPT model |
 | `OPENAI_AUDIT_REASONING` | No | `high` | Reasoning effort |
 | `GEMINI_REVIEW_MODEL` | No | `gemini-3.1-pro-preview` | Override Gemini model |
 | `GEMINI_REVIEW_TIMEOUT_MS` | No | `120000` | Gemini timeout |
 | `ANTHROPIC_API_KEY` | No | — | Claude Haiku fallback for brief generation |
-| `CLAUDE_FINAL_REVIEW_MODEL` | No | `claude-opus-4-1` | Override Claude Opus model for Step 6.5 fallback |
+| `CLAUDE_FINAL_REVIEW_MODEL` | No | `claude-opus-4-1` | Override Claude Opus model for Step 7 fallback |
 | `BRIEF_MODEL_GEMINI` | No | `gemini-2.5-flash` | Override brief generation Gemini model |
 | `BRIEF_MODEL_CLAUDE` | No | `claude-haiku-4-5-20251001` | Override brief generation Claude model |
 | `SUPPRESS_SIMILARITY_THRESHOLD` | No | `0.35` | Jaccard threshold for R2+ suppression (0.0-1.0) |
