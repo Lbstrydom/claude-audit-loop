@@ -31,32 +31,38 @@ import path from 'node:path';
 import OpenAI from 'openai';
 import { z } from 'zod';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { FindingSchema, WiringIssueSchema, LedgerEntrySchema } from './lib/schemas.mjs';
 import {
-  safeInt, readFileOrDie, readProjectContext, readProjectContextForPass,
-  extractPlanForPass, buildHistoryContext, extractPlanPaths, readFilesAsContext,
-  classifyFiles, measureContextChars, semanticId,
-  writeOutput, formatFindings, FindingSchema, WiringIssueSchema, initAuditBrief,
-  normalizePath, generateTopicId, populateFindingMetadata, jaccardSimilarity,
+  safeInt, readFileOrDie, readFilesAsContext, readFilesAsAnnotatedContext,
+  writeOutput, normalizePath, parseDiffFile, extractPlanPaths, classifyFiles
+} from './lib/file-io.mjs';
+import {
+  generateTopicId, populateFindingMetadata, jaccardSimilarity,
   suppressReRaises, buildRulingsBlock, R2_ROUND_MODIFIER, buildR2SystemPrompt,
-  parseDiffFile, readFilesAsAnnotatedContext, computeImpactSet, LedgerEntrySchema,
+  computeImpactSet
+} from './lib/ledger.mjs';
+import {
   estimateTokens, chunkLargeFile, extractExportsOnly, buildAuditUnits,
-  buildDependencyGraph, REDUCE_SYSTEM_PROMPT, generateRepoProfile,
-  appendOutcome, loadOutcomes, FalsePositiveTracker
-} from './shared.mjs';
-import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents } from './learning-store.mjs';
+  buildDependencyGraph, REDUCE_SYSTEM_PROMPT, measureContextChars
+} from './lib/code-analysis.mjs';
+import { semanticId, formatFindings, appendOutcome, loadOutcomes, FalsePositiveTracker } from './lib/findings.mjs';
+import {
+  generateRepoProfile, initAuditBrief, readProjectContext, readProjectContextForPass,
+  extractPlanForPass, buildHistoryContext
+} from './lib/context.mjs';
+import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward } from './bandit.mjs';
+import { openaiConfig } from './lib/config.mjs';
 
-// ── Configuration ──────────────────────────────────────────────────────────────
+// ── Configuration (from centralized config) ─────────────────────────────────
 
-const MODEL = process.env.OPENAI_AUDIT_MODEL || 'gpt-5.4';
-const REASONING_EFFORT = process.env.OPENAI_AUDIT_REASONING || 'high';
-
-// Hard ceilings — adaptive sizing stays below these
-const MAX_OUTPUT_TOKENS_CAP = safeInt(process.env.OPENAI_AUDIT_MAX_TOKENS, 32000);
-const TIMEOUT_MS_CAP = safeInt(process.env.OPENAI_AUDIT_TIMEOUT_MS, 300000); // 5 min absolute max
-const BACKEND_SPLIT_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_SPLIT_THRESHOLD, 12);
-const MAP_REDUCE_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_THRESHOLD, 15);
-const MAP_REDUCE_TOKEN_THRESHOLD = safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_TOKEN_THRESHOLD, 50000); // ~12.5K tokens
+const MODEL = openaiConfig.model;
+const REASONING_EFFORT = openaiConfig.reasoning;
+const MAX_OUTPUT_TOKENS_CAP = openaiConfig.maxOutputTokensCap;
+const TIMEOUT_MS_CAP = openaiConfig.timeoutMsCap;
+const BACKEND_SPLIT_THRESHOLD = openaiConfig.backendSplitThreshold;
+const MAP_REDUCE_THRESHOLD = openaiConfig.mapReduceThreshold;
+const MAP_REDUCE_TOKEN_THRESHOLD = openaiConfig.mapReduceTokenThreshold;
 
 /** Check if a file set should use map-reduce (by count OR total size). */
 function shouldMapReduce(files) {
@@ -192,15 +198,15 @@ const CodeAuditResultSchema = z.object({
 
 const RebuttalResolutionSchema = z.object({
   resolutions: z.array(z.object({
-    finding_id: z.string().max(10),
+    finding_id: z.string().max(20),
     claude_position: z.enum(['accept', 'partial_accept', 'challenge']),
     gpt_ruling: z.enum(['sustain', 'overrule', 'compromise']),
     final_severity: z.enum(['HIGH', 'MEDIUM', 'LOW', 'DISMISSED']),
     final_recommendation: z.string().max(800),
     reasoning: z.string().max(600),
     is_quick_fix: z.boolean()
-  })).max(40),
-  uncontested_findings: z.array(z.string().max(10)).max(40),
+  })).max(50),
+  uncontested_findings: z.array(z.string().max(20)).max(50),
   deliberation_summary: z.string().max(1000)
 });
 
@@ -1056,7 +1062,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   // Phase 3: Cloud store — record findings + pass stats (fire-and-forget)
   if (cloudRunId) {
-    recordFindings(cloudRunId, allFindings, 'merged', round).catch(() => {});
+    recordFindings(cloudRunId, allFindings, 'merged', round).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
 
     // Record per-pass stats
     const passResults = [
@@ -1077,17 +1083,26 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
         outputTokens: pr.result?.usage?.output_tokens,
         latencyMs: pr.result?.latencyMs,
         reasoning: pr.name === 'sustainability' ? 'medium' : 'high'
-      }).catch(() => {});
+      }).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
     }
 
     // Record suppression events if R2+
     if (isR2Plus && mergedResult._suppression) {
-      recordSuppressionEvents(cloudRunId, mergedResult._suppression).catch(() => {});
+      recordSuppressionEvents(cloudRunId, mergedResult._suppression).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
     }
   }
 
   // Attach cloud run ID to result for orchestrator reference
   if (cloudRunId) mergedResult._cloudRunId = cloudRunId;
+
+  // Phase 5: Flush bandit state + sync learning systems to cloud
+  if (bandit) {
+    bandit.flush();
+    syncBanditArms(bandit.arms).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
+  }
+  if (fpTracker) {
+    syncFalsePositivePatterns(null, fpTracker.patterns).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
+  }
 
   // 6. Output
   if (outFile) {
@@ -1215,7 +1230,7 @@ async function main() {
   const historyContext = buildHistoryContext(historyFile);
   // Initialize learning systems (graceful — never blocks audit)
   const startMs = Date.now();
-  await initLearningStore().catch(() => {}); // Cloud store (optional)
+  await initLearningStore().catch(e => process.stderr.write(`  [learning] ${e.message}\n`)); // Cloud store (optional)
   const bandit = new PromptBandit();
   const fpTracker = new FalsePositiveTracker();
 
@@ -1248,6 +1263,34 @@ async function main() {
       systemPrompt, userPrompt, schema, schemaName,
       passName: mode
     });
+
+    // Update bandit arms + FP tracker from rebuttal resolutions
+    if (mode === 'rebuttal' && result.resolutions?.length) {
+      for (const r of result.resolutions) {
+        const reward = computeReward({
+          claude_position: r.claude_position,
+          gpt_ruling: r.gpt_ruling,
+          final_severity: r.final_severity
+        });
+        // Update all pass arms — rebuttal covers cross-pass findings
+        bandit.update('structure', 'default', reward);
+        bandit.update('wiring', 'default', reward);
+        bandit.update('backend', 'default', reward);
+        bandit.update('frontend', 'default', reward);
+        bandit.update('sustainability', 'default', reward);
+
+        // Track FP patterns from dismissed findings
+        if (r.final_severity === 'DISMISSED' || r.gpt_ruling === 'overrule') {
+          fpTracker.record({ category: r.finding_id, severity: 'UNKNOWN', principle: 'unknown' }, false);
+        } else {
+          fpTracker.record({ category: r.finding_id, severity: r.final_severity, principle: 'unknown' }, true);
+        }
+      }
+      bandit.flush();
+      // Sync to Supabase (fire-and-forget)
+      syncBanditArms(bandit.arms).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
+      syncFalsePositivePatterns(null, fpTracker.patterns).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
+    }
 
     if (jsonMode || outFile) {
       const data = { ...result, _usage: usage };
@@ -1312,6 +1355,7 @@ async function main() {
     }
   } catch (err) {
     console.error(`Error: ${err.message}`);
+    bandit.flush(); // Ensure state is persisted even on error
     process.exit(1);
   }
 }

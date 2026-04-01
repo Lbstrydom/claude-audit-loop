@@ -20,18 +20,18 @@
 import 'dotenv/config';
 import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
-import {
-  safeInt, readFileOrDie, readProjectContext, extractPlanPaths,
-  readFilesAsContext, semanticId, writeOutput, formatFindings,
-  FindingSchema, FindingJsonSchema, verifySchemaSync, initAuditBrief
-} from './shared.mjs';
+import { FindingSchema, zodToGeminiSchema } from './lib/schemas.mjs';
+import { readFileOrDie, readFilesAsContext, extractPlanPaths, writeOutput } from './lib/file-io.mjs';
+import { semanticId, formatFindings } from './lib/findings.mjs';
+import { readProjectContext, initAuditBrief } from './lib/context.mjs';
+import { geminiConfig, claudeConfig } from './lib/config.mjs';
 
-// ── Configuration ──────────────────────────────────────────────────────────────
+// ── Configuration (from centralized config) ─────────────────────────────────
 
-const MODEL = process.env.GEMINI_REVIEW_MODEL || 'gemini-3.1-pro-preview';
-const CLAUDE_OPUS_MODEL = process.env.CLAUDE_FINAL_REVIEW_MODEL || 'claude-opus-4-1';
-const TIMEOUT_MS = safeInt(process.env.GEMINI_REVIEW_TIMEOUT_MS, 120_000);
-const MAX_OUTPUT_TOKENS = safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 16_000);
+const MODEL = geminiConfig.model;
+const CLAUDE_OPUS_MODEL = claudeConfig.finalReviewModel;
+const TIMEOUT_MS = geminiConfig.timeoutMs;
+const MAX_OUTPUT_TOKENS = geminiConfig.maxOutputTokens;
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
 // FindingSchema + FindingJsonSchema imported from shared.mjs (single source of truth).
@@ -63,47 +63,10 @@ const GeminiFinalReviewSchema = z.object({
   overall_reasoning: z.string().max(1500).describe('Comprehensive final assessment')
 });
 
-/**
- * Explicit JSON Schema for Gemini's responseSchema.
- * Defined alongside Zod schema — no private API access needed.
- * Must stay in sync with GeminiFinalReviewSchema above.
- */
-const GeminiFinalReviewJsonSchema = {
-  type: 'object',
-  properties: {
-    verdict: { type: 'string', enum: ['APPROVE', 'CONCERNS', 'REJECT'] },
-    deliberation_quality: {
-      type: 'object',
-      properties: {
-        claude_bias_detected: { type: 'boolean' },
-        gpt_false_positive_count: { type: 'number' },
-        deliberation_was_fair: { type: 'boolean' },
-        quality_summary: { type: 'string' }
-      },
-      required: ['claude_bias_detected', 'gpt_false_positive_count', 'deliberation_was_fair', 'quality_summary']
-    },
-    new_findings: { type: 'array', items: FindingJsonSchema },
-    wrongly_dismissed: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          original_finding_id: { type: 'string' },
-          reason_claude_was_wrong: { type: 'string' },
-          recommended_severity: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] }
-        },
-        required: ['original_finding_id', 'reason_claude_was_wrong', 'recommended_severity']
-      }
-    },
-    over_engineering_flags: { type: 'array', items: { type: 'string' } },
-    architectural_coherence: { type: 'string', enum: ['Strong', 'Adequate', 'Weak'] },
-    overall_reasoning: { type: 'string' }
-  },
-  required: ['verdict', 'deliberation_quality', 'new_findings', 'wrongly_dismissed', 'over_engineering_flags', 'architectural_coherence', 'overall_reasoning']
-};
+// Derived from GeminiFinalReviewSchema — single source of truth via Zod → JSON Schema
+const GeminiFinalReviewJsonSchema = zodToGeminiSchema(GeminiFinalReviewSchema);
 
-// Verify Gemini review schemas are in sync — fail fast on import
-verifySchemaSync(GeminiFinalReviewSchema, GeminiFinalReviewJsonSchema, 'GeminiFinalReviewSchema ↔ GeminiFinalReviewJsonSchema');
+// No verifySchemaSync needed — JSON Schema is derived from Zod, drift is impossible.
 
 // ── System Prompt ──────────────────────────────────────────────────────────────
 
@@ -184,7 +147,7 @@ async function callGemini(ai, { systemPrompt, userPrompt, zodSchema, jsonSchema,
         responseMimeType: 'application/json',
         responseSchema: jsonSchema,
         maxOutputTokens: MAX_OUTPUT_TOKENS,
-        thinkingConfig: { thinkingBudget: 8192 }
+        thinkingConfig: { thinkingBudget: 16384 }
       }
     }, { signal: controller.signal });
     clearTimeout(timer);
@@ -199,13 +162,15 @@ async function callGemini(ai, { systemPrompt, userPrompt, zodSchema, jsonSchema,
       throw new Error(`Failed to parse Gemini JSON response: ${parseErr.message}\nRaw: ${text.slice(0, 500)}`);
     }
 
-    // Validate against Zod schema if provided
+    // Validate against Zod schema — reject invalid responses at the trust boundary
     if (zodSchema) {
       const validated = zodSchema.safeParse(result);
       if (validated.success) {
         result = validated.data;
       } else {
-        process.stderr.write(`  [${passName ?? 'gemini'}] Zod validation warning: ${validated.error.message.slice(0, 200)}\n`);
+        const errMsg = validated.error.message.slice(0, 300);
+        process.stderr.write(`  [${passName ?? 'gemini'}] Zod validation FAILED: ${errMsg}\n`);
+        throw new Error(`Gemini response failed schema validation: ${errMsg}`);
       }
     }
 

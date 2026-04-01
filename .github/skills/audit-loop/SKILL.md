@@ -184,9 +184,11 @@ Stability uses `_hash` for exact cross-round matching:
 | Threshold met, new architectural | Fix → re-audit (stability resets) |
 | Threshold met, mechanical only | Fix → re-audit (stability NOT reset) |
 | Threshold met, 0 new, 2/2 stable | **CONVERGED** → Step 6, then REQUIRED Step 7 |
-| Round 6, not stable | Present to user |
+| Round 6, not stable | Present to user, then REQUIRED Step 7 |
 
 Max 6 rounds.
+
+**CRITICAL**: Step 7 (Gemini/Claude Opus final review) is MANDATORY after the last audit round, regardless of convergence. Gemini provides an independent perspective that GPT-5.4 cannot. The only exception is when neither `GEMINI_API_KEY` nor `ANTHROPIC_API_KEY` is available.
 
 ---
 
@@ -327,7 +329,7 @@ Do not close the loop in Step 6. Completion requires Step 7 final review (or exp
 
 ## Step 7 — Gemini Independent Review (Final Gate)
 
-After GPT-5.4 convergence, run Gemini 3.1 Pro as an independent third reviewer.
+After the final GPT-5.4 audit round (whether converged or not), run Gemini 3.1 Pro as an independent third reviewer. This step is MANDATORY — Gemini provides cross-model perspective that catches blind spots in Claude-GPT deliberation.
 
 **If `GEMINI_API_KEY` is not set**, run Claude Opus fallback (`ANTHROPIC_API_KEY`).
 

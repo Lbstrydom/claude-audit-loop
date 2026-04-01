@@ -7,6 +7,7 @@
     "claude-audit-loop": "install.mjs"
   },
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "audit:plan": "node scripts/openai-audit.mjs plan",
     "audit:code": "node scripts/openai-audit.mjs code",
     "audit:rebuttal": "node scripts/openai-audit.mjs rebuttal",

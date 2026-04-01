@@ -5,7 +5,7 @@
  */
 
 import 'dotenv/config';
-import { loadOutcomes } from './shared.mjs';
+import { loadOutcomes } from './lib/findings.mjs';
 
 const PHASE7_THRESHOLD = 50; // audit runs needed
 

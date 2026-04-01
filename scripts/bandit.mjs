@@ -7,6 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteFileSync } from './lib/file-io.mjs';
 
 // ── Pure JS Beta distribution sampling ──────────────────────────────────────
 
@@ -72,17 +73,23 @@ export class PromptBandit {
     return best;
   }
 
-  /** Update arm after observing outcome. */
+  /** Update arm after observing outcome. Returns false if arm not found. */
   update(passName, variantId, reward) {
     const key = `${passName}:${variantId}`;
     const arm = this.arms[key];
-    if (!arm) return;
+    if (!arm) {
+      process.stderr.write(`  [bandit] WARNING: update called for unknown arm "${key}" — skipped\n`);
+      return false;
+    }
 
-    // Reward can be binary (0/1) or continuous (0-1)
-    if (reward > 0.5) arm.alpha += reward;
-    else arm.beta += (1 - reward);
+    // Proper Beta posterior: alpha tracks successes, beta tracks failures.
+    // For continuous rewards in [0,1], fractionally update both parameters.
+    const clampedReward = Math.max(0, Math.min(1, reward));
+    arm.alpha += clampedReward;
+    arm.beta += (1 - clampedReward);
     arm.pulls++;
     this._save();
+    return true;
   }
 
   /** Check if a winning arm has been identified (95% CI separation). */
@@ -134,8 +141,7 @@ export class PromptBandit {
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
       try {
-        fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
-        fs.writeFileSync(this.statePath, JSON.stringify(this.arms, null, 2), 'utf-8');
+        atomicWriteFileSync(this.statePath, JSON.stringify(this.arms, null, 2));
       } catch (err) {
         process.stderr.write(`  [bandit] Save failed: ${err.message}\n`);
       }
@@ -149,8 +155,7 @@ export class PromptBandit {
       this._saveTimer = null;
     }
     try {
-      fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
-      fs.writeFileSync(this.statePath, JSON.stringify(this.arms, null, 2), 'utf-8');
+      atomicWriteFileSync(this.statePath, JSON.stringify(this.arms, null, 2));
     } catch (err) {
       process.stderr.write(`  [bandit] Flush failed: ${err.message}\n`);
     }
@@ -183,6 +188,7 @@ if (process.argv[1]?.endsWith('bandit.mjs')) {
       process.exit(1);
     }
     bandit.addArm(pass, variant);
+    bandit.flush(); // Ensure state is written before exit
     console.log(`Registered arm: ${pass}:${variant}`);
     process.exit(0);
   }

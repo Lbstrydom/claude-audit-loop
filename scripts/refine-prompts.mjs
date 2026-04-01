@@ -8,7 +8,7 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import { loadOutcomes, computePassEffectiveness, safeInt } from './shared.mjs';
+import { loadOutcomes, computePassEffectiveness } from './lib/findings.mjs';
 
 const REFINEMENT_SYSTEM = `You are a prompt engineer optimizing code audit prompts based on outcome data.
 
