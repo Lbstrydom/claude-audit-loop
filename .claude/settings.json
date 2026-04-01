@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"import { FindingSchema, FindingJsonSchema, zodToGeminiSchema } from ''./scripts/shared.mjs''; console.log\\(''FindingJsonSchema keys:'', Object.keys\\(FindingJsonSchema.properties\\)\\); console.log\\(''Has required:'', FindingJsonSchema.required?.length\\); console.log\\(''No $schema:'', !FindingJsonSchema[''$schema'']\\); console.log\\(''No additionalProperties:'', !\\(''additionalProperties'' in FindingJsonSchema\\)\\);\" --input-type=module)",
+      "Bash(node --input-type=module -e \":*)",
+      "Read(//c/GIT/claude-audit-loop/$TEMP/**)",
+      "Bash(node scripts/gemini-review.mjs ping)",
+      "Edit(/.claude/skills/audit-loop/**)",
+      "Bash(node -e \"try { require.resolve\\(''@anthropic-ai/sdk''\\); console.log\\(''FOUND in node_modules''\\); } catch { console.log\\(''NOT FOUND''\\); }\")"
+    ],
+    "additionalDirectories": [
+      "c:\\GIT\\claude-audit-loop\\.claude\\skills\\audit-loop"
+    ]
+  }
+}
