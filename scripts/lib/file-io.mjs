@@ -7,6 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { ALL_EXTENSIONS_PATTERN } from './language-profiles.mjs';
 
 // ── Atomic File Writes ──────────────────────────────────────────────────────
 // Write to a temp file in the same directory, then rename for crash-safety.
@@ -241,9 +242,19 @@ export function extractPlanPaths(planContent) {
     if (!p.startsWith('http') && !p.startsWith('node_modules')) paths.add(p);
   }
 
-  const fnRegex = /####\s+`([^/`]+\.(?:js|mjs|ts|md))`/gm;
+  // Allow slash-containing paths AND bare filenames: #### `src/app/main.py` or #### `file.py`
+  // Extension list comes from the language-profiles registry (single source of truth).
+  const fnRegex = new RegExp(`####\\s+\`([\\w./-]+\\.(?:${ALL_EXTENSIONS_PATTERN}))\``, 'gm');
   while ((match = fnRegex.exec(planContent)) !== null) {
-    const filename = match[1];
+    const captured = match[1];
+    // If captured path contains a slash, treat it as repo-relative and add directly
+    if (captured.includes('/')) {
+      const normalized = captured.replace(/^\.\//, '');
+      if (!normalized.startsWith('http') && !normalized.startsWith('node_modules')) paths.add(normalized);
+      continue;
+    }
+    // Bare filename — use search-dir fuzzy discovery (existing behavior)
+    const filename = captured;
     if ([...paths].some(p => p.endsWith('/' + filename) || p === filename)) continue;
     const searchDirs = [
       'src/config', 'src/routes', 'src/services', 'src/schemas',

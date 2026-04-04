@@ -6,6 +6,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizePath } from './file-io.mjs';
+import { getProfileForFile, getProfile } from './language-profiles.mjs';
+
+/**
+ * Default profile for legacy callers that don't supply a profile argument.
+ *
+ * BACKWARD-COMPAT CONTRACT (Phase A): Before Phase A, these functions used
+ * hardcoded JS regex patterns. Callers that omit `profile` now get identical
+ * behavior via the JS profile, preserving the pre-Phase-A contract.
+ *
+ * For non-JS files, prefer to either:
+ *   - Pass `profile` explicitly, OR
+ *   - Call via `chunkLargeFile(src, filePath)` which auto-detects from filePath
+ *
+ * Known consequence: bare calls like `splitAtFunctionBoundaries(pySource)` with
+ * no profile arg will use JS regex on Python source. This is the documented
+ * fallback — callers are responsible for providing profile/filePath context
+ * when analyzing non-JS code. See phase-a-language-aware-analysis.md §5.
+ */
+const DEFAULT_PROFILE = getProfile('js');
 
 // ── Token Estimation ─────────────────────────────────────────────────────────
 
@@ -18,43 +37,50 @@ export function estimateTokens(text) {
 
 /**
  * Extract everything before the first function/class/const export.
+ * Uses profile's getBoundaries capability. Returns first 2000 chars
+ * for UNKNOWN profile or when no boundary found (safe degraded behavior).
  * @param {string} source - Source code
+ * @param {object} [profile] - Language profile (falls back to JS for backward compat)
  * @returns {string} Import/header block
  */
-export function extractImportBlock(source) {
-  const lines = source.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (/^(?:export\s+)?(?:async\s+)?(?:function|class)\s|^export\s+(?:const|let|var)\s+\w+\s*=/.test(lines[i])) {
-      return lines.slice(0, i).join('\n');
-    }
+export function extractImportBlock(source, profile = DEFAULT_PROFILE) {
+  const effectiveProfile = profile || DEFAULT_PROFILE;
+  if (!effectiveProfile.getBoundaries) {
+    return source.slice(0, Math.min(source.length, 2000));
   }
-  return source.slice(0, Math.min(source.length, 2000)); // No boundary found
+  const lines = source.split('\n');
+  const boundaries = effectiveProfile.getBoundaries(lines);
+  if (boundaries.length === 0) {
+    return source.slice(0, Math.min(source.length, 2000));
+  }
+  return lines.slice(0, boundaries[0]).join('\n');
 }
 
 /**
- * Split source at function/class/export const boundaries.
+ * Split source at function/class boundaries using profile's getBoundaries.
+ * Returns [{source, startLine}] chunks. No branching on profile.id.
  * @param {string} source - Source code
- * @returns {Array<{source: string, startLine: number}>} Chunks with line numbers
+ * @param {object} [profile] - Language profile (falls back to JS for backward compat)
+ * @returns {Array<{source: string, startLine: number}>}
  */
-export function splitAtFunctionBoundaries(source) {
-  const boundaryRegex = /^(?:export\s+)?(?:async\s+)?(?:function|class)\s|^export\s+(?:const|let|var)\s+\w+\s*=/;
+export function splitAtFunctionBoundaries(source, profile = DEFAULT_PROFILE) {
+  const effectiveProfile = profile || DEFAULT_PROFILE;
   const lines = source.split('\n');
+  const boundaries = effectiveProfile.getBoundaries
+    ? effectiveProfile.getBoundaries(lines)
+    : [];
+
+  if (boundaries.length === 0) {
+    return [{ source, startLine: 1 }]; // Whole file as one chunk
+  }
+
   const chunks = [];
-  let currentStart = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    if (boundaryRegex.test(lines[i])) {
-      if (currentStart >= 0) {
-        chunks.push({ source: lines.slice(currentStart, i).join('\n'), startLine: currentStart + 1 });
-      }
-      currentStart = i;
-    }
+  for (let i = 0; i < boundaries.length; i++) {
+    const start = boundaries[i];
+    const end = i + 1 < boundaries.length ? boundaries[i + 1] : lines.length;
+    chunks.push({ source: lines.slice(start, end).join('\n'), startLine: start + 1 });
   }
-  if (currentStart >= 0) {
-    chunks.push({ source: lines.slice(currentStart).join('\n'), startLine: currentStart + 1 });
-  }
-
-  return chunks.length > 0 ? chunks : [{ source, startLine: 1 }]; // Fallback: whole file as one chunk
+  return chunks;
 }
 
 // ── File Chunking ────────────────────────────────────────────────────────────
@@ -62,14 +88,17 @@ export function splitAtFunctionBoundaries(source) {
 /**
  * Chunk a large file by function boundaries, with import block prepended to each chunk.
  * Falls back to line-count splitting if no function boundaries found.
+ * Profile is auto-detected from filePath when not provided.
  * @param {string} source - Source code
- * @param {string} filePath - File path (for logging)
+ * @param {string} filePath - File path (for profile detection + logging)
  * @param {number} [maxChunkTokens=6000] - Maximum tokens per chunk
+ * @param {object} [profile] - Language profile (auto-detected from filePath if omitted)
  * @returns {Array<{imports: string, items: Array<{source: string, startLine: number}>, tokens: number}>}
  */
-export function chunkLargeFile(source, filePath, maxChunkTokens = 6000) {
-  const imports = extractImportBlock(source);
-  const functions = splitAtFunctionBoundaries(source);
+export function chunkLargeFile(source, filePath, maxChunkTokens = 6000, profile = null) {
+  const resolvedProfile = profile || getProfileForFile(filePath);
+  const imports = extractImportBlock(source, resolvedProfile);
+  const functions = splitAtFunctionBoundaries(source, resolvedProfile);
 
   if (functions.length <= 1) {
     // No function boundaries found — line-count fallback
@@ -106,28 +135,32 @@ export function chunkLargeFile(source, filePath, maxChunkTokens = 6000) {
 
 /**
  * Extract just the export signatures from a file (for peripheral files in oversized clusters).
+ * Profile-dispatched export regex (Python uses def/class/ALL_CAPS; JS/TS uses `export`).
  * @param {string} filePath - File path to extract exports from
  * @returns {string} Export signatures as a comment block
  */
 export function extractExportsOnly(filePath) {
+  const profile = getProfileForFile(filePath);
+  if (!profile.exportRegex) return `// ${filePath} — unsupported language`;
   const absPath = path.resolve(filePath);
   if (!fs.existsSync(absPath)) return '';
   const source = fs.readFileSync(absPath, 'utf-8');
   const lines = source.split('\n');
-  const exports = lines.filter(l => /^export\s/.test(l));
+  const exports = lines.filter(l => profile.exportRegex.test(l));
   return `// ${filePath} — exports only\n${exports.join('\n')}`;
 }
 
 // ── Dependency Graph ─────────────────────────────────────────────────────────
 
 /**
- * Build a simple import graph from file list.
+ * Build an import graph from file list, dispatching to each file's language profile.
  * @param {string[]} files - File paths to analyze
+ * @param {object} [langContext] - Repo context for resolvers (Python package roots, etc.)
  * @returns {Map<string, Set<string>>} file -> Set of files it imports
  */
-export function buildDependencyGraph(files) {
-  const graph = new Map(); // file -> Set of files it imports
-  const normFiles = files.map(normalizePath);
+export function buildDependencyGraph(files, langContext = null) {
+  const graph = new Map();
+  const repoFileSet = langContext?.repoFileSet || new Set(files.map(normalizePath));
 
   for (const file of files) {
     const normFile = normalizePath(file);
@@ -135,22 +168,19 @@ export function buildDependencyGraph(files) {
     const absPath = path.resolve(file);
     if (!fs.existsSync(absPath)) continue;
 
-    const content = fs.readFileSync(absPath, 'utf-8');
-    const importRegex = /(?:import|from)\s+['"]([^'"]+)['"]/g;
-    let match;
-    while ((match = importRegex.exec(content)) !== null) {
-      const specifier = match[1];
-      if (!specifier.startsWith('.')) continue; // skip node_modules
+    const profile = getProfileForFile(file);
+    if (!profile.importRegex || !profile.resolveImport) continue; // UNKNOWN / unsupported
 
-      // Resolve relative import to a file in our list
-      const dir = path.dirname(file);
-      const resolved = normalizePath(path.join(dir, specifier));
-      // Try with common extensions
-      for (const candidate of [resolved, resolved + '.js', resolved + '.mjs', resolved + '.ts']) {
-        if (normFiles.includes(candidate)) {
-          graph.get(normFile).add(candidate);
-          break;
-        }
+    const content = fs.readFileSync(absPath, 'utf-8');
+    // Clone the regex so .lastIndex state doesn't leak across files
+    const regex = new RegExp(profile.importRegex.source, profile.importRegex.flags);
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const importRecord = profile.importExtractor(match);
+      if (!importRecord) continue;
+      const resolvedPaths = profile.resolveImport(importRecord, file, repoFileSet, langContext);
+      for (const resolved of resolvedPaths) {
+        graph.get(normFile).add(normalizePath(resolved));
       }
     }
   }

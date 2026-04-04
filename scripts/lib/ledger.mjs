@@ -12,7 +12,12 @@ import path from 'path';
 import { normalizePath, atomicWriteFileSync } from './file-io.mjs';
 import { LedgerEntrySchema, AdjudicationLedgerSchema } from './schemas.mjs';
 import { semanticId } from './findings.mjs';
-import { extractImportBlock } from './code-analysis.mjs';
+import { buildFileReferenceRegex } from './language-profiles.mjs';
+
+// Single source of truth — regex built from registered profile extensions.
+// Handles ./foo.py, ../pkg/mod.py, /abs/foo.py, backticked, quoted forms.
+// Global regex, so callers must reset .lastIndex before use.
+const FILE_REGEX = buildFileReferenceRegex();
 
 // ── Topic ID & Ledger Write ─────────────────────────────────────────────────
 
@@ -165,12 +170,13 @@ export function batchWriteLedger(ledgerPath, entries) {
  * @returns {object} Enriched finding (mutated in place)
  */
 export function populateFindingMetadata(finding, passName) {
-  // Extract file paths from GPT's free-text section field
+  // Extract file paths from GPT's free-text section field using the shared
+  // registry-derived regex (handles .py, .pyi, relative/absolute paths).
   const section = finding.section || '';
-  const fileRegex = /(?:^|[\s`(])([a-zA-Z][\w./\\-]*\.(?:js|mjs|ts|tsx|jsx|json|css|html|md|sql))/g;
   const files = [];
+  FILE_REGEX.lastIndex = 0; // reset global regex state between calls
   let match;
-  while ((match = fileRegex.exec(section)) !== null) {
+  while ((match = FILE_REGEX.exec(section)) !== null) {
     files.push(normalizePath(match[1]));
   }
 

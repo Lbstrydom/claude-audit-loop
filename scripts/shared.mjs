@@ -132,3 +132,18 @@ export {
   formatPolicyForPrompt,
   shouldSuppressFinding
 } from './lib/suppression-policy.mjs';
+
+// ── Language Profiles (Phase A) ─────────────────────────────────────────────
+export {
+  getAllProfiles,
+  getProfile,
+  getProfileForFile,
+  countFilesByLanguage,
+  detectDominantLanguage,
+  buildLanguageContext,
+  detectPythonPackageRoots,
+  pythonBoundaryScanner,
+  buildFileReferenceRegex,
+  ALL_SUPPORTED_EXTENSIONS,
+  ALL_EXTENSIONS_PATTERN
+} from './lib/language-profiles.mjs';

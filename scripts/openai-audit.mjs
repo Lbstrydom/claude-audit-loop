@@ -50,6 +50,7 @@ import {
   generateRepoProfile, initAuditBrief, readProjectContext, readProjectContextForPass,
   extractPlanForPass, buildHistoryContext
 } from './lib/context.mjs';
+import { buildLanguageContext } from './lib/language-profiles.mjs';
 import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
@@ -617,6 +618,14 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   // 1. Gather and classify files
   const { found, missing, allPaths } = extractPlanPaths(planContent);
+  // Build LanguageContext from RAW found files BEFORE category-based classification.
+  // classifyFiles() has JS-centric patterns (lacks Python test/frontend detection),
+  // so Python files may end up in "backend" bucket silently — but langContext
+  // must see them all for dependency resolution + package-root detection.
+  const langContext = buildLanguageContext(found);
+  if (langContext.pythonPackageRoots.length > 1) {
+    process.stderr.write(`  [lang] Python package roots: ${langContext.pythonPackageRoots.join(', ')}\n`);
+  }
   const { backend, frontend, shared } = classifyFiles(found);
 
   // Record audit start in cloud store (fire-and-forget)
@@ -1327,10 +1336,28 @@ async function main() {
 
   // --changed <list>: comma-separated changed file paths for R2+ impact set computation
   const changedIdx = args.indexOf('--changed');
-  const changedFiles = changedIdx !== -1 && args[changedIdx + 1] ? args[changedIdx + 1].split(',').map(s => s.trim()) : [];
+  let changedFiles = changedIdx !== -1 && args[changedIdx + 1] ? args[changedIdx + 1].split(',').map(s => s.trim()) : [];
+
+  // --scope <mode>: audit scope for code mode.
+  //   'diff'   (DEFAULT for code mode): auto-detect changed files via `git diff --name-only <base>..HEAD`
+  //            then scope quality passes to those files. Most accurate for reviewing recent work.
+  //   'plan'   (LEGACY default): use ALL files referenced in the plan. Broadest scope.
+  //            Use when plan describes a large refactor touching many files.
+  //   'full'   : audit the entire repo. Slowest, most comprehensive. Use for codebase-wide audits.
+  // When --files is explicitly provided, --scope is ignored.
+  const scopeIdx = args.indexOf('--scope');
+  const scopeMode = scopeIdx !== -1 && args[scopeIdx + 1] ? args[scopeIdx + 1] : 'diff';
+
+  // --base <ref>: git ref to diff against for --scope diff (default: HEAD~1)
+  const baseIdx = args.indexOf('--base');
+  const diffBase = baseIdx !== -1 && args[baseIdx + 1] ? args[baseIdx + 1] : 'HEAD~1';
 
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
     console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>] [--passes <list>] [--files <list>]');
+    console.error('       node scripts/openai-audit.mjs code <plan-file> [--scope diff|plan|full] [--base <git-ref>]');
+    console.error('         --scope diff (default): auto-scope to git-changed files (vs HEAD~1)');
+    console.error('         --scope plan          : audit all plan-referenced files');
+    console.error('         --scope full          : audit entire repo (slowest, most comprehensive)');
     console.error('       node scripts/openai-audit.mjs code <plan-file> --round 2 --ledger <ledger.json> --diff <diff.patch> --changed <file1,file2>');
     console.error('       node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> [--json] [--out <file>]');
     process.exit(1);
@@ -1372,7 +1399,45 @@ async function main() {
 
   // Code mode → multi-pass parallel audit
   if (mode === 'code') {
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger });
+    // Resolve scope: if --files not explicit AND --scope=diff (default), auto-detect from git
+    let effectiveFileFilter = fileFilter;
+    if (!fileFilter && scopeMode === 'diff') {
+      try {
+        const { execFileSync } = await import('node:child_process');
+        const diffOutput = execFileSync('git', ['diff', '--name-only', `${diffBase}..HEAD`], {
+          encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000
+        }).trim();
+        const diffChanged = diffOutput ? diffOutput.split('\n').filter(Boolean) : [];
+        // Also include unstaged working-tree changes
+        const unstaged = execFileSync('git', ['diff', '--name-only'], {
+          encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000
+        }).trim();
+        const unstagedChanged = unstaged ? unstaged.split('\n').filter(Boolean) : [];
+        const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+          encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000
+        }).trim();
+        const untrackedFiles = untracked ? untracked.split('\n').filter(Boolean) : [];
+        const allChanged = [...new Set([...diffChanged, ...unstagedChanged, ...untrackedFiles])];
+        if (allChanged.length > 0) {
+          effectiveFileFilter = allChanged;
+          // Also set changedFiles if caller didn't — enables R2+ impact scoping in R1
+          if (changedFiles.length === 0) changedFiles = allChanged;
+          process.stderr.write(`  [scope] --scope=diff (vs ${diffBase}): ${allChanged.length} changed files → scoping audit to diff\n`);
+          process.stderr.write(`  [scope] Files: ${allChanged.slice(0, 5).join(', ')}${allChanged.length > 5 ? ` (+${allChanged.length - 5} more)` : ''}\n`);
+          process.stderr.write(`  [scope] Use --scope=plan to audit all plan-referenced files, or --scope=full for whole repo\n`);
+        } else {
+          process.stderr.write(`  [scope] --scope=diff: no changes detected vs ${diffBase}, falling back to plan-referenced files\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`  [scope] --scope=diff failed (${err.message?.slice(0, 80)}), falling back to plan-referenced files\n`);
+      }
+    } else if (scopeMode === 'full') {
+      process.stderr.write(`  [scope] --scope=full: auditing entire repo (may be slow)\n`);
+      // Leave fileFilter null = full repo
+    } else if (scopeMode === 'plan') {
+      process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
+    }
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger });
     return;
   }
 
