@@ -89,6 +89,73 @@ export function writeLedgerEntry(ledgerPath, entry) {
   }
 }
 
+/**
+ * Batch-write ledger entries. Reads existing ledger (if any), upserts all entries
+ * by topicId with idempotent merge, performs exactly one atomic write.
+ * Only treats ENOENT as 'new file' — permission/corruption errors surface to caller.
+ * Preserves both adjudication axes on upsert (adjudicationOutcome + remediationState).
+ * @param {string} ledgerPath - Path to ledger JSON file
+ * @param {object[]} entries - Array of LedgerEntry-shaped objects
+ * @returns {{ inserted: number, updated: number, total: number }}
+ * @throws {Error} on permission errors, corruption, or validation failures
+ */
+export function batchWriteLedger(ledgerPath, entries) {
+  let ledger = { version: 1, entries: [] };
+
+  try {
+    const raw = fs.readFileSync(path.resolve(ledgerPath), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed.entries || !Array.isArray(parsed.entries)) {
+      throw new Error('Corrupted ledger: missing entries array');
+    }
+    ledger = parsed;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+
+  const byTopic = new Map(ledger.entries.map(e => [e.topicId, e]));
+  let inserted = 0, updated = 0;
+
+  for (const entry of entries) {
+    if (!entry.topicId) continue;
+    if (!entry.severity || !entry.adjudicationOutcome) {
+      process.stderr.write(`  [ledger] Skipping invalid entry: ${entry.topicId}\n`);
+      continue;
+    }
+
+    if (byTopic.has(entry.topicId)) {
+      const existing = byTopic.get(entry.topicId);
+      byTopic.set(entry.topicId, {
+        ...existing,
+        lastSeenRound: entry.round,
+        latestFindingId: entry.findingId,
+        detail: entry.detail,
+        severity: entry.severity,
+        adjudicationOutcome: existing.adjudicationOutcome,
+        remediationState: existing.remediationState,
+        ruling: existing.ruling,
+        rulingRationale: existing.rulingRationale,
+        firstSeenRound: existing.firstSeenRound ?? existing.round ?? entry.round
+      });
+      updated++;
+    } else {
+      byTopic.set(entry.topicId, {
+        ...entry,
+        firstSeenRound: entry.round,
+        lastSeenRound: entry.round
+      });
+      inserted++;
+    }
+  }
+
+  ledger.entries = [...byTopic.values()];
+  if (ledger.entries.some(e => !e.topicId)) {
+    throw new Error('Ledger integrity check failed: entry without topicId');
+  }
+  atomicWriteFileSync(path.resolve(ledgerPath), JSON.stringify(ledger, null, 2));
+  return { inserted, updated, total: ledger.entries.length };
+}
+
 // ── Finding Metadata ────────────────────────────────────────────────────────
 
 /**

@@ -5,6 +5,7 @@ import path from 'path';
 import os from 'os';
 import {
   atomicWriteFileSync,
+  batchWriteLedger,
   zodToGeminiSchema,
   FindingSchema,
   FindingJsonSchema,
@@ -618,5 +619,96 @@ describe('Prompt Registry', () => {
     } finally {
       process.chdir(origDir);
     }
+  });
+});
+
+// ── batchWriteLedger ──────────────────────────────────────────────────────────
+
+describe('batchWriteLedger', () => {
+  it('creates new ledger file', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    const entries = [
+      { topicId: 'abc123', findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 },
+      { topicId: 'def456', findingId: 'M1', severity: 'MEDIUM', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+    ];
+    const { inserted, updated, total } = batchWriteLedger(ledgerPath, entries);
+    assert.equal(inserted, 2);
+    assert.equal(updated, 0);
+    assert.equal(total, 2);
+
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
+    assert.equal(ledger.version, 1);
+    assert.equal(ledger.entries.length, 2);
+    assert.equal(ledger.entries[0].firstSeenRound, 1);
+    assert.equal(ledger.entries[0].lastSeenRound, 1);
+  });
+
+  it('upserts by topicId and preserves adjudication axes', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    // Round 1: create entries
+    batchWriteLedger(ledgerPath, [
+      { topicId: 'abc123', findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+    ]);
+
+    // Simulate manual adjudication update
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
+    ledger.entries[0].adjudicationOutcome = 'accepted';
+    ledger.entries[0].remediationState = 'fixed';
+    fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+
+    // Round 2: re-observe same finding — should NOT overwrite adjudication
+    const { inserted, updated } = batchWriteLedger(ledgerPath, [
+      { topicId: 'abc123', findingId: 'H1', severity: 'MEDIUM', adjudicationOutcome: 'pending', remediationState: 'pending', round: 2 }
+    ]);
+    assert.equal(inserted, 0);
+    assert.equal(updated, 1);
+
+    const result = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
+    assert.equal(result.entries[0].adjudicationOutcome, 'accepted'); // preserved
+    assert.equal(result.entries[0].remediationState, 'fixed'); // preserved
+    assert.equal(result.entries[0].severity, 'MEDIUM'); // updated
+    assert.equal(result.entries[0].lastSeenRound, 2); // updated
+    assert.equal(result.entries[0].firstSeenRound, 1); // preserved
+  });
+
+  it('is idempotent', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    const entries = [
+      { topicId: 'abc123', findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+    ];
+    batchWriteLedger(ledgerPath, entries);
+    batchWriteLedger(ledgerPath, entries);
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
+    assert.equal(ledger.entries.length, 1);
+  });
+
+  it('skips entries without topicId or severity', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    const { inserted } = batchWriteLedger(ledgerPath, [
+      { topicId: null, findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending' },
+      { topicId: 'abc', severity: null, adjudicationOutcome: 'pending' },
+      { topicId: 'def', findingId: 'H2', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+    ]);
+    assert.equal(inserted, 1);
+  });
+
+  it('throws on corrupted ledger (not ENOENT)', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    fs.writeFileSync(ledgerPath, '{ invalid json');
+    assert.throws(() => {
+      batchWriteLedger(ledgerPath, [
+        { topicId: 'abc', findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+      ]);
+    });
+  });
+
+  it('throws on ledger missing entries array', () => {
+    const ledgerPath = path.join(tmpDir, 'ledger.json');
+    fs.writeFileSync(ledgerPath, JSON.stringify({ version: 1, data: [] }));
+    assert.throws(() => {
+      batchWriteLedger(ledgerPath, [
+        { topicId: 'abc', findingId: 'H1', severity: 'HIGH', adjudicationOutcome: 'pending', remediationState: 'pending', round: 1 }
+      ]);
+    }, /Corrupted ledger/);
   });
 });

@@ -25,7 +25,7 @@
  * @module scripts/openai-audit
  */
 
-import 'dotenv/config';  // Auto-load .env — no manual export needed
+// dotenv loaded by lib/config.mjs (worktree-safe discovery)
 import fs from 'node:fs';
 import path from 'node:path';
 import OpenAI from 'openai';
@@ -39,7 +39,7 @@ import {
 import {
   generateTopicId, populateFindingMetadata, jaccardSimilarity,
   suppressReRaises, buildRulingsBlock, R2_ROUND_MODIFIER, buildR2SystemPrompt,
-  computeImpactSet
+  computeImpactSet, batchWriteLedger
 } from './lib/ledger.mjs';
 import {
   estimateTokens, chunkLargeFile, extractExportsOnly, buildAuditUnits,
@@ -53,6 +53,11 @@ import {
 import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
+import {
+  LlmError, classifyLlmError, buildReducePayload, normalizeFindingsForOutput as _normalizeFindingsForOutput,
+  resolveLedgerPath, MAX_REDUCE_JSON_CHARS, MAP_FAILURE_THRESHOLD, RETRY_MAX_ATTEMPTS,
+  RETRY_BASE_DELAY_MS, RETRY_429_MAX_DELAY_MS, SEV_ORDER
+} from './lib/robustness.mjs';
 import {
   PASS_PROMPTS,
   PASS_STRUCTURE_SYSTEM as SEED_STRUCTURE, PASS_WIRING_SYSTEM as SEED_WIRING,
@@ -71,6 +76,8 @@ const TIMEOUT_MS_CAP = openaiConfig.timeoutMsCap;
 const BACKEND_SPLIT_THRESHOLD = openaiConfig.backendSplitThreshold;
 const MAP_REDUCE_THRESHOLD = openaiConfig.mapReduceThreshold;
 const MAP_REDUCE_TOKEN_THRESHOLD = openaiConfig.mapReduceTokenThreshold;
+
+// Robustness constants imported from lib/robustness.mjs
 
 /** Check if a file set should use map-reduce (by count OR total size). */
 function shouldMapReduce(files) {
@@ -288,23 +295,15 @@ const PASS_BACKEND_SYSTEM = getPassPrompt('backend');
 const PASS_FRONTEND_SYSTEM = getPassPrompt('frontend');
 const PASS_SUSTAINABILITY_SYSTEM = getPassPrompt('sustainability');
 
+// LlmError and classifyLlmError imported from lib/robustness.mjs
+
 // ── GPT API Call Helper ────────────────────────────────────────────────────────
 
 /**
  * Make a single GPT-5.4 call with structured output.
- * @param {OpenAI} openai
- * @param {object} opts
- * @param {string} opts.systemPrompt
- * @param {string} opts.userPrompt
- * @param {z.ZodType} opts.schema
- * @param {string} opts.schemaName
- * @param {string} [opts.reasoning='high']
- * @param {number} [opts.maxTokens]
- * @param {number} [opts.timeoutMs]
- * @param {string} [opts.passName] - For logging
- * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
+ * Detects incomplete/truncated responses and throws LlmError with usage attached.
  */
-async function callGPT(openai, { systemPrompt, userPrompt, schema, schemaName, reasoning, maxTokens, timeoutMs, passName }) {
+async function _callGPTOnce(openai, { systemPrompt, userPrompt, schema, schemaName, reasoning, maxTokens, timeoutMs, passName }) {
   const effort = reasoning ?? REASONING_EFFORT;
   const tokens = maxTokens ?? MAX_OUTPUT_TOKENS_CAP;
   const timeout = timeoutMs ?? TIMEOUT_MS_CAP;
@@ -336,19 +335,36 @@ async function callGPT(openai, { systemPrompt, userPrompt, schema, schemaName, r
     clearTimeout(timer);
     const latencyMs = Date.now() - startMs;
 
-    if (response.status === 'incomplete') {
-      throw new Error(`Response incomplete: ${response.incomplete_details?.reason ?? 'unknown'}`);
-    }
-
-    const result = response.output_parsed;
-    if (!result) throw new Error('No parsed output from model');
-
+    // Extract usage regardless of success/failure
     const usage = {
       input_tokens: response.usage?.input_tokens ?? 0,
       output_tokens: response.usage?.output_tokens ?? 0,
       reasoning_tokens: response.usage?.output_tokens_details?.reasoning_tokens ?? 0,
       latency_ms: latencyMs
     };
+
+    // Detect incomplete response
+    if (response.status === 'incomplete') {
+      const reason = response.incomplete_details?.reason ?? 'unknown';
+      throw new LlmError(`Response incomplete: ${reason}`, { category: 'incomplete', usage, retryable: true });
+    }
+
+    // Check ALL output items for truncation
+    for (const item of (response.output ?? [])) {
+      if (item?.status === 'incomplete') {
+        throw new LlmError(`Output truncated: ${item.incomplete_details?.reason ?? 'max_tokens'}`,
+          { category: 'truncated', usage, retryable: true });
+      }
+    }
+
+    const result = response.output_parsed;
+    if (!result) throw new LlmError('No parsed output from model', { category: 'empty', usage });
+
+    // Validate expected shape
+    if (result.findings !== undefined && !Array.isArray(result.findings)) {
+      throw new LlmError(`Schema violation: findings is ${typeof result.findings}, expected array`,
+        { category: 'schema', usage });
+    }
 
     if (passName) {
       process.stderr.write(`  [${passName}] Done in ${(latencyMs / 1000).toFixed(1)}s (${usage.input_tokens} in / ${usage.output_tokens} out)\n`);
@@ -358,6 +374,7 @@ async function callGPT(openai, { systemPrompt, userPrompt, schema, schemaName, r
 
   } catch (err) {
     clearTimeout(timer);
+    if (err instanceof LlmError) throw err; // Already structured
     const latencyMs = Date.now() - startMs;
     const isAbort = err.name === 'AbortError' || err.message?.toLowerCase().includes('abort');
     const msg = isAbort
@@ -366,6 +383,50 @@ async function callGPT(openai, { systemPrompt, userPrompt, schema, schemaName, r
     process.stderr.write(`  [${passName ?? 'call'}] FAILED: ${msg}\n`);
     throw new Error(msg);
   }
+}
+
+/**
+ * Call GPT with single retry on transient failures.
+ * Accumulates usage across attempts for truthful accounting.
+ */
+async function callGPT(openai, opts) {
+  let lastErr;
+  const startMs = Date.now();
+  const accumulatedUsage = { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+
+  for (let attempt = 0; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await _callGPTOnce(openai, opts);
+      if (attempt > 0) {
+        result.usage.input_tokens += accumulatedUsage.input_tokens;
+        result.usage.output_tokens += accumulatedUsage.output_tokens;
+        result.usage.reasoning_tokens += accumulatedUsage.reasoning_tokens;
+        result.latencyMs = Date.now() - startMs;
+        result._retried = true;
+        result._attempts = attempt + 1;
+      }
+      return result;
+    } catch (err) {
+      lastErr = err;
+      if (err.llmUsage) {
+        accumulatedUsage.input_tokens += err.llmUsage.input_tokens ?? 0;
+        accumulatedUsage.output_tokens += err.llmUsage.output_tokens ?? 0;
+        accumulatedUsage.reasoning_tokens += err.llmUsage.reasoning_tokens ?? 0;
+      }
+      const { retryable, category } = classifyLlmError(err);
+      if (attempt < RETRY_MAX_ATTEMPTS && retryable) {
+        const delayMs = category === 'http-429'
+          ? Math.min(RETRY_429_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * (attempt + 1) + Math.random() * 1000)
+          : RETRY_BASE_DELAY_MS * (attempt + 1);
+        process.stderr.write(`  [${opts.passName ?? 'call'}] Retry ${attempt + 1}/${RETRY_MAX_ATTEMPTS} in ${(delayMs / 1000).toFixed(1)}s [${category}]\n`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      err._accumulatedUsage = accumulatedUsage;
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -385,6 +446,12 @@ async function safeCallGPT(openai, opts, emptyResult) {
       error: err.message
     };
   }
+}
+
+// buildReducePayload and normalizeFindingsForOutput imported from lib/robustness.mjs
+// Wrap normalizeFindingsForOutput to inject semanticId
+function normalizeFindingsForOutput(findings) {
+  return _normalizeFindingsForOutput(findings, semanticId);
 }
 
 // ── Map-Reduce Pass ──────────────────────────────────────────────────────────
@@ -439,46 +506,78 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
     })
   );
 
-  // Collect findings
+  // Collect findings + aggregate usage (including failed units)
   const allFindings = [];
-  let failedUnits = 0;
+  const mapUsage = { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+  let effectiveFailures = 0;
   for (let i = 0; i < results.length; i++) {
     if (results[i].status === 'fulfilled') {
-      for (const f of (results[i].value.result.findings || [])) {
-        f._mapUnit = i;
-        allFindings.push(f);
+      const val = results[i].value;
+      if (val?.usage) {
+        mapUsage.input_tokens += val.usage.input_tokens ?? 0;
+        mapUsage.output_tokens += val.usage.output_tokens ?? 0;
+        mapUsage.reasoning_tokens += val.usage.reasoning_tokens ?? 0;
+      }
+      if (!val?.result || !Array.isArray(val.result.findings)) {
+        effectiveFailures++;
+      } else {
+        for (const f of val.result.findings) {
+          f._mapUnit = i;
+          allFindings.push(f);
+        }
       }
     } else {
-      failedUnits++;
+      effectiveFailures++;
+      if (results[i].reason?._accumulatedUsage) {
+        mapUsage.input_tokens += results[i].reason._accumulatedUsage.input_tokens ?? 0;
+        mapUsage.output_tokens += results[i].reason._accumulatedUsage.output_tokens ?? 0;
+        mapUsage.reasoning_tokens += results[i].reason._accumulatedUsage.reasoning_tokens ?? 0;
+      }
       process.stderr.write(`  [map-${passName}-${i}] FAILED: ${results[i].reason?.message || 'unknown'}\n`);
     }
   }
 
-  process.stderr.write(`  [${passName}] MAP done: ${allFindings.length} findings from ${units.length - failedUnits}/${units.length} units (${((Date.now() - mapStart) / 1000).toFixed(1)}s)\n`);
+  process.stderr.write(`  [${passName}] MAP done: ${allFindings.length} findings from ${units.length - effectiveFailures}/${units.length} units (${((Date.now() - mapStart) / 1000).toFixed(1)}s)\n`);
 
   if (allFindings.length === 0) {
     return {
-      result: { pass_name: passName, findings: [], quick_fix_warnings: [], summary: `Map-reduce: ${units.length} units, 0 findings. ${failedUnits} units failed.` },
-      usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 },
+      result: { pass_name: passName, findings: [], quick_fix_warnings: [], summary: `Map-reduce: ${units.length} units, 0 findings. ${effectiveFailures} units failed.` },
+      usage: mapUsage,
       latencyMs: Date.now() - mapStart
+    };
+  }
+
+  // MAP failure threshold — skip REDUCE when majority failed
+  const failureRate = effectiveFailures / units.length;
+  if (failureRate > MAP_FAILURE_THRESHOLD && allFindings.length > 0) {
+    process.stderr.write(`  [${passName}] ${effectiveFailures}/${units.length} MAP units failed (${(failureRate * 100).toFixed(0)}%) — skipping REDUCE, returning normalized raw findings\n`);
+    const normalized = normalizeFindingsForOutput(allFindings);
+    return {
+      result: { pass_name: passName, findings: normalized, quick_fix_warnings: [],
+        summary: `Map-reduce: ${effectiveFailures}/${units.length} units failed. Returning ${normalized.length} raw findings (REDUCE skipped).` },
+      usage: mapUsage,
+      latencyMs: Date.now() - mapStart,
+      _mapFailureRate: failureRate,
+      _reduceSkipped: true
     };
   }
 
   // REDUCE phase: single synthesis call
   process.stderr.write(`  [${passName}] REDUCE: synthesizing ${allFindings.length} findings\n`);
 
-  // Token budget: cap findings at ~30K tokens
-  const findingsForReduce = allFindings.sort((a, b) => {
-    const sevOrder = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-    return (sevOrder[a.severity] ?? 2) - (sevOrder[b.severity] ?? 2);
-  });
-  let findingsJson = JSON.stringify(findingsForReduce.map(f => ({
-    id: f.id, severity: f.severity, category: f.category,
-    section: f.section, detail: f.detail?.slice(0, 200),
-    is_quick_fix: f.is_quick_fix, _mapUnit: f._mapUnit
-  })), null, 2);
-  if (findingsJson.length > 120000) {
-    findingsJson = findingsJson.slice(0, 120000) + '\n... [truncated]';
+  // Safe JSON truncation — always produces valid JSON
+  const payload = buildReducePayload(allFindings);
+  if (payload.degraded) {
+    process.stderr.write(`  [${passName}] REDUCE payload could not fit budget — skipping REDUCE\n`);
+    return {
+      result: { pass_name: passName, findings: normalizeFindingsForOutput(allFindings), quick_fix_warnings: [],
+        summary: `REDUCE skipped: findings exceeded budget after normalization.` },
+      usage: mapUsage, latencyMs: Date.now() - mapStart, _reduceSkipped: true
+    };
+  }
+  const { json: findingsJson, includedCount, totalCount } = payload;
+  if (includedCount < totalCount) {
+    process.stderr.write(`  [${passName}] REDUCE input truncated: ${includedCount}/${totalCount} findings (budget: ${MAX_REDUCE_JSON_CHARS} chars)\n`);
   }
 
   // Reduce uses low reasoning — it's dedup/ranking, not deep analysis. Higher timeout for large finding sets.
@@ -486,7 +585,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
   reduceLimits.timeoutMs = Math.max(reduceLimits.timeoutMs, 180000); // Min 3 min for reduce
   const reduceResult = await safeCallGPT(openai, {
     systemPrompt: REDUCE_SYSTEM_PROMPT,
-    userPrompt: `## Findings from ${units.length} audit units (${failedUnits} failed):\n\n${findingsJson}\n\n## Tasks:\n1. Deduplicate\n2. Elevate systemic patterns (3+ occurrences)\n3. Flag cross-file issues\n4. Rank by severity`,
+    userPrompt: `## Findings from ${units.length} audit units (${effectiveFailures} failed):\n\n${findingsJson}\n\n## Tasks:\n1. Deduplicate\n2. Elevate systemic patterns (3+ occurrences)\n3. Flag cross-file issues\n4. Rank by severity`,
     schema: PassFindingsSchema,
     schemaName: `reduce_${passName}`,
     reasoning: 'low',
@@ -509,7 +608,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false } = {}) {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -907,13 +1006,13 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     }
   }
 
-  addFindings(structureResult.result.findings, 'Structure');
-  addFindings(wiringResult.result.findings, 'Wiring');
+  addFindings(structureResult?.result?.findings, 'Structure');
+  addFindings(wiringResult?.result?.findings, 'Wiring');
   for (let i = 0; i < backendResults.length; i++) {
-    addFindings(backendResults[i].result.findings, backendPassNames[i] ?? 'Backend');
+    addFindings(backendResults[i]?.result?.findings, backendPassNames[i] ?? 'Backend');
   }
-  addFindings(frontendResult.result.findings, 'Frontend');
-  addFindings(sustainResult.result.findings, 'Sustainability');
+  addFindings(frontendResult?.result?.findings, 'Frontend');
+  addFindings(sustainResult?.result?.findings, 'Sustainability');
 
   if (dedupCount > 0) {
     process.stderr.write(`  Deduped ${dedupCount} cross-pass duplicate(s)\n`);
@@ -960,7 +1059,46 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     allFindings.length = 0;
     allFindings.push(...kept, ...reopened);
 
-    // Recalculate counts (the existing code after this point uses allFindings for counting)
+    // Populate _suppression — full arrays for recordSuppressionEvents() + summary counts
+    mergedResult._suppression = {
+      suppressed,   // Array of { finding, matchedTopic, matchScore, reason } objects
+      reopened,     // Array of finding objects with _matchedTopic, _matchScore
+      keptCount: kept.length,
+      suppressedCount: suppressed.length,
+      reopenedCount: reopened.length,
+      fpSuppressedCount: fpSuppressed?.length ?? 0
+    };
+  }
+
+  // Auto-write ledger (default-on when ledgerFile resolved)
+  if (ledgerFile && !noLedger) {
+    try {
+      const enriched = allFindings.map(f => {
+        const copy = { ...f };
+        populateFindingMetadata(copy, copy._pass);
+        return copy;
+      });
+
+      const ledgerEntries = enriched.map(f => ({
+        topicId: generateTopicId(f),
+        findingId: f.id,
+        severity: f.severity,
+        category: f.category,
+        section: f.section,
+        detail: f.detail?.slice(0, 300),
+        pass: f._pass,
+        _hash: f._hash,
+        adjudicationOutcome: 'pending',
+        remediationState: 'pending',
+        round
+      }));
+
+      const { inserted, updated, total } = batchWriteLedger(ledgerFile, ledgerEntries);
+      process.stderr.write(`  [ledger] Written to ${ledgerFile}: ${inserted} new, ${updated} updated, ${total} total\n`);
+    } catch (err) {
+      process.stderr.write(`  [ledger] WRITE FAILED: ${err.message}\n`);
+      mergedResult._ledgerWriteError = err.message;
+    }
   }
 
   const high = allFindings.filter(f => f.severity === 'HIGH').length;
@@ -1145,6 +1283,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   } catch { /* ignore */ }
 }
 
+// resolveLedgerPath imported from lib/robustness.mjs
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1176,9 +1316,10 @@ async function main() {
   const roundIdx = args.indexOf('--round');
   const round = roundIdx !== -1 && args[roundIdx + 1] ? parseInt(args[roundIdx + 1], 10) : 1;
 
-  // --ledger <file>: adjudication ledger for R2+ suppression of previously resolved findings
+  // --ledger <file>: adjudication ledger — single canonical read+write path
   const ledgerIdx = args.indexOf('--ledger');
-  const ledgerFile = ledgerIdx !== -1 && args[ledgerIdx + 1] ? args[ledgerIdx + 1] : null;
+  const ledgerFileArg = ledgerIdx !== -1 && args[ledgerIdx + 1] ? args[ledgerIdx + 1] : null;
+  const noLedger = args.includes('--no-ledger');
 
   // --diff <file>: unified diff file for R2+ annotated context (highlights changed lines)
   const diffIdx = args.indexOf('--diff');
@@ -1219,9 +1360,19 @@ async function main() {
 
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+  // Resolve canonical ledger path
+  const ledgerPath = resolveLedgerPath({ explicitLedger: ledgerFileArg, outFile, round, noLedger });
+  if (!ledgerPath && round >= 2 && !noLedger) {
+    process.stderr.write(`  [ERROR] Round ${round} requires --ledger <path> for suppression. Use --no-ledger to skip.\n`);
+    process.exit(1);
+  }
+  if (ledgerPath && !ledgerFileArg) {
+    process.stderr.write(`  [ledger] Auto-derived path: ${ledgerPath}\n`);
+  }
+
   // Code mode → multi-pass parallel audit
   if (mode === 'code') {
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter, round, ledgerFile, diffFile, changedFiles, repoProfile, bandit, fpTracker });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger });
     return;
   }
 

@@ -6,7 +6,7 @@
  * @module scripts/refine-prompts
  */
 
-import 'dotenv/config';
+// dotenv loaded by lib/config.mjs (worktree-safe discovery)
 import fs from 'fs';
 import path from 'path';
 import { loadOutcomes, computePassEffectiveness, computePassEWR } from './lib/findings.mjs';

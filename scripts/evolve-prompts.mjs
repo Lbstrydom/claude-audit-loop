@@ -13,7 +13,7 @@
  * @module scripts/evolve-prompts
  */
 
-import 'dotenv/config';
+// dotenv loaded by lib/config.mjs (worktree-safe discovery)
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';

@@ -5,7 +5,58 @@
  * @module scripts/lib/config
  */
 
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
 import { safeInt } from './file-io.mjs';
+
+// ── .env Discovery (worktree-safe) ──────────────────────────────────────────
+
+/**
+ * Find .env file by walking up from CWD, then checking git main worktree root.
+ * Handles git worktrees where .env only exists in the main checkout.
+ * Sets DOTENV_CONFIG_PATH so `import 'dotenv/config'` picks it up.
+ */
+function discoverDotenv() {
+  // Already found or explicitly set
+  if (process.env.DOTENV_CONFIG_PATH) return;
+
+  // Walk up from CWD
+  let dir = process.cwd();
+  while (dir) {
+    const envPath = path.join(dir, '.env');
+    if (fs.existsSync(envPath)) {
+      process.env.DOTENV_CONFIG_PATH = envPath;
+      return;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  // Try git main worktree root (handles worktrees and branches)
+  try {
+    const gitRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const envPath = path.join(gitRoot, '.env');
+    if (fs.existsSync(envPath)) {
+      process.env.DOTENV_CONFIG_PATH = envPath;
+      return;
+    }
+
+    // For worktrees: check the main worktree's .env
+    const gitCommonDir = execSync('git rev-parse --git-common-dir', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const mainRoot = path.resolve(gitCommonDir, '..');
+    const mainEnvPath = path.join(mainRoot, '.env');
+    if (mainEnvPath !== envPath && fs.existsSync(mainEnvPath)) {
+      process.env.DOTENV_CONFIG_PATH = mainEnvPath;
+    }
+  } catch { /* not a git repo — dotenv will use CWD default */ }
+}
+
+// Run discovery then load .env (uses dotenv package directly, not 'dotenv/config')
+discoverDotenv();
+import dotenv from 'dotenv';
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env' });
 
 // ── Validation helpers ──────────────────────────────────────────────────────
 

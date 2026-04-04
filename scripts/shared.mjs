@@ -35,6 +35,7 @@ export {
 export {
   generateTopicId,
   writeLedgerEntry,
+  batchWriteLedger,
   populateFindingMetadata,
   jaccardSimilarity,
   suppressReRaises,

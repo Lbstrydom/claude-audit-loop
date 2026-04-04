@@ -17,7 +17,7 @@
  * @module scripts/gemini-review
  */
 
-import 'dotenv/config';
+// dotenv loaded by lib/config.mjs (worktree-safe discovery)
 import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
 import { FindingSchema, zodToGeminiSchema } from './lib/schemas.mjs';
