@@ -614,7 +614,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null } = {}) {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -662,11 +662,36 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     eventsPath: debtEventsPath,
   });
   if (debtLedger.entries.length > 0) {
-    const escalated = debtLedger.entries.filter(e => e.escalated).length;
-    process.stderr.write(`  [debt] ${debtLedger.entries.length} debt entries loaded (${escalated} escalated)\n`);
+    const alreadyEscalated = debtLedger.entries.filter(e => e.escalated).length;
+    process.stderr.write(`  [debt] ${debtLedger.entries.length} debt entries loaded (${alreadyEscalated} escalated)\n`);
   }
   // Audit session ID for event-log attribution
   const debtRunId = `audit-${Date.now()}`;
+
+  // Phase D.3 escalation gate: flip escalated=true on entries with
+  // distinctRunCount >= threshold so they bypass suppression this round.
+  // Emits one 'escalated' event per entry newly escalated.
+  const newlyEscalated = [];
+  if (escalateRecurring && Number.isFinite(escalateRecurring) && escalateRecurring > 0 && debtContext.canWrite) {
+    const nowIso = new Date().toISOString();
+    for (const entry of debtLedger.entries) {
+      const runs = entry.distinctRunCount ?? entry.occurrences ?? 0;
+      if (runs >= escalateRecurring && !entry.escalated) {
+        entry.escalated = true;           // in-memory flag bypasses suppression
+        entry.escalatedAt = nowIso;
+        newlyEscalated.push({
+          ts: nowIso,
+          runId: debtRunId,
+          topicId: entry.topicId,
+          event: 'escalated',
+        });
+      }
+    }
+    if (newlyEscalated.length > 0) {
+      await appendEvents(debtContext, newlyEscalated, { eventsPath: debtEventsPath });
+      process.stderr.write(`  [debt] escalated ${newlyEscalated.length} recurring entries (distinctRunCount >= ${escalateRecurring})\n`);
+    }
+  }
 
   // Split backend into routes vs services for manageable chunk sizes
   const backendRoutes = backend.filter(f => f.includes('/routes/'));
@@ -1201,11 +1226,46 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     } else if (debtEvents.length > 0) {
       process.stderr.write(`  [debt] ${debtEvents.length} event(s) suppressed (read-only mode)\n`);
     }
+    // Phase D.3 debt status card
+    if (debtLedger.entries.length > 0) {
+      const escalatedCount = debtLedger.entries.filter(e => e.escalated).length;
+      const recurring3 = debtLedger.entries.filter(e => (e.distinctRunCount ?? 0) >= 3).length;
+      // oldestEntryDays inline
+      const now = Date.now();
+      let oldestMs = now;
+      for (const e of debtLedger.entries) {
+        const t = Date.parse(e.deferredAt);
+        if (Number.isFinite(t) && t < oldestMs) oldestMs = t;
+      }
+      const oldestDays = Math.floor(Math.max(0, now - oldestMs) / (24 * 60 * 60 * 1000));
+      process.stderr.write(`\n═══════════════════════════════════════\n`);
+      process.stderr.write(`  DEBT LEDGER: ${debtLedger.entries.length} entries | Suppressed this run: ${surfacedTopics.size}\n`);
+      process.stderr.write(`  Recurring (≥3 runs): ${recurring3} | Escalated: ${escalatedCount}${newlyEscalated.length > 0 ? ` (+${newlyEscalated.length} this run)` : ''}\n`);
+      if (debtLedger.entries.length >= 10) {
+        // Top file only surfaces for larger ledgers (noise suppression per fix L3)
+        const byFile = new Map();
+        for (const e of debtLedger.entries) {
+          const f = (e.affectedFiles || [])[0];
+          if (f) byFile.set(f, (byFile.get(f) || 0) + 1);
+        }
+        const topFile = [...byFile.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (topFile) {
+          process.stderr.write(`  Oldest: ${oldestDays}d | Top file: ${topFile[0]} (${topFile[1]} entries)\n`);
+        } else {
+          process.stderr.write(`  Oldest: ${oldestDays}d\n`);
+        }
+      } else {
+        process.stderr.write(`  Oldest: ${oldestDays}d\n`);
+      }
+      process.stderr.write(`═══════════════════════════════════════\n\n`);
+    }
+
     mergedResult._debtMemory = {
       eventSource: debtContext.source,
       debtSuppressed: surfacedTopics.size,
       debtReopened: reopenedDebtTopics.size,
       debtEntriesLoaded: debtLedger.entries.length,
+      newlyEscalated: newlyEscalated.length,
     };
   }
 
@@ -1510,12 +1570,15 @@ async function main() {
   // --debt-ledger <path>: override default path
   // --debt-events <path>: override default local event log path
   // --read-only-debt: load debt for suppression, never write events (CI/parallel safety)
+  // --escalate-recurring <N>: bypass suppression for debt with distinctRunCount >= N
   const noDebtLedger = args.includes('--no-debt-ledger');
   const readOnlyDebt = args.includes('--read-only-debt');
   const debtLedgerIdx = args.indexOf('--debt-ledger');
   const debtLedgerPath = debtLedgerIdx !== -1 && args[debtLedgerIdx + 1] ? args[debtLedgerIdx + 1] : undefined;
   const debtEventsIdx = args.indexOf('--debt-events');
   const debtEventsPath = debtEventsIdx !== -1 && args[debtEventsIdx + 1] ? args[debtEventsIdx + 1] : undefined;
+  const escalateIdx = args.indexOf('--escalate-recurring');
+  const escalateRecurring = escalateIdx !== -1 && args[escalateIdx + 1] ? parseInt(args[escalateIdx + 1], 10) : null;
 
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
     console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>] [--passes <list>] [--files <list>]');
@@ -1602,7 +1665,7 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring });
     return;
   }
 

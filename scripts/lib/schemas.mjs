@@ -275,3 +275,53 @@ export const DebtLedgerSchema = z.object({
   budgets: z.record(z.string(), z.number().int().min(0)).optional(),
   lastUpdated: z.string().datetime().optional(),
 });
+
+// ── Debt Review Schemas (Phase D.3) ─────────────────────────────────────────
+
+/**
+ * ClusterSchema — a group of debt entries identified by the LLM as related.
+ * Kinds:
+ *   file        — entries citing the same module
+ *   principle   — entries violating the same engineering principle
+ *   recurrence  — entries with high distinctRunCount (systemic signal)
+ */
+export const ClusterSchema = z.object({
+  id: z.string().max(40).describe('Stable cluster id, e.g. cluster-god-module-openai'),
+  title: z.string().max(120),
+  kind: z.enum(['file', 'principle', 'recurrence']),
+  entries: z.array(z.string()).max(50).describe('topicIds of member entries'),
+  rationale: z.string().max(500),
+});
+
+/**
+ * RefactorCandidateSchema — a proposed refactor pass that would resolve
+ * one or more clusters. LLM proposes clusterId + effort + risks; server
+ * computes leverageScore from resolved entries' sonarType weights.
+ */
+export const RefactorCandidateSchema = z.object({
+  clusterId: z.string().max(40),
+  targetModules: z.array(z.string().max(120)).max(10),
+  resolvedTopicIds: z.array(z.string()).max(50),
+  effortEstimate: z.enum(['TRIVIAL', 'EASY', 'MEDIUM', 'MAJOR', 'CRITICAL']),
+  effortRationale: z.string().max(400),
+  risks: z.array(z.string().max(200)).max(5),
+  rollbackStrategy: z.string().max(400),
+});
+
+/**
+ * DebtReviewResultSchema — the full LLM output contract for debt-review.
+ * leverageScore is computed server-side (see lib/debt-review-helpers.mjs)
+ * and added to RefactorCandidates post-validation. budgetViolations are
+ * also server-computed from the debt ledger + budgets map.
+ */
+export const DebtReviewResultSchema = z.object({
+  summary: z.object({
+    totalEntries: z.number().int().min(0),
+    clustersIdentified: z.number().int().min(0),
+    oldestEntryDays: z.number().int().min(0),
+    staleEntries: z.array(z.string()).max(100).describe('topicIds older than --ttl-days'),
+  }),
+  clusters: z.array(ClusterSchema).max(20),
+  refactorPlan: z.array(RefactorCandidateSchema).max(10),
+  reasoning: z.string().max(1500),
+});

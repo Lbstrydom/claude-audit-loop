@@ -14,6 +14,9 @@ import {
   DebtLedgerSchema,
   LedgerEntrySchema,
   DeferredReasonEnum,
+  ClusterSchema,
+  RefactorCandidateSchema,
+  DebtReviewResultSchema,
 } from '../scripts/lib/schemas.mjs';
 
 const baseEntry = {
@@ -194,4 +197,63 @@ test('DeferredReasonEnum — 5 valid reasons', () => {
   assert.deepEqual(DeferredReasonEnum.options.sort(), [
     'accepted-permanent', 'blocked-by', 'deferred-followup', 'out-of-scope', 'policy-exception',
   ]);
+});
+
+// ── Debt Review Schemas ─────────────────────────────────────────────────────
+
+test('ClusterSchema — valid file cluster', () => {
+  const r = ClusterSchema.safeParse({
+    id: 'file:src/x.js',
+    title: 'src/x.js — 3 entries',
+    kind: 'file',
+    entries: ['t1', 't2', 't3'],
+    rationale: 'Three debt entries cite this module, candidate for refactor.',
+  });
+  assert.equal(r.success, true, r.error?.message);
+});
+
+test('ClusterSchema — rejects invalid kind', () => {
+  const r = ClusterSchema.safeParse({
+    id: 'x', title: 't', kind: 'lolwhat', entries: [], rationale: 'r',
+  });
+  assert.equal(r.success, false);
+});
+
+test('RefactorCandidateSchema — valid candidate', () => {
+  const r = RefactorCandidateSchema.safeParse({
+    clusterId: 'file:src/x.js',
+    targetModules: ['src/x.js'],
+    resolvedTopicIds: ['t1', 't2'],
+    effortEstimate: 'MEDIUM',
+    effortRationale: 'Extracting helper module touches 3 call sites.',
+    risks: ['Break callers relying on internal exports'],
+    rollbackStrategy: 'Revert commit, restore old module.',
+  });
+  assert.equal(r.success, true, r.error?.message);
+});
+
+test('RefactorCandidateSchema — rejects invalid effort', () => {
+  const r = RefactorCandidateSchema.safeParse({
+    clusterId: 'x', targetModules: [], resolvedTopicIds: [],
+    effortEstimate: 'EASY_PEASY',
+    effortRationale: 'r', risks: [], rollbackStrategy: 'r',
+  });
+  assert.equal(r.success, false);
+});
+
+test('DebtReviewResultSchema — valid full result', () => {
+  const r = DebtReviewResultSchema.safeParse({
+    summary: { totalEntries: 5, clustersIdentified: 2, oldestEntryDays: 90, staleEntries: [] },
+    clusters: [],
+    refactorPlan: [],
+    reasoning: 'Quiet ledger, no refactor needed.',
+  });
+  assert.equal(r.success, true, r.error?.message);
+});
+
+test('DebtReviewResultSchema — rejects missing summary', () => {
+  const r = DebtReviewResultSchema.safeParse({
+    clusters: [], refactorPlan: [], reasoning: 'r',
+  });
+  assert.equal(r.success, false);
 });

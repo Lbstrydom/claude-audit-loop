@@ -167,3 +167,39 @@ describe('suppressReRaises — source-aware filter', () => {
     assert.equal(suppressed.length, 0);
   });
 });
+
+describe('escalation gate — flipping escalated=true bypasses suppression', () => {
+  test('non-escalated debt suppresses as normal', () => {
+    const findings = [makeFinding()];
+    const ledger = { entries: [debtEntry({ escalated: false })] };
+    const { kept, suppressed } = suppressReRaises(findings, ledger, {});
+    assert.equal(kept.length, 0);
+    assert.equal(suppressed.length, 1);
+  });
+
+  test('escalated debt is re-raised (not suppressed)', () => {
+    const findings = [makeFinding()];
+    const entry = debtEntry({ escalated: true, escalatedAt: '2026-04-05T10:00:00.000Z' });
+    const ledger = { entries: [entry] };
+    const { kept, suppressed } = suppressReRaises(findings, ledger, {});
+    assert.equal(kept.length, 1);
+    assert.equal(suppressed.length, 0);
+  });
+
+  test('mix of escalated + non-escalated: only non-escalated suppressed', () => {
+    const findings = [
+      makeFinding({ section: 'src/a.js:1', category: 'cat-A', detail: 'duplicate logic in module A' }),
+      makeFinding({ section: 'src/b.js:1', category: 'cat-B', detail: 'similar issue over in module B' }),
+    ];
+    const ledger = {
+      entries: [
+        debtEntry({ topicId: 'd1', affectedFiles: ['src/a.js'], section: 'src/a.js:1', category: 'cat-A', detailSnapshot: 'duplicate logic in module A', escalated: true }),
+        debtEntry({ topicId: 'd2', affectedFiles: ['src/b.js'], section: 'src/b.js:1', category: 'cat-B', detailSnapshot: 'similar issue over in module B', escalated: false }),
+      ],
+    };
+    const { kept, suppressed } = suppressReRaises(findings, ledger, {});
+    assert.equal(kept.length, 1);       // escalated entry re-raised
+    assert.equal(suppressed.length, 1); // non-escalated entry suppressed
+    assert.equal(suppressed[0].matchedTopic, 'd2');
+  });
+});

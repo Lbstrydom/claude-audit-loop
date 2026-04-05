@@ -22,6 +22,9 @@ export {
   DebtEventSchema,
   DebtLedgerSchema,
   DeferredReasonEnum,
+  ClusterSchema,
+  RefactorCandidateSchema,
+  DebtReviewResultSchema,
   zodToGeminiSchema
 } from './lib/schemas.mjs';
 
@@ -158,6 +161,19 @@ export {
   buildDebtEntry,
   suggestDeferralCandidate,
 } from './lib/debt-capture.mjs';
+
+export {
+  EFFORT_WEIGHTS,
+  SONAR_TYPE_WEIGHTS,
+  computeLeverage,
+  rankRefactorsByLeverage,
+  findStaleEntries,
+  oldestEntryDays,
+  buildLocalClusters,
+  findRecurringEntries,
+  findBudgetViolations,
+  countDebtByFile,
+} from './lib/debt-review-helpers.mjs';
 
 // ── File Store ──────────────────────────────────────────────────────────────
 export {
