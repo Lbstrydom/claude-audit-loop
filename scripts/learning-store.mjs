@@ -248,6 +248,190 @@ export async function recordSuppressionEvents(runId, suppressionResult) {
   if (error) process.stderr.write(`  [learning] recordSuppressionEvents failed: ${error.message}\n`);
 }
 
+// ── Debt Ledger (Phase D) ───────────────────────────────────────────────────
+
+/**
+ * Upsert debt entries to the cloud debt_entries table. Per-entry idempotent
+ * via (repo_id, topic_id) UNIQUE constraint. Caller handles local persistence;
+ * this writer only mirrors approved entries to the cloud.
+ *
+ * @param {string|null} repoId - from upsertRepo(); null skips the call
+ * @param {object[]} entries - PersistedDebtEntry-shaped
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+export async function upsertDebtEntries(repoId, entries) {
+  if (!_supabase || !repoId || !Array.isArray(entries) || entries.length === 0) {
+    return { ok: true };
+  }
+  const rows = entries.map(e => ({
+    repo_id: repoId,
+    topic_id: e.topicId,
+    semantic_hash: e.semanticHash,
+    severity: e.severity,
+    category: e.category,
+    section: e.section,
+    detail_snapshot: e.detailSnapshot,
+    affected_files: e.affectedFiles,
+    affected_principles: e.affectedPrinciples,
+    pass: e.pass,
+    sonar_type: e.classification?.sonarType ?? null,
+    effort: e.classification?.effort ?? null,
+    source_kind: e.classification?.sourceKind ?? null,
+    source_name: e.classification?.sourceName ?? null,
+    deferred_reason: e.deferredReason,
+    deferred_at: e.deferredAt,
+    deferred_run: e.deferredRun,
+    deferred_rationale: e.deferredRationale,
+    blocked_by: e.blockedBy ?? null,
+    followup_pr: e.followupPr ?? null,
+    approver: e.approver ?? null,
+    approved_at: e.approvedAt ?? null,
+    policy_ref: e.policyRef ?? null,
+    owner: e.owner ?? null,
+    content_aliases: e.contentAliases || [],
+    sensitive: e.sensitive ?? false,
+    updated_at: new Date().toISOString(),
+  }));
+  const { error } = await _supabase
+    .from('debt_entries')
+    .upsert(rows, { onConflict: 'repo_id,topic_id' });
+  if (error) {
+    process.stderr.write(`  [learning] upsertDebtEntries failed: ${error.message}\n`);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
+/**
+ * Read all debt entries for a repo from the cloud.
+ * Returns PersistedDebtEntry-shaped objects (no derived fields — derive via events).
+ * @param {string|null} repoId
+ * @returns {Promise<object[]>}
+ */
+export async function readDebtEntriesCloud(repoId) {
+  if (!_supabase || !repoId) return [];
+  const { data, error } = await _supabase
+    .from('debt_entries')
+    .select('*')
+    .eq('repo_id', repoId);
+  if (error) {
+    process.stderr.write(`  [learning] readDebtEntriesCloud failed: ${error.message}\n`);
+    return [];
+  }
+  return (data || []).map(row => ({
+    source: 'debt',
+    topicId: row.topic_id,
+    semanticHash: row.semantic_hash,
+    severity: row.severity,
+    category: row.category,
+    section: row.section,
+    detailSnapshot: row.detail_snapshot,
+    affectedFiles: row.affected_files || [],
+    affectedPrinciples: row.affected_principles || [],
+    pass: row.pass,
+    classification: row.sonar_type
+      ? { sonarType: row.sonar_type, effort: row.effort, sourceKind: row.source_kind, sourceName: row.source_name }
+      : null,
+    deferredReason: row.deferred_reason,
+    deferredAt: row.deferred_at,
+    deferredRun: row.deferred_run,
+    deferredRationale: row.deferred_rationale,
+    blockedBy: row.blocked_by ?? undefined,
+    followupPr: row.followup_pr ?? undefined,
+    approver: row.approver ?? undefined,
+    approvedAt: row.approved_at ?? undefined,
+    policyRef: row.policy_ref ?? undefined,
+    owner: row.owner ?? undefined,
+    contentAliases: row.content_aliases || [],
+    sensitive: row.sensitive ?? false,
+  }));
+}
+
+/**
+ * Delete a debt entry from the cloud by topicId.
+ * Idempotent — no-op when the row doesn't exist.
+ */
+export async function removeDebtEntryCloud(repoId, topicId) {
+  if (!_supabase || !repoId) return { ok: true };
+  const { error } = await _supabase
+    .from('debt_entries')
+    .delete()
+    .eq('repo_id', repoId)
+    .eq('topic_id', topicId);
+  if (error) {
+    process.stderr.write(`  [learning] removeDebtEntryCloud failed: ${error.message}\n`);
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
+/**
+ * Append debt events to the cloud. Idempotent via the
+ * (repo_id, topic_id, run_id, event) UNIQUE constraint — duplicate inserts
+ * are silently dropped, which enables the offline→cloud reconciler.
+ *
+ * @param {string|null} repoId
+ * @param {object[]} events - DebtEvent-shaped
+ * @returns {Promise<{inserted: number, error?: string}>}
+ */
+export async function appendDebtEventsCloud(repoId, events) {
+  if (!_supabase || !repoId || !Array.isArray(events) || events.length === 0) {
+    return { inserted: 0 };
+  }
+  const rows = events.map(e => ({
+    repo_id: repoId,
+    topic_id: e.topicId ?? null,
+    event: e.event,
+    run_id: e.runId,
+    ts: e.ts,
+    match_count: e.matchCount ?? null,
+    rationale: e.rationale ?? null,
+    resolution_rationale: e.resolutionRationale ?? null,
+    resolved_by: e.resolvedBy ?? null,
+  }));
+  // Use upsert with ignoreDuplicates to get idempotent inserts.
+  const { data, error } = await _supabase
+    .from('debt_events')
+    .upsert(rows, {
+      onConflict: 'repo_id,topic_id,run_id,event',
+      ignoreDuplicates: true,
+    })
+    .select('id');
+  if (error) {
+    process.stderr.write(`  [learning] appendDebtEventsCloud failed: ${error.message}\n`);
+    return { inserted: 0, error: error.message };
+  }
+  return { inserted: (data || []).length };
+}
+
+/**
+ * Read all debt events for a repo.
+ * @param {string|null} repoId
+ * @returns {Promise<object[]>} DebtEvent[] (normalized camelCase)
+ */
+export async function readDebtEventsCloud(repoId) {
+  if (!_supabase || !repoId) return [];
+  const { data, error } = await _supabase
+    .from('debt_events')
+    .select('*')
+    .eq('repo_id', repoId)
+    .order('ts', { ascending: true });
+  if (error) {
+    process.stderr.write(`  [learning] readDebtEventsCloud failed: ${error.message}\n`);
+    return [];
+  }
+  return (data || []).map(row => ({
+    ts: row.ts,
+    runId: row.run_id,
+    topicId: row.topic_id ?? undefined,
+    event: row.event,
+    matchCount: row.match_count ?? undefined,
+    rationale: row.rationale ?? undefined,
+    resolutionRationale: row.resolution_rationale ?? undefined,
+    resolvedBy: row.resolved_by ?? undefined,
+  }));
+}
+
 // ── Adjudication Events ────────────────────────────────────────────────────
 
 /**

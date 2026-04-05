@@ -52,6 +52,9 @@ import {
 } from './lib/context.mjs';
 import { buildLanguageContext } from './lib/language-profiles.mjs';
 import { executeTools, normalizeToolResults, formatLintSummary } from './lib/linter.mjs';
+import {
+  selectEventSource, loadDebtLedger, appendEvents, reconcileLocalToCloud, mergeLedgers as mergeLedgersForSuppression
+} from './lib/debt-memory.mjs';
 import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
@@ -611,7 +614,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined } = {}) {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -632,12 +635,38 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   // Record audit start in cloud store (fire-and-forget)
   let cloudRunId = null;
+  let cloudRepoId = null;
   if (isCloudEnabled() && repoProfile) {
-    const repoId = await upsertRepo(repoProfile, path.basename(path.resolve('.'))).catch(() => null);
-    if (repoId) {
-      cloudRunId = await recordRunStart(repoId, 'plan', 'code').catch(() => null);
+    cloudRepoId = await upsertRepo(repoProfile, path.basename(path.resolve('.'))).catch(() => null);
+    if (cloudRepoId) {
+      cloudRunId = await recordRunStart(cloudRepoId, 'plan', 'code').catch(() => null);
     }
   }
+
+  // ── Phase D: Debt Memory ─────────────────────────────────────────────────
+  // Load persistent debt ledger so normal audits don't resurface known debt.
+  // Runs every round (not just R2+) — debt is persistent across audit runs.
+  const debtContext = selectEventSource({
+    noDebtLedger,
+    readOnly: readOnlyDebt,
+    repoId: cloudRepoId,
+  });
+  // Opportunistic local→cloud reconciliation when we're online (fix R3-H3)
+  if (debtContext.source === 'cloud') {
+    await reconcileLocalToCloud(debtContext, { eventsPath: debtEventsPath }).catch(e => {
+      process.stderr.write(`  [debt] reconcile skipped: ${e.message}\n`);
+    });
+  }
+  const debtLedger = await loadDebtLedger(debtContext, {
+    ledgerPath: debtLedgerPath,
+    eventsPath: debtEventsPath,
+  });
+  if (debtLedger.entries.length > 0) {
+    const escalated = debtLedger.entries.filter(e => e.escalated).length;
+    process.stderr.write(`  [debt] ${debtLedger.entries.length} debt entries loaded (${escalated} escalated)\n`);
+  }
+  // Audit session ID for event-log attribution
+  const debtRunId = `audit-${Date.now()}`;
 
   // Split backend into routes vs services for manageable chunk sizes
   const backendRoutes = backend.filter(f => f.includes('/routes/'));
@@ -1085,14 +1114,23 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  Added ${toolFindings.length} tool findings (H:${toolHigh} M:${toolMed} L:${toolLow})\n`);
   }
 
-  // 5.5 Post-output suppression (R2+ only)
-  if (isR2Plus && ledger && ledger.entries.length > 0) {
+  // 5.5 Post-output suppression
+  // Phase D: merge session ledger (R2+) with persistent debt ledger so debt
+  // gets suppressed in every round, not just R2+. Suppression runs when
+  // either ledger has entries.
+  const sessionLedgerForSuppression = ledger || { version: 1, entries: [] };
+  const debtLedgerForSuppression = debtLedger && debtLedger.entries.length > 0
+    ? { version: 1, entries: debtLedger.entries }
+    : { version: 1, entries: [] };
+  const mergedLedger = mergeLedgersForSuppression(sessionLedgerForSuppression, debtLedgerForSuppression);
+
+  if (mergedLedger.entries.length > 0) {
     // Enrich findings with structured metadata
     for (const f of allFindings) {
       populateFindingMetadata(f, f._pass);
     }
 
-    let { kept, suppressed, reopened } = suppressReRaises(allFindings, ledger, { changedFiles, impactSet });
+    let { kept, suppressed, reopened } = suppressReRaises(allFindings, mergedLedger, { changedFiles, impactSet });
 
     process.stderr.write(`\n═══════════════════════════════════════\n`);
     process.stderr.write(`  R${round} POST-PROCESSING\n`);
@@ -1134,6 +1172,40 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       suppressedCount: suppressed.length,
       reopenedCount: reopened.length,
       fpSuppressedCount: fpSuppressed?.length ?? 0
+    };
+
+    // Phase D: emit debt events for matches against debt-ledger entries.
+    // One 'surfaced' event per topicId per run (fix M1) — dedup via Set.
+    const debtEvents = [];
+    const surfacedTopics = new Map();  // topicId → matchCount
+    for (const s of suppressed) {
+      if (s.matchedSource !== 'debt') continue;
+      surfacedTopics.set(s.matchedTopic, (surfacedTopics.get(s.matchedTopic) || 0) + 1);
+    }
+    const nowIso = new Date().toISOString();
+    for (const [topicId, matchCount] of surfacedTopics) {
+      debtEvents.push({ ts: nowIso, runId: debtRunId, topicId, event: 'surfaced', matchCount });
+    }
+    // Reopens: one 'reopened' event per topicId (not counted toward occurrences)
+    const reopenedDebtTopics = new Set();
+    for (const r of reopened) {
+      const match = mergedLedger.entries.find(e => e.topicId === r._matchedTopic);
+      if (match?.source === 'debt') reopenedDebtTopics.add(r._matchedTopic);
+    }
+    for (const topicId of reopenedDebtTopics) {
+      debtEvents.push({ ts: nowIso, runId: debtRunId, topicId, event: 'reopened' });
+    }
+    if (debtEvents.length > 0 && debtContext.canWrite) {
+      const r = await appendEvents(debtContext, debtEvents, { eventsPath: debtEventsPath });
+      process.stderr.write(`  [debt] emitted ${r.written} event(s) to ${r.source} (${surfacedTopics.size} surfaced, ${reopenedDebtTopics.size} reopened)\n`);
+    } else if (debtEvents.length > 0) {
+      process.stderr.write(`  [debt] ${debtEvents.length} event(s) suppressed (read-only mode)\n`);
+    }
+    mergedResult._debtMemory = {
+      eventSource: debtContext.source,
+      debtSuppressed: surfacedTopics.size,
+      debtReopened: reopenedDebtTopics.size,
+      debtEntriesLoaded: debtLedger.entries.length,
     };
   }
 
@@ -1433,6 +1505,18 @@ async function main() {
   const noTools = args.includes('--no-tools');
   const strictLint = args.includes('--strict-lint');
 
+  // Phase D — debt-memory flags
+  // --no-debt-ledger: skip .audit/tech-debt.json entirely (clean-slate runs)
+  // --debt-ledger <path>: override default path
+  // --debt-events <path>: override default local event log path
+  // --read-only-debt: load debt for suppression, never write events (CI/parallel safety)
+  const noDebtLedger = args.includes('--no-debt-ledger');
+  const readOnlyDebt = args.includes('--read-only-debt');
+  const debtLedgerIdx = args.indexOf('--debt-ledger');
+  const debtLedgerPath = debtLedgerIdx !== -1 && args[debtLedgerIdx + 1] ? args[debtLedgerIdx + 1] : undefined;
+  const debtEventsIdx = args.indexOf('--debt-events');
+  const debtEventsPath = debtEventsIdx !== -1 && args[debtEventsIdx + 1] ? args[debtEventsIdx + 1] : undefined;
+
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
     console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>] [--passes <list>] [--files <list>]');
     console.error('       node scripts/openai-audit.mjs code <plan-file> [--scope diff|plan|full] [--base <git-ref>]');
@@ -1518,7 +1602,7 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath });
     return;
   }
 

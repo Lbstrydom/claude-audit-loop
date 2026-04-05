@@ -2,7 +2,21 @@ node_modules/
 .env
 *.log
 /tmp/
-.audit/
+# Phase D: .audit/ contains both committed and local-only state.
+# tech-debt.json is the committed, human-approved debt ledger.
+# local/ holds per-run telemetry (never committed).
+# staging/ holds backfill drafts pending human review (never committed).
+# Per-run state files (outcomes, bandit, fp-tracker, prompt revisions) are local.
+.audit/local/
+.audit/staging/
+.audit/*.backup
+.audit/*.lock
+.audit/tech-debt.json.lock/
+.audit/bandit-state.json
+.audit/outcomes.jsonl
+.audit/outcomes.jsonl.lock/
+.audit/fp-tracker.json
+.audit/prompt-revisions/
 .claude/settings.local.json
 .claude/worktrees/
 --db-path

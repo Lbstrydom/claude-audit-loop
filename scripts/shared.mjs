@@ -16,6 +16,12 @@ export {
   WiringIssueSchema,
   LedgerEntrySchema,
   AdjudicationLedgerSchema,
+  PersistedDebtEntrySchema,
+  HydratedDebtEntrySchema,
+  DebtEntrySchema,
+  DebtEventSchema,
+  DebtLedgerSchema,
+  DeferredReasonEnum,
   zodToGeminiSchema
 } from './lib/schemas.mjs';
 
@@ -109,6 +115,33 @@ export {
 } from './lib/linter.mjs';
 
 export { RULE_METADATA, getRuleMetadata } from './lib/rule-metadata.mjs';
+
+// ── Debt Memory (Phase D) ───────────────────────────────────────────────────
+export {
+  DEFAULT_DEBT_LEDGER_PATH,
+  readDebtLedger,
+  writeDebtEntries,
+  removeDebtEntry,
+  mergeLedgers,
+  findDebtByAlias,
+} from './lib/debt-ledger.mjs';
+
+export {
+  DEFAULT_DEBT_EVENTS_PATH,
+  appendDebtEventsLocal,
+  readDebtEventsLocal,
+  deriveMetricsFromEvents,
+} from './lib/debt-events.mjs';
+
+export {
+  EventSource,
+  selectEventSource,
+  loadDebtLedger,
+  appendEvents,
+  persistDebtEntries,
+  removeDebt,
+  reconcileLocalToCloud,
+} from './lib/debt-memory.mjs';
 
 // ── File Store ──────────────────────────────────────────────────────────────
 export {

@@ -228,12 +228,21 @@ export function suppressReRaises(findings, ledger, { changedFiles = [], impactSe
   // Threshold calibrated from real audit data — paraphrased re-raises score 0.3-0.6, new findings <0.2
   const threshold = parseFloat(process.env.SUPPRESS_SIMILARITY_THRESHOLD || '0.35');
 
-  // Only suppress dismissed OR fixed/verified entries
-  const resolved = (ledger?.entries || []).filter(e =>
-    e.adjudicationOutcome === 'dismissed' ||
-    e.remediationState === 'fixed' ||
-    e.remediationState === 'verified'
-  );
+  // Source-aware filter (Phase D fix H2):
+  //   session entries suppress when adjudicationOutcome='dismissed' or
+  //     remediationState='fixed'|'verified' (existing R2+ behavior)
+  //   debt entries (Phase D) suppress unless they're escalated — escalation
+  //     naturally bypasses suppression for re-deliberation
+  //   Entries without an explicit source default to session (backward compat
+  //     for ledger files written before Phase D)
+  const resolved = (ledger?.entries || []).filter(e => {
+    const src = e.source || 'session';
+    if (src === 'debt') return !e.escalated;
+    // session (default)
+    return e.adjudicationOutcome === 'dismissed' ||
+           e.remediationState === 'fixed' ||
+           e.remediationState === 'verified';
+  });
 
   const kept = [], suppressed = [], reopened = [];
   const changedSet = new Set(changedFiles.map(normalizePath));
@@ -267,11 +276,16 @@ export function suppressReRaises(findings, ledger, { changedFiles = [], impactSe
         f._matchScore = bestScore;
         reopened.push(f);
       } else {
+        const src = bestMatch.source || 'session';
+        const reason = src === 'debt'
+          ? `Matches deferred debt entry (${bestMatch.deferredReason}), scope unchanged`
+          : `Matches ${bestMatch.adjudicationOutcome} entry, scope unchanged`;
         suppressed.push({
           finding: f,
           matchedTopic: bestMatch.topicId,
           matchScore: bestScore,
-          reason: `Matches ${bestMatch.adjudicationOutcome} entry, scope unchanged`
+          matchedSource: src,
+          reason,
         });
       }
     } else {

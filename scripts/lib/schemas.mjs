@@ -114,29 +114,164 @@ export const WiringIssueSchema = z.object({
   detail: z.string().max(300)
 });
 
-// ── Adjudication Ledger Schemas ──────────────────────────────────────────────
+// ── Ledger Core Fields (shared by session + debt ledgers — Phase D) ─────────
 
-/** Zod 4 schema for a single adjudication ledger entry. */
-export const LedgerEntrySchema = z.object({
+/**
+ * Fields shared by both the session ledger (R2+ deliberation) and the debt ledger
+ * (Phase D persistent memory). Extracted for DRY; each ledger composes its own
+ * schema from this base plus its own specific fields.
+ */
+const LedgerCoreFields = {
   topicId: z.string(),
   semanticHash: z.string(),
-  adjudicationOutcome: z.enum(['dismissed', 'accepted', 'severity_adjusted']),
-  remediationState: z.enum(['pending', 'planned', 'fixed', 'verified', 'regressed']),
   severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
-  originalSeverity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
   category: z.string(),
   section: z.string(),
   detailSnapshot: z.string(),
   affectedFiles: z.array(z.string()),
   affectedPrinciples: z.array(z.string()),
+  pass: z.string(),
+  classification: ClassificationSchema.nullable().optional(),
+};
+
+// ── Adjudication Ledger Schemas (session — R2+ deliberation) ────────────────
+
+/**
+ * Zod 4 schema for a single session-ledger entry.
+ * Phase D adds a `source` discriminator with default 'session' for backward-compat:
+ * old ledger files without the field continue to validate as session entries.
+ */
+export const LedgerEntrySchema = z.object({
+  ...LedgerCoreFields,
+  source: z.literal('session').default('session'),
+  adjudicationOutcome: z.enum(['dismissed', 'accepted', 'severity_adjusted']),
+  remediationState: z.enum(['pending', 'planned', 'fixed', 'verified', 'regressed']),
+  originalSeverity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
   ruling: z.enum(['sustain', 'overrule', 'compromise']),
   rulingRationale: z.string(),
   resolvedRound: z.number(),
-  pass: z.string()
 });
 
 /** Zod 4 schema for the full adjudication ledger. */
 export const AdjudicationLedgerSchema = z.object({
   version: z.literal(1),
   entries: z.array(LedgerEntrySchema)
+});
+
+// ── Debt Ledger Schemas (Phase D) ───────────────────────────────────────────
+
+/**
+ * Valid deferral reasons. Each reason has its own required-field contract
+ * enforced via refinement (per §2.4 of Phase D plan).
+ */
+export const DeferredReasonEnum = z.enum([
+  'out-of-scope',         // valid, out-of-scope, no extra required fields
+  'blocked-by',           // valid, any scope, requires blockedBy
+  'deferred-followup',    // valid, any scope, requires followupPr
+  'accepted-permanent',   // valid, any scope, requires approver + approvedAt
+  'policy-exception',     // valid, any scope, requires policyRef + approver
+]);
+
+/**
+ * Fields persisted at defer-time. The schema uses a refinement to enforce
+ * per-reason required fields without a discriminated union (which would
+ * explode into 5 separate object shapes and complicate read sites).
+ */
+const DebtEntryPersistedFields = {
+  ...LedgerCoreFields,
+  source: z.literal('debt'),
+  deferredReason: DeferredReasonEnum,
+  deferredAt: z.string().datetime(),
+  deferredRun: z.string().max(40),
+  deferredRationale: z.string().min(20).max(400),
+  // Per-reason required fields (enforced via superRefine below):
+  blockedBy: z.string().max(200).optional(),
+  followupPr: z.string().max(120).optional(),
+  approver: z.string().max(120).optional(),
+  approvedAt: z.string().datetime().optional(),
+  policyRef: z.string().max(200).optional(),
+  // Owner (populated from CODEOWNERS or --owner flag):
+  owner: z.string().max(120).optional(),
+  // Identity mitigation (fix H4):
+  contentAliases: z.array(z.string().max(12)).max(20).default([]),
+  // Sensitivity flag (fix H6):
+  sensitive: z.boolean().default(false),
+};
+
+function enforceDeferredReasonRequiredFields(entry, ctx) {
+  const required = {
+    'blocked-by': ['blockedBy'],
+    'deferred-followup': ['followupPr'],
+    'accepted-permanent': ['approver', 'approvedAt'],
+    'policy-exception': ['policyRef', 'approver'],
+  }[entry.deferredReason] || [];
+  for (const field of required) {
+    if (!entry[field]) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [field],
+        message: `deferredReason "${entry.deferredReason}" requires ${field}`,
+      });
+    }
+  }
+}
+
+/**
+ * PersistedDebtEntrySchema — what's actually stored on disk in .audit/tech-debt.json.
+ * NO runtime-derived fields like occurrences, lastSurfacedAt, escalated — those
+ * come from event-log replay (fix H1b). Writers use this schema.
+ */
+export const PersistedDebtEntrySchema = z.object(DebtEntryPersistedFields)
+  .superRefine(enforceDeferredReasonRequiredFields);
+
+/**
+ * HydratedDebtEntrySchema — persisted fields PLUS derived runtime fields.
+ * What readDebtLedger() returns after replaying the event log. Used by
+ * suppression + debt-review + status card.
+ */
+export const HydratedDebtEntrySchema = z.object({
+  ...DebtEntryPersistedFields,
+  // Derived from event log:
+  occurrences: z.number().int().min(0).default(0),     // alias for distinctRunCount
+  distinctRunCount: z.number().int().min(0).default(0),
+  matchCount: z.number().int().min(0).default(0),
+  lastSurfacedRun: z.string().max(40).optional(),
+  lastSurfacedAt: z.string().datetime().optional(),
+  escalated: z.boolean().default(false),
+  escalatedAt: z.string().datetime().optional(),
+}).superRefine(enforceDeferredReasonRequiredFields);
+
+/** Convenience alias at read sites. */
+export const DebtEntrySchema = HydratedDebtEntrySchema;
+
+/**
+ * DebtEventSchema — individual event-log line.
+ * Event types:
+ *   deferred   — entry added to ledger
+ *   surfaced   — entry matched by suppression (one per topicId per run)
+ *   reopened   — entry's files in --changed (not a suppression)
+ *   escalated  — --escalate-recurring gate flipped escalated=true
+ *   resolved   — entry removed (underlying issue fixed)
+ *   reconciled — offline→cloud sync marker (fix R3-H3)
+ */
+export const DebtEventSchema = z.object({
+  ts: z.string().datetime(),
+  runId: z.string().max(40),
+  topicId: z.string().optional(),                    // absent on 'reconciled' marker
+  event: z.enum(['deferred', 'surfaced', 'reopened', 'escalated', 'resolved', 'reconciled']),
+  matchCount: z.number().int().min(1).optional(),    // only on 'surfaced' events
+  rationale: z.string().max(400).optional(),         // on 'deferred' and 'resolved'
+  resolutionRationale: z.string().max(400).optional(), // on 'resolved'
+  resolvedBy: z.string().max(40).optional(),         // runId that resolved, on 'resolved'
+});
+
+/**
+ * DebtLedgerSchema — the top-level .audit/tech-debt.json shape.
+ * Entries use PersistedDebtEntrySchema (no derived fields).
+ */
+export const DebtLedgerSchema = z.object({
+  version: z.literal(1),
+  entries: z.array(PersistedDebtEntrySchema),
+  budgets: z.record(z.string(), z.number().int().min(0)).optional(),
+  lastUpdated: z.string().datetime().optional(),
 });
