@@ -77,7 +77,16 @@ export function pythonBoundaryScanner(lines) {
 
 // ── Deep freeze helper (Object.freeze is shallow) ───────────────────────────
 
-const freezeProfile = (p) => Object.freeze({ ...p, extensions: Object.freeze(p.extensions) });
+const freezeProfile = (p) => Object.freeze({
+  ...p,
+  extensions: Object.freeze(p.extensions),
+  tools: p.tools ? Object.freeze(p.tools.map(t => Object.freeze({
+    ...t,
+    args: Object.freeze(t.args),
+    availabilityProbe: Object.freeze([t.availabilityProbe[0], Object.freeze(t.availabilityProbe[1])]),
+    ...(t.fallback ? { fallback: Object.freeze({ ...t.fallback, args: Object.freeze(t.fallback.args), availabilityProbe: Object.freeze([t.fallback.availabilityProbe[0], Object.freeze(t.fallback.availabilityProbe[1])]) }) } : {})
+  }))) : Object.freeze([])
+});
 
 // ── Resolvers (forward declarations — defined below) ────────────────────────
 // These are referenced inside PROFILES; hoisted because they're function declarations.
@@ -102,6 +111,16 @@ const PROFILES = Object.freeze({
     getBoundaries: makeRegexBoundaries(
       /^(?:export\s+)?(?:async\s+)?(?:function|class)\s|^export\s+(?:const|let|var)\s+\w+\s*=/
     ),
+    // Phase C: static analysis tools for JS files
+    tools: [{
+      id: 'eslint',
+      kind: 'linter',
+      command: 'npx',
+      args: ['eslint', '--format', 'json', '--no-error-on-unmatched-pattern', '.'],
+      scope: 'project',
+      availabilityProbe: ['npx', ['eslint', '--version']],
+      parser: 'parseEslintOutput',
+    }],
   }),
 
   ts: freezeProfile({
@@ -119,6 +138,27 @@ const PROFILES = Object.freeze({
     getBoundaries: makeRegexBoundaries(
       /^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\s|^export\s+(?:const|let|var)\s+\w+\s*[=:]/
     ),
+    // Phase C: eslint + tsc type-checker for TypeScript files
+    tools: [
+      {
+        id: 'eslint',
+        kind: 'linter',
+        command: 'npx',
+        args: ['eslint', '--format', 'json', '--no-error-on-unmatched-pattern', '.'],
+        scope: 'project',
+        availabilityProbe: ['npx', ['eslint', '--version']],
+        parser: 'parseEslintOutput',
+      },
+      {
+        id: 'tsc',
+        kind: 'typeChecker',
+        command: 'npx',
+        args: ['tsc', '--noEmit', '--pretty', 'false'],
+        scope: 'project',
+        availabilityProbe: ['npx', ['tsc', '--version']],
+        parser: 'parseTscOutput',
+      },
+    ],
   }),
 
   py: freezeProfile({
@@ -149,6 +189,25 @@ const PROFILES = Object.freeze({
     exportRegex: /^(?:(?:async\s+)?(?:def|class)\s+[a-zA-Z]|[A-Z_][A-Z0-9_]*\s*=)/,
     resolveImport: pyResolveImport,
     getBoundaries: pythonBoundaryScanner, // custom decorator-aware scanner
+    // Phase C: ruff primary, flake8 fallback for Python files
+    tools: [{
+      id: 'ruff',
+      kind: 'linter',
+      command: 'ruff',
+      args: ['check', '--output-format', 'json', '.'],
+      scope: 'project',
+      availabilityProbe: ['ruff', ['--version']],
+      parser: 'parseRuffOutput',
+      fallback: {
+        id: 'flake8',
+        kind: 'linter',
+        command: 'flake8',
+        args: ['--format', 'pylint', '.'],
+        scope: 'project',
+        availabilityProbe: ['flake8', ['--version']],
+        parser: 'parseFlake8PylintOutput',
+      },
+    }],
   }),
 });
 
@@ -161,6 +220,7 @@ const UNKNOWN_PROFILE = Object.freeze({
   exportRegex: null,
   resolveImport: () => [],
   getBoundaries: () => [],
+  tools: Object.freeze([]),
 });
 
 // ── Profile lookup API ──────────────────────────────────────────────────────

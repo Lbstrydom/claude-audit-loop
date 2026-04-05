@@ -53,13 +53,60 @@ Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<nam
 
 ## Step 2 — Run GPT-5.4 Audit
 
-### Round 1 — Full audit
+### Audit Scope — Choose Deliberately
+
+**CRITICAL**: Code audits see whatever files you give them. GPT-5.4 doesn't know what's "new" vs pre-existing — it flags everything. To get signal, scope deliberately:
+
+| Scope mode | When to use | Behavior |
+|---|---|---|
+| `--scope diff` (**DEFAULT**) | "audit my recent work", "/audit-loop my PR", after implementing a phase/feature | Auto-scopes to `git diff HEAD~1..HEAD` + unstaged + untracked files. Findings focus on YOUR changes. |
+| `--scope plan` | Plan describes a large refactor touching many files; user wants broad view | All files referenced in the plan (legacy behavior). |
+| `--scope full` | "audit the entire codebase", user explicitly asks for a codebase-wide review | Full repo audit — slowest, catches cross-cutting issues. |
+
+**Default is `--scope diff`**. If the user says "audit my work" / "audit this feature" / "audit this phase" → default applies.
+Only switch to `--scope plan` or `--scope full` when the user EXPLICITLY asks for broader scope, or when `git diff` is empty (no recent changes).
+
+**Why this matters**: Without scoping, auditing Phase A's ~150-line diff produces 28 findings about files Phase A barely touched. With `--scope diff`, you get findings about the actual changes. This is the #1 source of false-positive noise.
+
+### Round 1 — Audit (scope-aware)
 
 ```bash
+# Default: audit only recent changes (preferred)
 node scripts/openai-audit.mjs code <plan-file> \
   --out /tmp/$SID-r1-result.json \
   2>/tmp/$SID-r1-stderr.log
+
+# Broader scope examples (only when user asks):
+# --scope plan    → all plan-referenced files
+# --scope full    → entire repo
+# --base main     → diff against main instead of HEAD~1
 ```
+
+### Phase 0 — Tool Pre-Pass (Phase C)
+
+Before GPT runs, the script executes language-appropriate static analysis tools
+(ESLint for JS/TS, `tsc --noEmit` for TS, `ruff` for Python, falling back to
+`flake8`). Tool findings carry a `classification` envelope with
+`sourceKind: 'LINTER' | 'TYPE_CHECKER'` and are appended to `findings[]` with
+`T`-prefixed IDs (`T1`, `T2`, ...).
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--no-tools` | off | Skip Phase 0 entirely. Use for untrusted repos — ESLint configs can `require()` arbitrary code. |
+| `--strict-lint` | off (advisory) | Count tool findings in verdict math. Without this flag, tool findings are surfaced but don't affect PASS/NEEDS_FIXES/SIGNIFICANT_ISSUES. |
+
+**Trust boundary**: running repo-configured linters executes code the repo
+owner controls, equivalent to running `npm test`. Every invocation is logged
+to stderr. See [scripts/lib/linter.mjs](scripts/lib/linter.mjs) for full
+security notes.
+
+**Advisory-by-default rationale**: tool availability varies across machines
+(no `npx eslint` on a Python-only box). Counting tool findings in the verdict
+would make it non-reproducible. Opt in with `--strict-lint` when your CI
+environment has all the tools.
+
+The result JSON includes `_toolCapability: { toolsAvailable, toolsFailed, strictLint, disabled }`
+so orchestrators can see which tools ran.
 
 ### Round 2+ — R2+ mode with ledger, diff, and changed files
 

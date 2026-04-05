@@ -51,6 +51,7 @@ import {
   extractPlanForPass, buildHistoryContext
 } from './lib/context.mjs';
 import { buildLanguageContext } from './lib/language-profiles.mjs';
+import { executeTools, normalizeToolResults, formatLintSummary } from './lib/linter.mjs';
 import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
@@ -610,7 +611,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false } = {}) {
   const totalStart = Date.now();
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
@@ -725,7 +726,35 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   // Phase B: classification rubric appended to every pass prompt.
   // sourceName pulled from config so model changes don't require prompt edits.
   const classificationBlock = buildClassificationRubric({ sourceKind: 'MODEL', sourceName: MODEL });
-  const focusBlock = priorityBlock + classificationBlock;
+
+  // ── Phase 0 (Phase C): Tool Pre-Pass ────────────────────────────────────────
+  // Runs language-appropriate linters/type-checkers. Advisory-by-default:
+  // tool findings are included in output but don't affect verdict math unless --strict-lint.
+  // Opt-out via --no-tools for untrusted repos.
+  let toolFindings = [];
+  let lintContext = '';
+  const toolCapability = {
+    toolsAvailable: [],
+    toolsFailed: [],
+    strictLint,
+    disabled: noTools,
+    timestamp: Date.now(),
+  };
+  if (!noTools) {
+    process.stderr.write('\n── Phase 0: Tool Pre-Pass ──\n');
+    const toolStart = Date.now();
+    const toolResults = executeTools(found);
+    toolFindings = normalizeToolResults(toolResults);
+    toolCapability.toolsAvailable = toolResults.filter(r => r.status === 'ok').map(r => r.toolId);
+    toolCapability.toolsFailed = toolResults.filter(r => r.status !== 'ok').map(r => ({ id: r.toolId, status: r.status }));
+    lintContext = formatLintSummary(toolFindings);
+    const t = ((Date.now() - toolStart) / 1000).toFixed(1);
+    process.stderr.write(`  [phase0] ${toolFindings.length} tool findings across ${toolCapability.toolsAvailable.length} tool(s) in ${t}s (strict-lint=${strictLint})\n`);
+  } else {
+    process.stderr.write('\n── Phase 0: Tool Pre-Pass SKIPPED (--no-tools) ──\n');
+  }
+
+  const focusBlock = priorityBlock + classificationBlock + (lintContext ? '\n\n' + lintContext : '');
 
   // Read shared files ONCE — reuse across passes that need them
   const sharedContext = shared.length > 0 ? readFilesAsContext(shared, { maxPerFile: 6000, maxTotal: 20000 }) : '';
@@ -1033,6 +1062,29 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  Deduped ${dedupCount} cross-pass duplicate(s)\n`);
   }
 
+  // Phase C: append tool findings (already carry classification from linter.mjs).
+  // Tool findings use file:rule:message identity via semanticId() dispatch, so they
+  // coexist with model findings without content-hash collisions.
+  if (toolFindings.length > 0) {
+    let toolHigh = 0, toolMed = 0, toolLow = 0;
+    for (const tf of toolFindings) {
+      const hash = semanticId(tf);
+      if (seenHashes.has(hash)) { dedupCount++; continue; }
+      seenHashes.add(hash);
+      findingCounter[tf.severity]++;
+      if (tf.severity === 'HIGH') toolHigh++;
+      else if (tf.severity === 'MEDIUM') toolMed++;
+      else toolLow++;
+      allFindings.push({
+        ...tf,
+        id: `T${findingCounter[tf.severity]}`, // T prefix = tool
+        _hash: hash,
+        _pass: 'tool',
+      });
+    }
+    process.stderr.write(`  Added ${toolFindings.length} tool findings (H:${toolHigh} M:${toolMed} L:${toolLow})\n`);
+  }
+
   // 5.5 Post-output suppression (R2+ only)
   if (isR2Plus && ledger && ledger.entries.length > 0) {
     // Enrich findings with structured metadata
@@ -1123,9 +1175,16 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     }
   }
 
-  const high = allFindings.filter(f => f.severity === 'HIGH').length;
-  const medium = allFindings.filter(f => f.severity === 'MEDIUM').length;
-  const low = allFindings.filter(f => f.severity === 'LOW').length;
+  // Phase C: verdict counts exclude tool findings by default (advisory mode).
+  // With --strict-lint, tool findings count in the verdict.
+  const isToolFinding = (f) => {
+    const k = f.classification?.sourceKind;
+    return k === 'LINTER' || k === 'TYPE_CHECKER';
+  };
+  const countFor = strictLint ? allFindings : allFindings.filter(f => !isToolFinding(f));
+  const high = countFor.filter(f => f.severity === 'HIGH').length;
+  const medium = countFor.filter(f => f.severity === 'MEDIUM').length;
+  const low = countFor.filter(f => f.severity === 'LOW').length;
 
   let verdict = 'PASS';
   if (high > 0) verdict = 'SIGNIFICANT_ISSUES';
@@ -1237,6 +1296,9 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   // Attach cloud run ID to result for orchestrator reference
   if (cloudRunId) mergedResult._cloudRunId = cloudRunId;
+
+  // Phase C: surface tool-pre-pass capability state
+  mergedResult._toolCapability = toolCapability;
 
   // Phase 5: Flush bandit state + sync learning systems to cloud
   if (bandit) {
@@ -1365,6 +1427,12 @@ async function main() {
   const baseIdx = args.indexOf('--base');
   const diffBase = baseIdx !== -1 && args[baseIdx + 1] ? args[baseIdx + 1] : 'HEAD~1';
 
+  // Phase C — tool pre-pass flags
+  // --no-tools: skip static analysis tools entirely (opt-out for untrusted repos)
+  // --strict-lint: count tool findings in verdict math (advisory by default)
+  const noTools = args.includes('--no-tools');
+  const strictLint = args.includes('--strict-lint');
+
   if (!mode || !planFile || !['plan', 'code', 'rebuttal'].includes(mode)) {
     console.error('Usage: node scripts/openai-audit.mjs <plan|code> <plan-file> [--json] [--out <file>] [--history <file>] [--passes <list>] [--files <list>]');
     console.error('       node scripts/openai-audit.mjs code <plan-file> [--scope diff|plan|full] [--base <git-ref>]');
@@ -1450,7 +1518,7 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint });
     return;
   }
 

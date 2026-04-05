@@ -95,6 +95,21 @@ export {
   buildHistoryContext
 } from './lib/context.mjs';
 
+// ── Linter Pre-Pass (Phase C) ───────────────────────────────────────────────
+export {
+  runTool,
+  executeTools,
+  normalizeExternalFinding,
+  normalizeToolResults,
+  formatLintSummary,
+  parseEslintOutput,
+  parseRuffOutput,
+  parseTscOutput,
+  parseFlake8PylintOutput,
+} from './lib/linter.mjs';
+
+export { RULE_METADATA, getRuleMetadata } from './lib/rule-metadata.mjs';
+
 // ── File Store ──────────────────────────────────────────────────────────────
 export {
   MutexFileStore,

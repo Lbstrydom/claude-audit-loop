@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { atomicWriteFileSync } from './file-io.mjs';
+import { atomicWriteFileSync, normalizePath } from './file-io.mjs';
 import { MutexFileStore, AppendOnlyStore, readJsonlFile, acquireLock, releaseLock } from './file-store.mjs';
 import {
   GLOBAL_REPO_ID, UNKNOWN_FILE_EXT, learningConfig
@@ -32,10 +32,30 @@ export function setRepoProfileCache(cache) {
 /**
  * Content-addressable finding ID — deterministic, model-agnostic.
  * Same issue keeps the same ID regardless of which model raised it.
- * @param {object} f - Finding with category, section, detail
+ *
+ * Phase C: dispatches on `classification.sourceKind`. Tool findings (LINTER,
+ * TYPE_CHECKER) use `file:rule:message` identity — stable across line-number
+ * shifts when unrelated lines are added above. Model findings keep the
+ * original content-hash identity.
+ *
+ * KNOWN LIMITATION: tool and model findings about the same defect produce
+ * DIFFERENT semantic IDs by design — forcing cross-source equivalence is
+ * deferred to v2. The prompt's lint-summary tells GPT not to re-raise.
+ *
+ * @param {object} f - Finding with category, section, detail (+ optional classification)
  * @returns {string} 8-char hex hash
  */
 export function semanticId(f) {
+  const kind = f.classification?.sourceKind;
+  if (kind === 'LINTER' || kind === 'TYPE_CHECKER') {
+    const [file] = (f.section || '').split(':');
+    const rule = f.principle || 'unknown';
+    const msgSnippet = (f.detail || '').slice(0, 60).toLowerCase().trim();
+    return crypto.createHash('sha256')
+      .update(`${normalizePath(file)}|${rule}|${msgSnippet}`)
+      .digest('hex')
+      .slice(0, 8);
+  }
   const content = `${f.category}|${f.section}|${f.detail}`.toLowerCase().trim();
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 8);
 }
