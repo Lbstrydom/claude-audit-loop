@@ -9,6 +9,9 @@
 
 export const RULE_METADATA = Object.freeze({
   eslint: Object.freeze({
+    // Fatal parse/config errors — ESLint couldn't analyze the file at all.
+    // Emitted by parseEslintOutput() when msg.fatal === true.
+    'fatal-parse-error': { severity: 'HIGH', sonarType: 'BUG', effort: 'EASY', isQuickFix: false },
     // Bugs (runtime-breaking)
     'no-undef': { severity: 'HIGH', sonarType: 'BUG', effort: 'EASY', isQuickFix: false },
     'no-unreachable': { severity: 'HIGH', sonarType: 'BUG', effort: 'EASY', isQuickFix: false },

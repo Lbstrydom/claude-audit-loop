@@ -61,11 +61,22 @@ describe('parseEslintOutput', () => {
     assert.equal(parseEslintOutput(fixture)[0].fixable, true);
   });
 
-  test('falls back to unknown rule when ruleId is null', () => {
+  test('falls back to unknown rule when ruleId is null (non-fatal)', () => {
     const fixture = JSON.stringify([
-      { filePath: path.resolve('a.js'), messages: [{ ruleId: null, line: 1, message: 'syntax error' }] },
+      { filePath: path.resolve('a.js'), messages: [{ ruleId: null, line: 1, message: 'weird thing' }] },
     ]);
     assert.equal(parseEslintOutput(fixture)[0].rule, 'unknown');
+  });
+
+  test('promotes fatal parse/config errors to fatal-parse-error rule', () => {
+    // ESLint emits { fatal: true, ruleId: null, severity: 2 } when it cannot parse a file.
+    // Without promotion these fall through to LOW CODE_SMELL (the eslint _default) and
+    // hide real breakage — they must surface as HIGH.
+    const fixture = JSON.stringify([
+      { filePath: path.resolve('a.js'), messages: [{ fatal: true, ruleId: null, severity: 2, line: 1, message: 'Parsing error: Unexpected token' }] },
+    ]);
+    const findings = parseEslintOutput(fixture);
+    assert.equal(findings[0].rule, 'fatal-parse-error');
   });
 });
 

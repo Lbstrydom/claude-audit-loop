@@ -181,12 +181,21 @@ export function parseEslintOutput(stdout) {
   const findings = [];
   for (const file of data) {
     for (const msg of (file.messages || [])) {
+      // ESLint fatal errors (parse/config failures) have `fatal: true` and no ruleId.
+      // Treat them as a distinct rule so rule-metadata can map them to HIGH — otherwise
+      // they fall through to the LOW CODE_SMELL _default and hide real breakage.
+      let rule;
+      if (msg.fatal) {
+        rule = 'fatal-parse-error';
+      } else {
+        rule = msg.ruleId || 'unknown';
+      }
       findings.push({
         file: file.filePath ? path.relative(process.cwd(), file.filePath).replace(/\\/g, '/') : '',
         line: msg.line || 1,
         endLine: msg.endLine,
         column: msg.column,
-        rule: msg.ruleId || 'unknown',
+        rule,
         message: msg.message || '',
         fixable: !!msg.fix,
       });

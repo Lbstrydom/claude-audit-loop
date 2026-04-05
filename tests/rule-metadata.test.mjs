@@ -13,6 +13,12 @@ test('getRuleMetadata — returns specific eslint entry for known rule', () => {
   assert.equal(meta.sonarType, 'BUG');
 });
 
+test('getRuleMetadata — fatal-parse-error maps to HIGH BUG', () => {
+  const meta = getRuleMetadata('eslint', 'fatal-parse-error');
+  assert.equal(meta.severity, 'HIGH');
+  assert.equal(meta.sonarType, 'BUG');
+});
+
 test('getRuleMetadata — returns eslint _default for unknown eslint rule', () => {
   const meta = getRuleMetadata('eslint', 'totally-fake-rule');
   assert.equal(meta, RULE_METADATA.eslint._default);
