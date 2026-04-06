@@ -59,7 +59,7 @@ export async function createSqlAdapter(driver, opts = {}) {
               [repoId, e.topicId || e.topic_id, e.severity, e.category, e.detail?.slice(0, 500), JSON.stringify(e), now(), now()]
             );
             inserted++;
-          } catch { /* skip individual failures */ }
+          } catch (err) { process.stderr.write(`  [sql] debt upsert error: ${err.message}\n`); }
         }
         return { ok: true, inserted, updated: 0 };
       },
@@ -82,7 +82,11 @@ export async function createSqlAdapter(driver, opts = {}) {
         let inserted = 0;
         for (const e of events) {
           try {
-            const key = e.idempotencyKey || e.idempotency_key || `${e.topicId || e.topic_id}:${e.event}:${e.ts || now()}`;
+            const key = e.idempotencyKey || e.idempotency_key;
+            if (!key) {
+              process.stderr.write(`  [sql] WARN: appendDebtEvents skipped event without idempotencyKey\n`);
+              continue;
+            }
             await driver.exec(
               `INSERT INTO ${tbl('debt_events')} (repo_id, idempotency_key, topic_id, event, payload_json, created_at)
                VALUES (${ph(1)}, ${ph(2)}, ${ph(3)}, ${ph(4)}, ${ph(5)}, ${ph(6)})
@@ -90,7 +94,7 @@ export async function createSqlAdapter(driver, opts = {}) {
               [repoId, key, e.topicId || e.topic_id, e.event, JSON.stringify(e), e.ts || now()]
             );
             inserted++;
-          } catch { /* skip duplicates */ }
+          } catch (err) { process.stderr.write(`  [sql] debt event error: ${err.message}\n`); }
         }
         return { inserted };
       },
@@ -109,8 +113,8 @@ export async function createSqlAdapter(driver, opts = {}) {
     },
 
     run: {
-      async recordRunStart(repoId, planFile, mode) {
-        const runId = crypto.randomUUID();
+      async recordRunStart(repoId, planFile, mode, runId) {
+        if (!runId) runId = crypto.randomUUID();
         await driver.exec(
           `INSERT INTO ${tbl('audit_runs')} (run_id, repo_id, plan_file, mode, started_at)
            VALUES (${ph(1)}, ${ph(2)}, ${ph(3)}, ${ph(4)}, ${ph(5)})
@@ -129,7 +133,11 @@ export async function createSqlAdapter(driver, opts = {}) {
 
       async recordFindings(runId, findings, passName, round) {
         for (const f of findings) {
-          const hash = f._hash || f.id || '';
+          const hash = f._hash || f.id;
+          if (!hash) {
+            process.stderr.write(`  [sql] WARN: recordFindings skipped finding without _hash or id\n`);
+            continue;
+          }
           try {
             await driver.exec(
               `INSERT INTO ${tbl('audit_findings')} (run_id, finding_hash, pass_name, round, severity, category, detail, created_at)
@@ -137,7 +145,7 @@ export async function createSqlAdapter(driver, opts = {}) {
                ON CONFLICT (run_id, finding_hash) DO NOTHING`,
               [runId, hash, passName, round, f.severity, f.category, f.detail?.slice(0, 500), now()]
             );
-          } catch { /* skip */ }
+          } catch (err) { process.stderr.write(`  [sql] finding record error: ${err.message}\n`); }
         }
       },
 
@@ -207,7 +215,7 @@ export async function createSqlAdapter(driver, opts = {}) {
             const parsed = JSON.parse(row.patterns_json);
             if (row.repo_id === GLOBAL_REPO_ID) globalPatterns = parsed;
             else repoPatterns = parsed;
-          } catch { /* skip malformed */ }
+          } catch (err) { process.stderr.write(`  [sql] FP pattern parse error: ${err.message}\n`); }
         }
         return { repoPatterns, globalPatterns };
       },

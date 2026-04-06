@@ -34,15 +34,11 @@ async function main() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
-  // Read and apply schema files
-  const schemaDir = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
-    'lib/stores/sql-schema');
-
-  // Use fileURLToPath for cross-platform
+  // Read and apply schema files (use fileURLToPath for cross-platform)
   const { fileURLToPath } = await import('node:url');
   const thisDir = path.dirname(fileURLToPath(import.meta.url));
-  const schemaDir2 = path.join(thisDir, 'lib', 'stores', 'sql-schema');
-  const metaPath = path.join(schemaDir2, 'meta.json');
+  const schemaDir = path.join(thisDir, 'lib', 'stores', 'sql-schema');
+  const metaPath = path.join(schemaDir, 'meta.json');
 
   if (!fs.existsSync(metaPath)) {
     console.error(`${R}Error${X}: schema meta.json not found at ${metaPath}`);
@@ -54,7 +50,7 @@ async function main() {
   db.exec('BEGIN');
   try {
     for (const migration of meta.migrations) {
-      const sqlPath = path.join(schemaDir2, migration);
+      const sqlPath = path.join(schemaDir, migration);
       let sql = fs.readFileSync(sqlPath, 'utf-8');
       sql = expandTemplate(sql, 'sqlite');
       // SQLite doesn't support AUTOINCREMENT with IF NOT EXISTS in some forms,
