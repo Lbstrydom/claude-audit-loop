@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFileSync } from '../file-io.mjs';
 
 // Lazy-load file-based implementations to avoid circular deps
 let _debtLedger = null;
@@ -92,9 +93,7 @@ export const adapter = {
     async syncBanditArms(repoId, arms) {
       try {
         fs.mkdirSync(path.dirname(BANDIT_PATH), { recursive: true });
-        const tmp = BANDIT_PATH + '.tmp.' + process.pid;
-        fs.writeFileSync(tmp, JSON.stringify(arms, null, 2));
-        fs.renameSync(tmp, BANDIT_PATH);
+        atomicWriteFileSync(BANDIT_PATH, JSON.stringify(arms, null, 2));
       } catch { /* best effort */ }
     },
 
@@ -108,9 +107,7 @@ export const adapter = {
     async syncFalsePositivePatterns(repoId, patterns) {
       try {
         fs.mkdirSync(path.dirname(FP_PATH), { recursive: true });
-        const tmp = FP_PATH + '.tmp.' + process.pid;
-        fs.writeFileSync(tmp, JSON.stringify(patterns, null, 2));
-        fs.renameSync(tmp, FP_PATH);
+        atomicWriteFileSync(FP_PATH, JSON.stringify(patterns, null, 2));
       } catch { /* best effort */ }
     },
 

@@ -45,9 +45,7 @@ function validateExplicitAdapter(name) {
   const normalized = name.toLowerCase().trim();
 
   if (!VALID_ADAPTERS.includes(normalized)) {
-    process.stderr.write(`  [learning] ERROR: AUDIT_STORE="${name}" is not a valid adapter.\n`);
-    process.stderr.write(`  Valid values: ${VALID_ADAPTERS.join(', ')}\n`);
-    process.exit(1);
+    throw new Error(`AUDIT_STORE="${name}" is not a valid adapter. Valid values: ${VALID_ADAPTERS.join(', ')}`);
   }
 
   // Validate required env vars per adapter
@@ -56,9 +54,7 @@ function validateExplicitAdapter(name) {
     if (!process.env.SUPABASE_AUDIT_URL) missing.push('SUPABASE_AUDIT_URL');
     if (!process.env.SUPABASE_AUDIT_ANON_KEY) missing.push('SUPABASE_AUDIT_ANON_KEY');
     if (missing.length > 0) {
-      process.stderr.write(`  [learning] ERROR: AUDIT_STORE=supabase requires: ${missing.join(', ')}\n`);
-      process.stderr.write(`  Set these env vars or use AUDIT_STORE=noop\n`);
-      process.exit(1);
+      throw new Error(`AUDIT_STORE=supabase requires: ${missing.join(', ')}. Set these env vars or use AUDIT_STORE=noop`);
     }
   }
 
@@ -82,19 +78,16 @@ export async function loadAdapterModule(name) {
         return mod.adapter;
       } catch (err) {
         if (err.code === 'ERR_MODULE_NOT_FOUND' || err.message?.includes('supabase')) {
-          process.stderr.write(
-            `  [learning] ERROR: AUDIT_STORE=supabase requires @supabase/supabase-js but it is not installed.\n` +
-            `  Run: npm install @supabase/supabase-js\n` +
-            `  (Or set AUDIT_STORE=noop to run without cloud persistence.)\n`
+          throw new Error(
+            'AUDIT_STORE=supabase requires @supabase/supabase-js but it is not installed. ' +
+            'Run: npm install @supabase/supabase-js (Or set AUDIT_STORE=noop)'
           );
-          process.exit(1);
         }
         throw err;
       }
     }
     default:
-      process.stderr.write(`  [learning] ERROR: Unknown adapter "${name}"\n`);
-      process.exit(1);
+      throw new Error(`Unknown adapter "${name}". Valid values: ${VALID_ADAPTERS.join(', ')}`);
   }
 }
 

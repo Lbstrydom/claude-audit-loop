@@ -8,6 +8,8 @@
  * Full method migration happens incrementally as callers move to the facade.
  */
 
+import { GLOBAL_REPO_ID } from './interfaces.mjs';
+
 let _client = null;
 
 async function getClient() {
@@ -205,7 +207,7 @@ export const adapter = {
         const { data: repoData } = await client.from('false_positive_patterns')
           .select('patterns').eq('repo_id', repoId).single();
         const { data: globalData } = await client.from('false_positive_patterns')
-          .select('patterns').eq('repo_id', '00000000-0000-0000-0000-000000000000').single();
+          .select('patterns').eq('repo_id', GLOBAL_REPO_ID).single();
         const repoPatterns = repoData?.patterns
           ? (typeof repoData.patterns === 'string' ? JSON.parse(repoData.patterns) : repoData.patterns)
           : {};
@@ -219,6 +221,7 @@ export const adapter = {
 
   globalState: {
     async syncPromptRevision(passName, revisionId, text) {
+      if (!passName || !revisionId) return;
       const client = await getClient();
       if (!client) return;
       try {
