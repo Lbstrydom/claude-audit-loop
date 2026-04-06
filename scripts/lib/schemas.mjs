@@ -72,8 +72,17 @@ export const FindingSchema = PersistedFindingSchema;
 // ── Zod-to-Gemini Schema Conversion ─────────────────────────────────────────
 
 /**
- * Strip $schema and additionalProperties keys recursively.
- * These are unsupported by Gemini responseSchema.
+ * Keys unsupported by Gemini's responseSchema structured output API.
+ * Gemini returns 400 INVALID_ARGUMENT if any of these appear.
+ */
+const GEMINI_UNSUPPORTED_KEYS = new Set([
+  '$schema', 'additionalProperties', 'maxLength', 'minLength',
+  'default', '$ref', 'minItems', 'maxItems', 'pattern',
+  'exclusiveMinimum', 'exclusiveMaximum',
+]);
+
+/**
+ * Strip Gemini-unsupported JSON Schema keys recursively.
  * @param {*} obj - JSON Schema node
  * @returns {*} Cleaned node
  */
@@ -82,7 +91,7 @@ function stripJsonSchemaExtras(obj) {
   if (Array.isArray(obj)) return obj.map(stripJsonSchemaExtras);
   const cleaned = {};
   for (const [k, v] of Object.entries(obj)) {
-    if (k === '$schema' || k === 'additionalProperties') continue;
+    if (GEMINI_UNSUPPORTED_KEYS.has(k)) continue;
     cleaned[k] = stripJsonSchemaExtras(v);
   }
   return cleaned;
@@ -90,7 +99,7 @@ function stripJsonSchemaExtras(obj) {
 
 /**
  * Convert a Zod schema to Gemini-compatible JSON Schema.
- * Strips $schema and additionalProperties (unsupported by Gemini responseSchema).
+ * Strips all Gemini-unsupported keys (maxLength, default, pattern, etc.).
  * Single source of truth: Zod schema → derived JSON Schema.
  * @param {import('zod').ZodType} zodSchema - Any Zod schema
  * @returns {object} Gemini-compatible JSON Schema

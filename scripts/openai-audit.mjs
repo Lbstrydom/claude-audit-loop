@@ -1168,8 +1168,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`═══════════════════════════════════════\n\n`);
 
     // Phase 4: FP tracker — suppress patterns with historically high dismiss rates
+    let fpSuppressed = [];
     if (fpTracker) {
-      const fpSuppressed = [];
       const finalKept = [];
       for (const f of kept) {
         if (fpTracker.shouldSuppress(f)) {
@@ -1190,13 +1190,14 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     allFindings.push(...kept, ...reopened);
 
     // Populate _suppression — full arrays for recordSuppressionEvents() + summary counts
-    mergedResult._suppression = {
+    // Stored in temp var because mergedResult is defined later (TDZ)
+    var _suppressionData = {
       suppressed,   // Array of { finding, matchedTopic, matchScore, reason } objects
       reopened,     // Array of finding objects with _matchedTopic, _matchScore
       keptCount: kept.length,
       suppressedCount: suppressed.length,
       reopenedCount: reopened.length,
-      fpSuppressedCount: fpSuppressed?.length ?? 0
+      fpSuppressedCount: fpSuppressed.length
     };
 
     // Phase D: emit debt events for matches against debt-ledger entries.
@@ -1392,6 +1393,11 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     _failed_passes: failedPasses.length > 0 ? failedPasses : undefined,
     _usage: totalUsage
   };
+
+  // Attach suppression data (accumulated before mergedResult was defined)
+  if (typeof _suppressionData !== 'undefined') {
+    mergedResult._suppression = _suppressionData;
+  }
 
   // Phase 3-4: Record outcomes for learning (v2: include primaryFile + revision ID)
   for (const f of allFindings) {

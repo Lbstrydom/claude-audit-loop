@@ -114,10 +114,12 @@ describe('zodToGeminiSchema', () => {
     assert.deepEqual(json.properties.severity.enum, ['HIGH', 'MEDIUM', 'LOW']);
   });
 
-  it('preserves maxLength constraints', () => {
+  it('strips Gemini-unsupported keys (maxLength, default, pattern)', () => {
     const schema = z.object({ name: z.string().max(50) });
     const json = zodToGeminiSchema(schema);
-    assert.equal(json.properties.name.maxLength, 50);
+    assert.equal(json.properties.name.maxLength, undefined,
+      'maxLength must be stripped — Gemini returns 400 INVALID_ARGUMENT');
+    assert.equal(json.properties.name.type, 'string');
   });
 });
 
