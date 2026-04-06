@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "size/claude-md": { "severity": "warn", "maxBytes": 3072 },
+    "size/agents-md": { "severity": "warn", "maxBytes": 4096 },
+    "size/skill-md": { "severity": "warn", "maxBytes": 30720 },
+    "stale/file-ref": { "severity": "error" },
+    "stale/function-ref": { "severity": "warn", "ignore": ["legacyHelper"] },
+    "stale/env-var": { "severity": "warn" },
+    "dup/cross-file": { "severity": "warn", "similarityThreshold": 0.8 },
+    "ref/deep-code-detail": { "severity": "warn", "maxCodeBlocks": 5 },
+    "sync/claude-agents": { "severity": "warn" }
+  },
+  "ignore": [
+    "docs/plans/**"
+  ]
+}
