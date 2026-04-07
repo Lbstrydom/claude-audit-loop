@@ -1,25 +1,41 @@
 node_modules/
-.env
 *.log
 /tmp/
-# Phase D: .audit/ contains both committed and local-only state.
-# tech-debt.json is the committed, human-approved debt ledger.
-# local/ holds per-run telemetry (never committed).
-# staging/ holds backfill drafts pending human review (never committed).
-# Per-run state files (outcomes, bandit, fp-tracker, prompt revisions) are local.
-.audit/local/
-.audit/staging/
-.audit/*.backup
-.audit/*.lock
-.audit/tech-debt.json.lock/
-.audit/bandit-state.json
-.audit/outcomes.jsonl
-.audit/outcomes.jsonl.lock/
-.audit/fp-tracker.json
-.audit/prompt-revisions/
+
+# API keys and secrets
+.env
+
+# IDE settings (per-machine)
 .claude/settings.local.json
 .claude/worktrees/
---db-path
 
-# Local audit artifacts
-.audit/
+# Audit-loop operational state (local to each machine)
+.audit/local/
+.audit/staging/
+.audit/quarantine/
+.audit/**/*.lock
+.audit/outcomes.jsonl
+.audit/experiments.jsonl
+.audit/experiment-manifests/
+.audit/prompt-revisions/
+.audit/bandit-state.json
+.audit/fp-tracker.json
+.audit/remediation-tasks.jsonl
+.audit/pipeline-state.json
+.audit/session-ledger.json
+
+# Per-run audit artifacts (results, transcripts, rebuttals)
+.audit/*-result.json
+.audit/*-stderr.log
+.audit/*-transcript.json
+.audit/*-rebuttal.md
+.audit/*-resolution.json
+.audit/*-debt-review.md
+.audit/*-ledger.json
+.audit/gemini-result.json
+
+# Install receipt (per-machine state)
+.audit-loop-install-receipt.json
+
+# Stale artifact from early development
+--db-path
