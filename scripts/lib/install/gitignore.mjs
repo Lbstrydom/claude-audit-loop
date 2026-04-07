@@ -24,6 +24,8 @@ const REQUIRED_PATTERNS = [
   '.audit/bandit-state.json',
   '.audit/fp-tracker.json',
   '.audit/remediation-tasks.jsonl',
+  '.audit/pipeline-state.json',
+  '.audit/session-ledger.json',
 ];
 
 /**

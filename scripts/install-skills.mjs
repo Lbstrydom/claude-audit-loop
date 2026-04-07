@@ -3,10 +3,13 @@
  * @fileoverview Install engineering skills to consumer repos.
  * Thin CLI wrapper composing lib/install/ modules.
  *
- * Usage:
- *   node scripts/install-skills.mjs --local --surface both
- *   node scripts/install-skills.mjs --remote --surface copilot
- *   node scripts/install-skills.mjs --dry-run --surface both
+ * Usage (from engineering-skills repo):
+ *   node scripts/install-skills.mjs --local --target /path/to/consumer-repo
+ *   node scripts/install-skills.mjs --local --target /path/to/repo --surface copilot
+ *   node scripts/install-skills.mjs --local --target /path/to/repo --dry-run
+ *
+ * The --target flag is REQUIRED for cross-repo installs. Without it, the installer
+ * targets the current repo (useful for self-install/testing only).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,7 +32,7 @@ function parseArgs(argv) {
     skills: null,
     force: false,
     dryRun: false,
-    repoRoot: null,
+    target: null,
   };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
@@ -39,7 +42,7 @@ function parseArgs(argv) {
       case '--skills': args.skills = argv[++i]?.split(','); break;
       case '--force': args.force = true; break;
       case '--dry-run': args.dryRun = true; break;
-      case '--repo-root': args.repoRoot = argv[++i]; break;
+      case '--target': case '--repo-root': args.target = path.resolve(argv[++i]); break;
     }
   }
   // Default: local if skills/ exists, remote otherwise
@@ -51,12 +54,28 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv);
-  const repoRoot = args.repoRoot || findRepoRoot();
+
+  // --target is the consumer repo; without it, we use CWD (self-install)
+  const repoRoot = args.target || findRepoRoot();
+
+  // Validate target repo exists and looks like a repo
+  if (args.target) {
+    if (!fs.existsSync(args.target)) {
+      console.error(`${R}Error${X}: target directory does not exist: ${args.target}`);
+      process.exit(1);
+    }
+    const hasGit = fs.existsSync(path.join(args.target, '.git'));
+    const hasPkg = fs.existsSync(path.join(args.target, 'package.json'));
+    if (!hasGit && !hasPkg) {
+      console.error(`${Y}Warning${X}: target has no .git or package.json — are you sure this is a repo?`);
+    }
+  }
 
   console.log(`${B}Engineering Skills Installer${X}`);
   console.log(`  Mode: ${args.local ? 'local' : 'remote'}`);
   console.log(`  Surface: ${args.surface}`);
-  console.log(`  Repo root: ${repoRoot}`);
+  console.log(`  Target repo: ${repoRoot}`);
+  if (args.target) console.log(`  ${D}(cross-repo install from ${process.cwd()})${X}`);
   if (args.dryRun) console.log(`  ${Y}DRY RUN — no files will be written${X}`);
   console.log('');
 

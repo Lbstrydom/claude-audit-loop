@@ -5,7 +5,6 @@
  * Usage:
  *   node scripts/check-skill-updates.mjs [--json] [--no-cache]
  */
-import fs from 'node:fs';
 import path from 'node:path';
 import { findRepoRoot, receiptPath } from './lib/install/surface-paths.mjs';
 import { readReceipt } from './lib/install/receipt.mjs';
@@ -15,15 +14,17 @@ import { checkAuditGitignore, ensureAuditGitignore } from './lib/install/gitigno
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', X = '\x1b[0m';
 
 function parseArgs(argv) {
+  const targetIdx = argv.indexOf('--target');
   return {
     json: argv.includes('--json'),
     noCache: argv.includes('--no-cache'),
+    target: targetIdx !== -1 && argv[targetIdx + 1] ? path.resolve(argv[targetIdx + 1]) : null,
   };
 }
 
 function main() {
   const args = parseArgs(process.argv);
-  const repoRoot = findRepoRoot();
+  const repoRoot = args.target || findRepoRoot();
   const repoReceiptFile = receiptPath('repo', repoRoot);
 
   // Read receipt
