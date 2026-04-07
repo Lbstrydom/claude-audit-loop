@@ -1,6 +1,6 @@
 {
   "audit-loop": {
-    "sha": "5fcb1c925f62c2513f9a492318ec41ee53204664aea165f754aab37a62fd262d",
+    "sha": "41e5e342a8e0d5398cff0d53a33de34e39060d2c2f25ba7b642e1509ba08f9e8",
     "vendoredAt": "2026-04-06T10:13:11.768Z",
     "sourcePath": ".claude/skills/audit-loop/SKILL.md"
   },
@@ -18,10 +18,5 @@
     "sha": "910ea26f624224ba43cb488d76adfca01ab64a2ffa0b971eddaf2ed4bf7ec51e",
     "vendoredAt": "2026-04-06T10:13:11.769Z",
     "sourcePath": "~/.claude/skills/ship/SKILL.md"
-  },
-  "audit": {
-    "sha": "05f0b26643590bf8c4ac56bd472012400a0f5da1e7a38af1f1c05f2e7a943852",
-    "vendoredAt": "2026-04-06T10:13:11.769Z",
-    "sourcePath": "~/.claude/skills/audit/SKILL.md"
   }
 }

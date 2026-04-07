@@ -6,11 +6,14 @@ description: |
   Features: R2+ suppression via adjudication ledger, map-reduce for large codebases,
   repo-aware prompt tuning, cloud learning store (Supabase), Thompson Sampling prompt selection.
   Triggers on: "audit loop", "plan and audit", "run the audit loop", "auto-audit",
-  "plan-audit-fix loop", "iterate on the plan", "GPT audit".
+  "plan-audit-fix loop", "iterate on the plan", "GPT audit",
+  "audit the plan", "check the implementation", "verify the plan",
+  "review against the plan", "audit docs/plans/", "audit this", "audit my code".
   Usage: /audit-loop <task-description>           — Full cycle: plan + audit loop
   Usage: /audit-loop plan <plan-file>             — Audit an existing plan iteratively
   Usage: /audit-loop code <plan-file>             — Audit code against plan iteratively
   Usage: /audit-loop full <task-description>      — Plan + implement + audit code
+  Usage: /audit-loop <plan-file>                  — Same as code (shorthand)
 ---
 
 # Self-Driving Audit Loop

@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 
 const PROVENANCE_PATH = path.resolve('.audit', 'vendoring-provenance.json');
 const SKILLS_DIR = path.resolve('skills');
-const ALL_SKILLS = ['audit-loop', 'plan-backend', 'plan-frontend', 'ship', 'audit'];
+const ALL_SKILLS = ['audit-loop', 'plan-backend', 'plan-frontend', 'ship'];
 
 describe('vendoring provenance', () => {
   it('provenance file exists', () => {

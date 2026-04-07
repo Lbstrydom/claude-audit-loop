@@ -6,11 +6,14 @@ description: |
   Features: R2+ suppression via adjudication ledger, map-reduce for large codebases,
   repo-aware prompt tuning, cloud learning store (Supabase), Thompson Sampling prompt selection.
   Triggers on: "audit loop", "plan and audit", "run the audit loop", "auto-audit",
-  "plan-audit-fix loop", "iterate on the plan", "GPT audit".
+  "plan-audit-fix loop", "iterate on the plan", "GPT audit",
+  "audit the plan", "check the implementation", "verify the plan",
+  "review against the plan", "audit docs/plans/", "audit this", "audit my code".
   Usage: /audit-loop <task-description>           — Full cycle: plan + audit loop
   Usage: /audit-loop plan <plan-file>             — Audit an existing plan iteratively
   Usage: /audit-loop code <plan-file>             — Audit code against plan iteratively
   Usage: /audit-loop full <task-description>      — Plan + implement + audit code
+  Usage: /audit-loop <plan-file>                  — Same as code (shorthand)
 ---
 
 # Self-Driving Audit Loop
@@ -68,49 +71,18 @@ Only switch to `--scope plan` or `--scope full` when the user EXPLICITLY asks fo
 
 **Why this matters**: Without scoping, auditing Phase A's ~150-line diff produces 28 findings about files Phase A barely touched. With `--scope diff`, you get findings about the actual changes. This is the #1 source of false-positive noise.
 
-### Excluding Files from Scope
-
-When `--scope diff` picks up vendored, upstream, or irrelevant files, use:
-
-**CLI flag**: `--exclude-paths 'scripts/**,vendor/**,.audit-loop/**'` (comma-separated globs)
-
-**`.auditignore` file** (in repo root): one glob pattern per line, `#` comments.
-```
-# Vendored audit-loop scripts — not our code
-scripts/openai-audit.mjs
-scripts/gemini-review.mjs
-scripts/lib/**
-
-# Build artifacts
-dist/**
-```
-
-Both mechanisms stack. `.auditignore` is read automatically; `--exclude-paths` is additive.
-
-### Single Entry Point (Full Loop)
-
-For end-to-end orchestration without AI skill orchestrators:
-```bash
-node scripts/audit-loop.mjs code <plan-file>                     # Full loop: audit → report
-node scripts/audit-loop.mjs code <plan-file> --max-rounds 3      # Limit rounds
-node scripts/audit-loop.mjs code <plan-file> --exclude-paths 'scripts/**'
-node scripts/audit-loop.mjs code <plan-file> --skip-gemini       # Skip Step 7
-```
-Artifacts land in `.audit/` (persistent across sessions).
-
 ### Round 1 — Audit (scope-aware)
 
 ```bash
 # Default: audit only recent changes (preferred)
 node scripts/openai-audit.mjs code <plan-file> \
-  --out .audit/$SID-r1-result.json \
-  2>.audit/$SID-r1-stderr.log
+  --out /tmp/$SID-r1-result.json \
+  2>/tmp/$SID-r1-stderr.log
 
 # Broader scope examples (only when user asks):
 # --scope plan    → all plan-referenced files
 # --scope full    → entire repo
 # --base main     → diff against main instead of HEAD~1
-# --exclude-paths 'scripts/**'  → exclude vendored files from scope
 ```
 
 ### Phase 0 — Tool Pre-Pass (Phase C)
@@ -556,14 +528,9 @@ When Step 7 is skipped, output `FINAL_GATE_SKIPPED` and do not claim full final-
 
 ### Build Transcript
 
-**CRITICAL**: Build the transcript AFTER Step 4 fixes are applied (committed or at least
-saved to disk). Gemini reads actual code files from disk at review time — if you build
-the transcript before fixing, Gemini sees the old code and may incorrectly REJECT.
-
 Assemble `/tmp/$SID-transcript.json` with the full audit trail:
+- Plan content, code files list
 - All rounds: GPT findings, Claude positions, GPT rulings, fixes applied
-- `code_files`: list of file paths GPT audited (from result JSON's `code_files` field)
-- `changed_files`: files modified during fixes (`git diff --name-only`)
 - Final state: remaining findings, dismissed findings
 - Suppression data: kept/suppressed/reopened counts per round
 
@@ -610,67 +577,9 @@ If Gemini returns `APPROVE` on re-review → done. If `CONCERNS` again after 2 r
 
 ---
 
-## Step 8 — Debt Review (Automatic Pattern Detection)
+## Step 8 — Code Audit Transition (FULL_CYCLE only)
 
-After audit rounds complete, check accumulated deferred/LOW findings for patterns.
-This step runs **automatically** when thresholds are crossed — no manual trigger needed.
-
-### Trigger Conditions (any one is sufficient)
-
-| Condition | Threshold | Meaning |
-|-----------|-----------|---------|
-| Recurring items | 2+ entries with `distinctRunCount >= 5` | Same issue keeps appearing across audits |
-| Cluster count | 2+ clusters found by local heuristics | Multiple entries point at the same module or principle |
-| Budget violations | Any file/area exceeds its debt budget | Accumulated debt exceeds operator-set limits |
-| Entry count | 5+ total deferred entries | Enough data to cluster meaningfully |
-
-If **no thresholds are crossed**, Step 8 is skipped silently.
-
-### What Happens
-
-1. **Local clustering** (always): Groups debt by file, principle, and recurrence pattern
-2. **LLM review** (when OPENAI_API_KEY available): GPT-5.4 clusters entries, identifies
-   refactor candidates with effort estimates, risks, and rollback strategies
-3. **Leverage ranking**: Refactor candidates ranked by impact/effort ratio
-   (BUG/VULNERABILITY weight 3x vs CODE_SMELL 1x, divided by effort weight)
-4. **Top refactor plan**: Optionally writes `docs/plans/refactor-<cluster>.md` for the
-   highest-leverage candidate
-
-### CLI (manual invocation)
-
-```bash
-# LLM clustering (default)
-node scripts/debt-review.mjs --out .audit/debt-review.md --write-plan-doc
-
-# Local-only (no LLM, deterministic)
-node scripts/debt-review.mjs --local-only --out .audit/debt-review.md
-
-# Check budgets only
-node scripts/debt-budget-check.mjs
-```
-
-### R2+ Automatic Escalation
-
-On R2+ rounds, `--escalate-recurring 5` is now the default. Debt entries that
-have appeared in 5+ audit runs automatically **bypass suppression** and get
-re-examined. This ensures recurring issues don't hide behind the suppression system forever.
-
-### Status Card
-
-```
-═══════════════════════════════════════
-  DEBT REVIEW — Pattern Detection
-  Entries: 23 | Recurring (5+): 4 | Clusters: 3
-  Top: [file] openai-audit.mjs — 8 entries
-  Top: [principle] SRP — 5 entries
-═══════════════════════════════════════
-```
-
----
-
-## Step 9 — Code Audit Transition (FULL_CYCLE only)
-
-After plan converges: implement, then run Steps 2-7 with CODE_AUDIT mode.
+After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 
 ---
 

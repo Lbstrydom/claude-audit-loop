@@ -1,20 +1,14 @@
 {
   "schemaVersion": 1,
-  "bundleVersion": "4854794ab42cb04b",
+  "bundleVersion": "de99c8ded0745998",
   "repoUrl": "https://github.com/Lbstrydom/claude-engineering-skills",
   "rawUrlBase": "https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main",
-  "updatedAt": "2026-04-07T11:35:20.646Z",
+  "updatedAt": "2026-04-07T13:49:08.817Z",
   "skills": {
-    "audit": {
-      "path": "skills/audit/SKILL.md",
-      "sha": "bbedf404165d",
-      "size": 17446,
-      "summary": "Audit the implementation of a plan against its specification and engineering principles."
-    },
     "audit-loop": {
       "path": "skills/audit-loop/SKILL.md",
-      "sha": "5fcb1c925f62",
-      "size": 25724,
+      "sha": "41e5e342a8e0",
+      "size": 25951,
       "summary": "Self-driving plan-audit-fix loop with adaptive learning."
     },
     "plan-backend": {

@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const SKILLS_DIR = path.resolve('skills');
-const ALL_SKILLS = ['audit-loop', 'plan-backend', 'plan-frontend', 'ship', 'audit'];
-const PYTHON_SKILLS = ['plan-backend', 'plan-frontend', 'ship', 'audit'];
+const ALL_SKILLS = ['audit-loop', 'plan-backend', 'plan-frontend', 'ship'];
+const PYTHON_SKILLS = ['plan-backend', 'plan-frontend', 'ship'];
 
 describe('skills content', () => {
   for (const skill of ALL_SKILLS) {
