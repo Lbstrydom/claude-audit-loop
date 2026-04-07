@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { ManifestSchema } from './lib/schemas-install.mjs';
 import { findRepoRoot, resolveSkillTargets, receiptPath } from './lib/install/surface-paths.mjs';
 import { readReceipt, writeReceipt, buildReceipt } from './lib/install/receipt.mjs';
@@ -209,6 +210,58 @@ function main() {
 
   // Ensure audit-loop artifacts are gitignored in target repo
   ensureAuditGitignore(repoRoot, { dryRun: args.dryRun });
+
+  // Install npm dependencies in target repo
+  const hasPkg = fs.existsSync(path.join(repoRoot, 'package.json'));
+  if (hasPkg) {
+    const REQUIRED_DEPS = ['openai', 'zod', 'dotenv', 'micromatch'];
+    // Optional: enhance audit quality but core loop works without them
+    const OPTIONAL_DEPS = ['@google/genai', 'proper-lockfile', '@anthropic-ai/sdk'];
+    // Supabase is only needed if user configures cloud learning store
+    // (SUPABASE_AUDIT_URL + SUPABASE_AUDIT_ANON_KEY in .env)
+
+    // Check which deps are already installed
+    const nodeModules = path.join(repoRoot, 'node_modules');
+    const missing = REQUIRED_DEPS.filter(d => !fs.existsSync(path.join(nodeModules, d)));
+    const missingOptional = OPTIONAL_DEPS.filter(d => !fs.existsSync(path.join(nodeModules, d)));
+
+    if (missing.length > 0 || missingOptional.length > 0) {
+      console.log(`\n${D}Installing audit-loop dependencies in target repo...${X}`);
+      try {
+        if (missing.length > 0) {
+          console.log(`  Required: ${missing.join(', ')}`);
+          execFileSync('npm', ['install', '--save-dev', ...missing], {
+            cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000
+          });
+          console.log(`  ${G}✓${X} Required deps installed`);
+        }
+        if (missingOptional.length > 0) {
+          console.log(`  Optional: ${missingOptional.join(', ')}`);
+          try {
+            execFileSync('npm', ['install', '--save-dev', '--legacy-peer-deps', ...missingOptional], {
+              cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000
+            });
+            console.log(`  ${G}✓${X} Optional deps installed`);
+          } catch {
+            console.log(`  ${Y}○${X} Some optional deps failed — audit will degrade gracefully`);
+          }
+        }
+      } catch (err) {
+        console.error(`  ${Y}⚠${X} npm install failed: ${err.message?.slice(0, 150)}`);
+        console.error(`  Run manually: cd ${repoRoot} && npm install --save-dev ${missing.join(' ')}`);
+      }
+    } else {
+      console.log(`\n  ${G}✓${X} All audit-loop dependencies already installed`);
+    }
+    // Supabase hint — only if env vars are set but package is missing
+    if (process.env.SUPABASE_AUDIT_URL && !fs.existsSync(path.join(nodeModules, '@supabase', 'supabase-js'))) {
+      console.log(`  ${Y}○${X} SUPABASE_AUDIT_URL is set but @supabase/supabase-js is not installed`);
+      console.log(`    Run: cd ${repoRoot} && npm install --save-dev @supabase/supabase-js`);
+    }
+  } else {
+    console.log(`\n  ${Y}○${X} No package.json in target — skipping dependency install`);
+    console.log(`  To install manually: npm install openai zod dotenv micromatch`);
+  }
 
   console.log(`\n${G}Installed ${result.written} files${X}`);
   console.log(`  Bundle version: ${manifest.bundleVersion}`);
