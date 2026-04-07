@@ -359,12 +359,31 @@ async function main() {
     if (hasGemini || hasClaude) {
       banner('STEP 7 — Final Review (Gemini/Claude Opus)');
 
-      // Build transcript from all rounds
+      // Build transcript from all rounds — AFTER fixes are on disk so Gemini
+      // reads current code state (not pre-fix). Include code_files list so
+      // gemini-review.mjs knows exactly which files to read.
       const transcriptFile = path.join(outDir, `${sid}-transcript.json`);
+      const roundData = roundResults.map(r => {
+        try { return JSON.parse(fs.readFileSync(r.file, 'utf-8')); } catch { return null; }
+      }).filter(Boolean);
+
+      // Collect all code_files from round results (GPT tells us what it audited)
+      const allCodeFiles = [...new Set(roundData.flatMap(r => r.code_files || []))];
+
+      // Collect changed files from git (what was fixed since audit started)
+      let changedSinceStart = [];
+      try {
+        const { execFileSync: efs } = await import('node:child_process');
+        changedSinceStart = efs('git', ['diff', '--name-only', 'HEAD~1'], {
+          encoding: 'utf-8', timeout: 5000
+        }).trim().split('\n').filter(Boolean);
+      } catch { /* git not available or no changes */ }
+
       const transcript = {
-        rounds: roundResults.map(r => {
-          try { return JSON.parse(fs.readFileSync(r.file, 'utf-8')); } catch { return null; }
-        }).filter(Boolean),
+        rounds: roundData,
+        code_files: allCodeFiles,
+        changed_files: changedSinceStart,
+        _note: 'Transcript built AFTER fixes applied. code_files from GPT audit scope; Gemini reads these from current disk state.',
       };
       fs.writeFileSync(transcriptFile, JSON.stringify(transcript, null, 2));
 

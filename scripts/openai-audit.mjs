@@ -1445,6 +1445,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     files_planned: structureResult.result.files_planned ?? allPaths.size,
     files_found: structureResult.result.files_found ?? found.length,
     files_missing: structureResult.result.files_missing ?? missing.length,
+    code_files: found,
     findings: allFindings,
     wiring_issues: wiringResult.result.wiring_issues ?? [],
     quick_fix_warnings: [

@@ -556,9 +556,14 @@ When Step 7 is skipped, output `FINAL_GATE_SKIPPED` and do not claim full final-
 
 ### Build Transcript
 
+**CRITICAL**: Build the transcript AFTER Step 4 fixes are applied (committed or at least
+saved to disk). Gemini reads actual code files from disk at review time — if you build
+the transcript before fixing, Gemini sees the old code and may incorrectly REJECT.
+
 Assemble `/tmp/$SID-transcript.json` with the full audit trail:
-- Plan content, code files list
 - All rounds: GPT findings, Claude positions, GPT rulings, fixes applied
+- `code_files`: list of file paths GPT audited (from result JSON's `code_files` field)
+- `changed_files`: files modified during fixes (`git diff --name-only`)
 - Final state: remaining findings, dismissed findings
 - Suppression data: kept/suppressed/reopened counts per round
 
