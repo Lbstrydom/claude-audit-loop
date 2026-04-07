@@ -118,7 +118,7 @@ export const GLOBAL_REPO_ID = '00000000-0000-0000-0000-000000000000';
 export const UNKNOWN_FILE_EXT = 'unknown';
 
 /** Canonical list of audit pass names. */
-export const PASS_NAMES = Object.freeze(['structure', 'wiring', 'backend', 'frontend', 'sustainability']);
+export const PASS_NAMES = Object.freeze(['structure', 'wiring', 'backend', 'frontend', 'sustainability', 'gemini-review']);
 
 /** Normalized language enum for bandit context bucketing. */
 export const LANGUAGES = Object.freeze(['js', 'ts', 'py', 'go', 'java', 'rust', 'mixed', 'other']);

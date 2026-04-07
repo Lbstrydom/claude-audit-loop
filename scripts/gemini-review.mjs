@@ -23,9 +23,11 @@ import { z } from 'zod';
 import { ProducerFindingSchema, zodToGeminiSchema } from './lib/schemas.mjs';
 import { buildClassificationRubric } from './lib/prompt-seeds.mjs';
 import { readFileOrDie, readFilesAsContext, extractPlanPaths, writeOutput } from './lib/file-io.mjs';
-import { semanticId, formatFindings } from './lib/findings.mjs';
-import { readProjectContext, initAuditBrief } from './lib/context.mjs';
+import { semanticId, formatFindings, appendOutcome, FalsePositiveTracker } from './lib/findings.mjs';
+import { readProjectContext, initAuditBrief, generateRepoProfile } from './lib/context.mjs';
 import { geminiConfig, claudeConfig } from './lib/config.mjs';
+import { PromptBandit, computeReward } from './bandit.mjs';
+import { getActivePrompt, getActiveRevisionId, bootstrapFromConstants } from './lib/prompt-registry.mjs';
 // NOTE: lib/llm-wrappers.mjs provides shared wrappers for learning/refinement/evolution paths.
 // This module keeps specialized callGemini/callClaudeOpus with thinkingConfig + abort controller
 // because the final review requires high-budget reasoning and precise timeout handling.
@@ -124,6 +126,18 @@ RULES:
 6. If the prompt includes a "Pre-filtered Debt" section, DO NOT re-raise any topic listed there.
    Those concerns are pre-existing, operator-deferred, and tracked outside this audit's scope.
    They were explicitly filtered from the transcript by the upstream pipeline.`;
+
+// Bootstrap prompt registry for Gemini review (enables variant selection + evolution)
+bootstrapFromConstants({ 'gemini-review': REVIEW_SYSTEM });
+
+/**
+ * Get the active review prompt — from registry if a promoted variant exists,
+ * otherwise falls back to the static REVIEW_SYSTEM constant.
+ * @returns {string}
+ */
+function getReviewPrompt() {
+  return getActivePrompt('gemini-review') || REVIEW_SYSTEM;
+}
 
 // ── Gemini API Helper ──────────────────────────────────────────────────────────
 
@@ -379,7 +393,7 @@ async function runFinalReview(provider, client, planContent, transcriptContent, 
     sourceKind: 'REVIEWER',
     sourceName: selectedModel
   });
-  const systemPrompt = REVIEW_SYSTEM + classificationBlock;
+  const systemPrompt = getReviewPrompt() + classificationBlock;
 
   if (provider === 'gemini') {
     return callGemini(client, {
@@ -662,6 +676,72 @@ async function main() {
       }
     } else {
       console.log(formatReviewResult(result, usage, latencyMs, provider));
+    }
+
+    // ── Learning: record Gemini findings as outcomes ──────────────────────
+    // This feeds the bandit, FP tracker, meta-assessment, and prompt refinement
+    // for the 'gemini-review' pass — same pipeline as GPT audit passes.
+    try {
+      const repoProfile = generateRepoProfile();
+      const repoFP = repoProfile?.repoFingerprint || null;
+      const bandit = new PromptBandit();
+      const fpTracker = new FalsePositiveTracker();
+      const revId = getActiveRevisionId('gemini-review') || 'default';
+
+      // Record new_findings as outcomes (initially accepted=true, updated after deliberation)
+      if (Array.isArray(result.new_findings)) {
+        for (const f of result.new_findings) {
+          appendOutcome('.audit/outcomes.jsonl', {
+            findingId: f.id,
+            severity: f.severity,
+            category: f.category,
+            section: f.section,
+            pass: 'gemini-review',
+            accepted: true, // Will be updated by orchestrator after Step 7.1 deliberation
+            round: 0, // Final review = post-convergence
+            promptVariant: revId,
+            promptRevisionId: revId,
+            semanticHash: f._hash,
+          });
+          fpTracker.record(f, true, repoFP);
+        }
+      }
+
+      // Record wrongly_dismissed as high-signal outcomes (Gemini caught what GPT missed)
+      if (Array.isArray(result.wrongly_dismissed)) {
+        for (const w of result.wrongly_dismissed) {
+          appendOutcome('.audit/outcomes.jsonl', {
+            findingId: w.original_finding_id,
+            severity: w.recommended_severity,
+            category: `[wrongly-dismissed] ${w.original_finding_id}`,
+            section: w.reason_claude_was_wrong?.slice(0, 120) || '',
+            pass: 'gemini-review',
+            accepted: true, // Wrongly dismissed = Gemini was right
+            round: 0,
+            promptVariant: revId,
+            promptRevisionId: revId,
+            semanticHash: semanticId({ category: w.original_finding_id, section: w.reason_claude_was_wrong || '', detail: '' }),
+          });
+        }
+      }
+
+      // Update bandit for the review prompt variant
+      // Reward based on verdict: APPROVE (fair deliberation) = good, REJECT (missed issues) = bad
+      const VERDICT_REWARDS = { APPROVE: 0.8, CONCERNS: 0.5, REJECT: 0.2 };
+      const verdictReward = VERDICT_REWARDS[result.verdict] ?? 0.5;
+      bandit.update('gemini-review', revId, verdictReward);
+      bandit.flush();
+
+      // Persist FP tracker
+      fpTracker.flush?.();
+
+      const newCount = result.new_findings?.length ?? 0;
+      const wrongCount = result.wrongly_dismissed?.length ?? 0;
+      if (newCount > 0 || wrongCount > 0) {
+        process.stderr.write(`  [learning] Recorded ${newCount} new + ${wrongCount} wrongly-dismissed outcomes for gemini-review pass\n`);
+      }
+    } catch (learnErr) {
+      process.stderr.write(`  [learning] ${learnErr.message?.slice(0, 100)}\n`);
     }
 
   } catch (err) {

@@ -92,7 +92,7 @@ describe('showStats', () => {
     const bandit = new PromptBandit(path.join(tmpDir, 'bandit.json'));
     const outcomesPath = path.join(tmpDir, 'outcomes.jsonl');
     const result = showStats(outcomesPath, bandit);
-    assert.ok(result.passStats.length === 5);
+    assert.ok(result.passStats.length === 6); // 5 audit passes + gemini-review
     assert.ok(result.activeExperiments.length === 0);
   });
 });
