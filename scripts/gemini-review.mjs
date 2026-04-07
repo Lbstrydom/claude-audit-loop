@@ -44,7 +44,7 @@ const MAX_OUTPUT_TOKENS = geminiConfig.maxOutputTokens;
 
 const WronglyDismissedSchema = z.object({
   original_finding_id: z.string().max(10).describe('The GPT finding ID that was dismissed (e.g. H3, M5)'),
-  reason_claude_was_wrong: z.string().max(400).describe('Why Claude should not have dismissed this'),
+  reason_claude_was_wrong: z.string().max(800).describe('Why Claude should not have dismissed this'),
   recommended_severity: z.enum(['HIGH', 'MEDIUM', 'LOW'])
 });
 
@@ -55,17 +55,17 @@ const GeminiFinalReviewSchema = z.object({
     claude_bias_detected: z.boolean().describe('Did Claude dismiss valid findings to protect its own code?'),
     gpt_false_positive_count: z.number().describe('How many GPT findings were noise or incorrect?'),
     deliberation_was_fair: z.boolean().describe('Was the Claude-GPT deliberation balanced overall?'),
-    quality_summary: z.string().max(500).describe('Brief assessment of the deliberation process')
+    quality_summary: z.string().max(2000).describe('Brief assessment of the deliberation process')
   }),
 
   new_findings: z.array(ProducerFindingSchema).max(10).describe('Issues neither Claude nor GPT caught. Max 10, only genuinely new.'),
 
   wrongly_dismissed: z.array(WronglyDismissedSchema).max(10).describe('GPT findings Claude dismissed but were actually valid'),
 
-  over_engineering_flags: z.array(z.string().max(300)).max(10).describe('Places where audit pressure caused unnecessary complexity'),
+  over_engineering_flags: z.array(z.string().max(500)).max(10).describe('Places where audit pressure caused unnecessary complexity'),
 
   architectural_coherence: z.enum(['Strong', 'Adequate', 'Weak']),
-  overall_reasoning: z.string().max(1500).describe('Comprehensive final assessment')
+  overall_reasoning: z.string().max(3000).describe('Comprehensive final assessment')
 });
 
 // Derived from GeminiFinalReviewSchema — single source of truth via Zod → JSON Schema
@@ -637,7 +637,7 @@ async function main() {
   }
 
   const planContent = readFileOrDie(planFile);
-  const transcriptContent = readFileOrDie(transcriptFile);
+  let transcriptContent = readFileOrDie(transcriptFile);
   await initAuditBrief(); // Pre-generate context brief
   const projectContext = readProjectContext();
   let client;
@@ -654,7 +654,29 @@ async function main() {
   }
 
   try {
-    const { result, usage, latencyMs } = await runFinalReview(provider, client, planContent, transcriptContent, projectContext);
+    // Auto-retry on JSON truncation (Gemini verbosity can exceed output limits)
+    let result, usage, latencyMs;
+    const MAX_REVIEW_ATTEMPTS = 2;
+    for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
+      try {
+        ({ result, usage, latencyMs } = await runFinalReview(provider, client, planContent, transcriptContent, projectContext));
+        break; // Success
+      } catch (err) {
+        const isTruncation = err.message?.includes('Unterminated string') ||
+          err.message?.includes('JSON') ||
+          err.message?.includes('parse');
+        if (isTruncation && attempt < MAX_REVIEW_ATTEMPTS) {
+          process.stderr.write(`  [final-review] JSON truncation on attempt ${attempt} — retrying with conciseness instruction...\n`);
+          // Append conciseness hint to transcript for retry
+          transcriptContent = JSON.stringify({
+            ...JSON.parse(transcriptContent),
+            _retryHint: 'IMPORTANT: Your previous response was truncated. Be MORE CONCISE in all string fields. Keep quality_summary under 500 chars and overall_reasoning under 1500 chars.'
+          });
+          continue;
+        }
+        throw err;
+      }
+    }
 
     // Phase D.4 defense-in-depth: re-suppress Gemini new_findings that match
     // pre-filtered debt topics, even if the reviewer ignored our warning.

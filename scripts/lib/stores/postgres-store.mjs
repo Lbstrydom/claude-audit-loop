@@ -80,7 +80,7 @@ export async function createPostgresAdapter(config = {}) {
         await client.query('COMMIT');
         return result;
       } catch (e) {
-        await client.query('ROLLBACK');
+        try { await client.query('ROLLBACK'); } catch { /* rollback failed — original error is more important */ }
         throw e;
       } finally {
         client.release();
