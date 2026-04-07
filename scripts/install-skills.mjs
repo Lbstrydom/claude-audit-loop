@@ -17,6 +17,7 @@ import { readReceipt, writeReceipt, buildReceipt } from './lib/install/receipt.m
 import { detectConflicts, computeFileSha } from './lib/install/conflict-detector.mjs';
 import { mergeBlock, COPILOT_BLOCK } from './lib/install/merge.mjs';
 import { executeTransaction } from './lib/install/transaction.mjs';
+import { ensureAuditGitignore } from './lib/install/gitignore.mjs';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
 
@@ -186,6 +187,9 @@ function main() {
     managedFiles,
   });
   writeReceipt(repoReceiptPath, receipt);
+
+  // Ensure audit-loop artifacts are gitignored in target repo
+  ensureAuditGitignore(repoRoot, { dryRun: args.dryRun });
 
   console.log(`\n${G}Installed ${result.written} files${X}`);
   console.log(`  Bundle version: ${manifest.bundleVersion}`);

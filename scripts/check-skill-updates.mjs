@@ -10,6 +10,7 @@ import path from 'node:path';
 import { findRepoRoot, receiptPath } from './lib/install/surface-paths.mjs';
 import { readReceipt } from './lib/install/receipt.mjs';
 import { computeFileSha } from './lib/install/conflict-detector.mjs';
+import { checkAuditGitignore, ensureAuditGitignore } from './lib/install/gitignore.mjs';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', X = '\x1b[0m';
 
@@ -72,6 +73,12 @@ function main() {
     }
   }
 
+  // Check .gitignore coverage and auto-fix missing patterns
+  const giCheck = checkAuditGitignore(repoRoot);
+  if (giCheck.missing.length > 0) {
+    ensureAuditGitignore(repoRoot);
+  }
+
   if (args.json) {
     console.log(JSON.stringify({
       installed: true,
@@ -80,6 +87,7 @@ function main() {
       surface: receipt.surface,
       files: { total: driftResults.length, match: matchCount, drifted: driftCount, missing: missingCount },
       drift: driftResults.filter(r => r.status !== 'match'),
+      gitignore: { missing: giCheck.missing, ok: giCheck.missing.length === 0 },
     }, null, 2));
   } else {
     console.log(`${D}Bundle version:${X} ${receipt.bundleVersion}`);

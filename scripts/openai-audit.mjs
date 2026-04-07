@@ -1304,9 +1304,13 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
         severity: f.severity,
         category: f.category,
         section: f.section,
+        detailSnapshot: f.detail?.slice(0, 300),
         detail: f.detail?.slice(0, 300),
         pass: f._pass,
         _hash: f._hash,
+        semanticHash: f._hash,
+        affectedFiles: f.affectedFiles || [f._primaryFile || ''],
+        affectedPrinciples: f.principle ? [f.principle] : [],
         adjudicationOutcome: 'pending',
         remediationState: 'pending',
         round

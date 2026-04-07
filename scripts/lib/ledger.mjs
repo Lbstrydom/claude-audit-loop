@@ -250,10 +250,32 @@ export function suppressReRaises(findings, ledger, { changedFiles = [], impactSe
   for (const f of findings) {
     // Step 1: Narrow candidates by pass + file scope overlap
     const fFile = normalizePath(f._primaryFile || f.section || '');
-    const candidates = resolved.filter(d =>
+    let candidates = resolved.filter(d =>
       d.pass === f._pass &&
+      Array.isArray(d.affectedFiles) &&
       d.affectedFiles.some(af => normalizePath(af) === fFile || fFile.includes(normalizePath(af)))
     );
+
+    // Step 1b: Cross-pass fallback — if no same-pass candidates, check ALL passes
+    // with a higher similarity threshold (0.8) to catch conceptual duplicates
+    // that GPT re-raises under a different pass label.
+    if (candidates.length === 0) {
+      candidates = resolved.filter(d =>
+        d.pass !== f._pass &&
+        Array.isArray(d.affectedFiles) &&
+        d.affectedFiles.some(af => normalizePath(af) === fFile || fFile.includes(normalizePath(af)))
+      );
+      // Only use cross-pass candidates if they have high similarity (>0.8)
+      if (candidates.length > 0) {
+        candidates = candidates.filter(d => {
+          const score = jaccardSimilarity(
+            `${f.category} ${f.section} ${f.detail}`,
+            `${d.category} ${d.section} ${d.detailSnapshot || d.detail}`
+          );
+          return score > 0.8;
+        });
+      }
+    }
 
     if (candidates.length === 0) { kept.push(f); continue; }
 
@@ -262,7 +284,7 @@ export function suppressReRaises(findings, ledger, { changedFiles = [], impactSe
     for (const d of candidates) {
       const score = jaccardSimilarity(
         `${f.category} ${f.section} ${f.detail}`,
-        `${d.category} ${d.section} ${d.detailSnapshot}`
+        `${d.category} ${d.section} ${d.detailSnapshot || d.detail}`
       );
       if (score > bestScore) { bestScore = score; bestMatch = d; }
     }

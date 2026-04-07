@@ -213,17 +213,11 @@ async function setupEnv(targetDir) {
     ok('.env updated');
   }
 
-  // Ensure .env in .gitignore
-  const giPath = path.join(targetDir, '.gitignore');
-  if (fs.existsSync(giPath)) {
-    const gi = fs.readFileSync(giPath, 'utf-8');
-    if (!gi.includes('.env')) {
-      fs.appendFileSync(giPath, '\n.env\n.audit/\n');
-      ok('.env + .audit/ added to .gitignore');
-    } else if (!gi.includes('.audit/')) {
-      fs.appendFileSync(giPath, '\n.audit/\n');
-      ok('.audit/ added to .gitignore');
-    }
+  // Ensure audit-loop artifacts are gitignored
+  const { ensureAuditGitignore } = await import('./scripts/lib/install/gitignore.mjs');
+  const giResult = ensureAuditGitignore(targetDir, { quiet: true });
+  if (giResult.added.length > 0) {
+    ok(`${giResult.created ? 'Created' : 'Updated'} .gitignore: +${giResult.added.length} patterns`);
   }
 }
 

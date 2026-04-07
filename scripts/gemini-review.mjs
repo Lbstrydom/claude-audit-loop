@@ -509,22 +509,44 @@ async function main() {
   const jsonMode = args.includes('--json');
   const outIdx = args.indexOf('--out');
   const outFile = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1] : null;
+  const providerIdx = args.indexOf('--provider');
+  const providerOverride = providerIdx !== -1 && args[providerIdx + 1] ? args[providerIdx + 1] : null;
 
   if (mode !== 'review' || !planFile || !transcriptFile) {
-    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>]');
+    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>] [--provider gemini|anthropic]');
     console.error('       node scripts/gemini-review.mjs ping');
     process.exit(1);
   }
 
+  // --provider flag overrides env var auto-detection
   let provider = null;
-  if (process.env.GEMINI_API_KEY) {
-    provider = 'gemini';
-  } else if (process.env.ANTHROPIC_API_KEY) {
+  if (providerOverride === 'anthropic' || providerOverride === 'claude-opus') {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error('Error: --provider anthropic requires ANTHROPIC_API_KEY');
+      process.exit(1);
+    }
     provider = 'claude-opus';
+  } else if (providerOverride === 'gemini') {
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('Error: --provider gemini requires GEMINI_API_KEY');
+      process.exit(1);
+    }
+    provider = 'gemini';
+  } else if (providerOverride) {
+    console.error(`Error: Unknown provider "${providerOverride}". Use "gemini" or "anthropic".`);
+    process.exit(1);
+  } else {
+    // Auto-detect from env vars (existing behavior)
+    if (process.env.GEMINI_API_KEY) {
+      provider = 'gemini';
+    } else if (process.env.ANTHROPIC_API_KEY) {
+      provider = 'claude-opus';
+    }
   }
   if (!provider) {
     console.error('Error: Final review requires GEMINI_API_KEY or ANTHROPIC_API_KEY');
     console.error('Set GEMINI_API_KEY for Gemini, or ANTHROPIC_API_KEY for Claude Opus fallback.');
+    console.error('Or use --provider gemini|anthropic to force a specific provider.');
     process.exit(1);
   }
 

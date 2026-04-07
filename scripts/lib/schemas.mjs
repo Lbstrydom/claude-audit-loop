@@ -38,11 +38,11 @@ const FindingBase = {
   category: z.string().max(80).describe('Category: e.g. "DRY Violation", "Missing Error Handling"'),
   section: z.string().max(120).describe('Which plan/code section or file this relates to'),
   detail: z.string().max(600).describe('What is wrong and why it matters'),
-  risk: z.string().max(300).describe('What could go wrong if not fixed'),
+  risk: z.string().max(500).describe('What could go wrong if not fixed'),
   recommendation: z.string().max(600).describe('Specific, actionable fix — NOT a quick fix, must be sustainable'),
   is_quick_fix: z.boolean().describe('TRUE if the recommendation is a band-aid rather than a proper fix.'),
   is_mechanical: z.boolean().describe('TRUE if fix is deterministic with exactly one correct answer.'),
-  principle: z.string().max(80).describe('Which engineering/UX principle this violates')
+  principle: z.string().max(150).describe('Which engineering/UX principle this violates')
 };
 
 /**

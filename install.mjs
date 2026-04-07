@@ -160,15 +160,9 @@ ${B}═════════════════════════�
     console.log(`  ${G}✓${X} .env updated`);
   }
 
-  // Ensure .gitignore
-  const giPath = path.join(target, '.gitignore');
-  if (fs.existsSync(giPath)) {
-    let gi = fs.readFileSync(giPath, 'utf-8');
-    let giChanged = false;
-    if (!gi.includes('.env')) { gi += '\n.env'; giChanged = true; }
-    if (!gi.includes('.audit/')) { gi += '\n.audit/'; giChanged = true; }
-    if (giChanged) fs.writeFileSync(giPath, gi);
-  }
+  // Ensure audit-loop artifacts are gitignored
+  const { ensureAuditGitignore } = await import('./scripts/lib/install/gitignore.mjs');
+  ensureAuditGitignore(target);
 
   // 7. Cleanup
   fs.rmSync(tmp, { recursive: true, force: true });
