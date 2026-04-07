@@ -289,6 +289,68 @@ async function main() {
     round++;
   }
 
+  // Step 8 — Debt Review (automatic when thresholds crossed)
+  try {
+    const debtLedgerPath = path.resolve('.audit', 'tech-debt.json');
+    if (fs.existsSync(debtLedgerPath)) {
+      const { readDebtLedger } = await import('./scripts/lib/debt-ledger.mjs');
+      const { findRecurringEntries, buildLocalClusters, findBudgetViolations } = await import('./scripts/lib/debt-review-helpers.mjs');
+
+      const ledger = readDebtLedger({ ledgerPath: debtLedgerPath });
+      const entries = ledger.entries || [];
+
+      if (entries.length >= 5) {
+        // Check thresholds: recurring items or file-level accumulation
+        const recurring = findRecurringEntries(entries, 5);
+        const clusters = buildLocalClusters(entries);
+        const violations = findBudgetViolations(entries, ledger.budgets || {});
+
+        const shouldReview = recurring.length >= 2 || clusters.length >= 2 || violations.length > 0;
+
+        if (shouldReview) {
+          banner(`STEP 8 — Debt Review\n  Entries: ${entries.length} | Recurring (5+): ${recurring.length} | Clusters: ${clusters.length} | Budget violations: ${violations.length}`);
+
+          // Try LLM review, fall back to local
+          const debtOutFile = path.join(outDir, `${sid}-debt-review.md`);
+          try {
+            execFileSync('node', ['scripts/debt-review.mjs', '--out', debtOutFile, '--write-plan-doc'], {
+              stdio: 'inherit', timeout: 120000
+            });
+            console.log(`  Debt review: ${debtOutFile}`);
+          } catch {
+            // Fall back to local-only clustering
+            try {
+              execFileSync('node', ['scripts/debt-review.mjs', '--local-only', '--out', debtOutFile], {
+                stdio: 'inherit', timeout: 30000
+              });
+              console.log(`  Debt review (local): ${debtOutFile}`);
+            } catch (err2) {
+              console.error(`  ${Y}Debt review failed${X}: ${err2.message?.slice(0, 100)}`);
+            }
+          }
+
+          // Show top refactor candidates inline
+          if (clusters.length > 0) {
+            console.log(`\n  Top clusters:`);
+            for (const c of clusters.slice(0, 3)) {
+              console.log(`    [${c.kind}] ${c.title} — ${c.entries.length} entries`);
+            }
+          }
+          if (recurring.length > 0) {
+            console.log(`\n  Recurring items (appeared in 5+ audits):`);
+            for (const r of recurring.slice(0, 5)) {
+              console.log(`    ${r.topicId} — ${r.category?.slice(0, 60)} (${r.distinctRunCount ?? r.occurrences} runs)`);
+            }
+          }
+        } else {
+          process.stderr.write(`  [debt] ${entries.length} entries, no thresholds crossed — skipping review\n`);
+        }
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`  [debt-review] ${err.message?.slice(0, 100)} — non-blocking\n`);
+  }
+
   // Step 7 — Gemini Final Review (MANDATORY unless skipped)
   if (!args.skipGemini) {
     const hasGemini = !!process.env.GEMINI_API_KEY;

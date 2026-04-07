@@ -605,9 +605,67 @@ If Gemini returns `APPROVE` on re-review → done. If `CONCERNS` again after 2 r
 
 ---
 
-## Step 8 — Code Audit Transition (FULL_CYCLE only)
+## Step 8 — Debt Review (Automatic Pattern Detection)
 
-After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
+After audit rounds complete, check accumulated deferred/LOW findings for patterns.
+This step runs **automatically** when thresholds are crossed — no manual trigger needed.
+
+### Trigger Conditions (any one is sufficient)
+
+| Condition | Threshold | Meaning |
+|-----------|-----------|---------|
+| Recurring items | 2+ entries with `distinctRunCount >= 5` | Same issue keeps appearing across audits |
+| Cluster count | 2+ clusters found by local heuristics | Multiple entries point at the same module or principle |
+| Budget violations | Any file/area exceeds its debt budget | Accumulated debt exceeds operator-set limits |
+| Entry count | 5+ total deferred entries | Enough data to cluster meaningfully |
+
+If **no thresholds are crossed**, Step 8 is skipped silently.
+
+### What Happens
+
+1. **Local clustering** (always): Groups debt by file, principle, and recurrence pattern
+2. **LLM review** (when OPENAI_API_KEY available): GPT-5.4 clusters entries, identifies
+   refactor candidates with effort estimates, risks, and rollback strategies
+3. **Leverage ranking**: Refactor candidates ranked by impact/effort ratio
+   (BUG/VULNERABILITY weight 3x vs CODE_SMELL 1x, divided by effort weight)
+4. **Top refactor plan**: Optionally writes `docs/plans/refactor-<cluster>.md` for the
+   highest-leverage candidate
+
+### CLI (manual invocation)
+
+```bash
+# LLM clustering (default)
+node scripts/debt-review.mjs --out .audit/debt-review.md --write-plan-doc
+
+# Local-only (no LLM, deterministic)
+node scripts/debt-review.mjs --local-only --out .audit/debt-review.md
+
+# Check budgets only
+node scripts/debt-budget-check.mjs
+```
+
+### R2+ Automatic Escalation
+
+On R2+ rounds, `--escalate-recurring 5` is now the default. Debt entries that
+have appeared in 5+ audit runs automatically **bypass suppression** and get
+re-examined. This ensures recurring issues don't hide behind the suppression system forever.
+
+### Status Card
+
+```
+═══════════════════════════════════════
+  DEBT REVIEW — Pattern Detection
+  Entries: 23 | Recurring (5+): 4 | Clusters: 3
+  Top: [file] openai-audit.mjs — 8 entries
+  Top: [principle] SRP — 5 entries
+═══════════════════════════════════════
+```
+
+---
+
+## Step 9 — Code Audit Transition (FULL_CYCLE only)
+
+After plan converges: implement, then run Steps 2-7 with CODE_AUDIT mode.
 
 ---
 

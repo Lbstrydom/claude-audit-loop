@@ -396,7 +396,19 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(err => {
-  console.error('Unhandled error:', err.message);
-  process.exit(1);
-});
+// ── Exports for programmatic use ────────────────────────────────────────────
+// audit-loop.mjs and other orchestrators can import these directly.
+export { runLocalClustering, runLLMClustering, renderMarkdown, writeTopRefactorPlanDoc };
+
+// ── CLI entry point ────────────────────────────────────────────────────────
+// Only runs when invoked directly (not when imported as a module).
+const isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith('debt-review.mjs') ||
+  process.argv[1].endsWith('debt-review')
+);
+if (isDirectRun) {
+  main().catch(err => {
+    console.error('Unhandled error:', err.message);
+    process.exit(1);
+  });
+}

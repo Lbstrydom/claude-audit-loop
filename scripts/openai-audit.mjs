@@ -1687,7 +1687,10 @@ async function main() {
   const debtEventsIdx = args.indexOf('--debt-events');
   const debtEventsPath = debtEventsIdx !== -1 && args[debtEventsIdx + 1] ? args[debtEventsIdx + 1] : undefined;
   const escalateIdx = args.indexOf('--escalate-recurring');
-  const escalateRecurring = escalateIdx !== -1 && args[escalateIdx + 1] ? parseInt(args[escalateIdx + 1], 10) : null;
+  // Default to 5 on R2+ runs — recurring debt items get re-examined automatically
+  const escalateRecurring = escalateIdx !== -1 && args[escalateIdx + 1]
+    ? parseInt(args[escalateIdx + 1], 10)
+    : (round >= 2 ? 5 : null);
 
   // A/B test: pipeline variant selection
   // --pipeline A (GPT audits, Gemini reviews) or --pipeline B (Gemini audits, GPT reviews)
