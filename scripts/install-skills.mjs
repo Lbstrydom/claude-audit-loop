@@ -214,9 +214,9 @@ function main() {
   // Install npm dependencies in target repo
   const hasPkg = fs.existsSync(path.join(repoRoot, 'package.json'));
   if (hasPkg) {
-    const REQUIRED_DEPS = ['openai', 'zod', 'dotenv', 'micromatch'];
-    // Optional: enhance audit quality but core loop works without them
-    const OPTIONAL_DEPS = ['@google/genai', 'proper-lockfile', '@anthropic-ai/sdk'];
+    // Core audit deps + multi-model pipeline (GPT auditor, Gemini/Claude reviewers)
+    const REQUIRED_DEPS = ['openai', 'zod', 'dotenv', 'micromatch', '@google/genai', '@anthropic-ai/sdk'];
+    const OPTIONAL_DEPS = ['proper-lockfile'];
     // Supabase is only needed if user configures cloud learning store
     // (SUPABASE_AUDIT_URL + SUPABASE_AUDIT_ANON_KEY in .env)
 
@@ -260,7 +260,7 @@ function main() {
     }
   } else {
     console.log(`\n  ${Y}○${X} No package.json in target — skipping dependency install`);
-    console.log(`  To install manually: npm install openai zod dotenv micromatch`);
+    console.log(`  To install manually: npm install openai zod dotenv micromatch @google/genai @anthropic-ai/sdk`);
   }
 
   console.log(`\n${G}Installed ${result.written} files${X}`);
