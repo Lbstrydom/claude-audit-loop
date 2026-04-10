@@ -537,7 +537,9 @@ Assemble `/tmp/$SID-transcript.json` with the full audit trail:
 ### Run Review
 
 ```bash
+# Pass --mode plan for PLAN_AUDIT mode, --mode code (default) for CODE_AUDIT
 node scripts/gemini-review.mjs review <plan-file> /tmp/$SID-transcript.json \
+  --mode plan \
   --out /tmp/$SID-gemini-result.json 2>/tmp/$SID-gemini-stderr.log
 ```
 
@@ -551,13 +553,14 @@ The script auto-selects provider in this order:
 |---------|--------|
 | `APPROVE` | Done → final report |
 | `CONCERNS` | Step 7.1: Deliberate → Fix → Gemini re-verify |
-| `REJECT` | Present to user — needs human judgment |
+| `CONCERNS_REMAINING` | Step 7.1: Deliberate on unresolved items → author decides disputed ones → Gemini re-verify |
+| `REJECT` | Present to user — needs human judgment (unambiguous missed bugs or bias, not just disputed findings) |
 
 Max 2 final-review rounds.
 
-### Step 7.1 — Deliberate on Gemini Findings (CONCERNS only)
+### Step 7.1 — Deliberate on Gemini Findings (CONCERNS / CONCERNS_REMAINING)
 
-When Gemini returns `CONCERNS`, Claude deliberates on each `new_findings` and `wrongly_dismissed` item — same peer relationship as GPT deliberation:
+When Gemini returns `CONCERNS` or `CONCERNS_REMAINING`, Claude deliberates on each `new_findings` and `wrongly_dismissed` item — same peer relationship as GPT deliberation:
 
 1. **For each Gemini finding**, decide: ACCEPT, PARTIAL, or CHALLENGE
    - CHALLENGE must cite evidence (file paths, code, conventions)
@@ -565,6 +568,8 @@ When Gemini returns `CONCERNS`, Claude deliberates on each `new_findings` and `w
 2. **Fix accepted findings** — track which files changed
 3. **Update transcript** with Gemini findings, Claude positions, and fixes applied
 4. **Re-run Gemini review** with updated transcript:
+
+**Wrongly-dismissed escalation cap**: If you challenged a `wrongly_dismissed` item with cited evidence in the prior round, Gemini must provide new counter-evidence in `evidence_basis` to re-raise it — not just re-assert. If Gemini re-raises without new evidence (empty `evidence_basis`), treat it as a reassertion and dismiss it. The loop cannot resolve by repetition; it resolves by evidence.
 
 ```bash
 node scripts/gemini-review.mjs review <plan-file> /tmp/$SID-transcript-v2.json \

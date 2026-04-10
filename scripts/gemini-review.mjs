@@ -26,7 +26,7 @@ import { readFileOrDie, readFilesAsContext, extractPlanPaths, writeOutput } from
 import { semanticId, formatFindings, appendOutcome, FalsePositiveTracker } from './lib/findings.mjs';
 import { readProjectContext, initAuditBrief, generateRepoProfile } from './lib/context.mjs';
 import { geminiConfig, claudeConfig } from './lib/config.mjs';
-import { PromptBandit, computeReward } from './bandit.mjs';
+import { PromptBandit } from './bandit.mjs';
 import { getActivePrompt, getActiveRevisionId, bootstrapFromConstants } from './lib/prompt-registry.mjs';
 // NOTE: lib/llm-wrappers.mjs provides shared wrappers for learning/refinement/evolution paths.
 // This module keeps specialized callGemini/callClaudeOpus with thinkingConfig + abort controller
@@ -47,11 +47,20 @@ const MAX_OUTPUT_TOKENS = geminiConfig.maxOutputTokens;
 const WronglyDismissedSchema = z.object({
   original_finding_id: z.string().max(10).describe('The GPT finding ID that was dismissed (e.g. H3, M5)'),
   reason_claude_was_wrong: z.string().max(800).describe('Why Claude should not have dismissed this'),
-  recommended_severity: z.enum(['HIGH', 'MEDIUM', 'LOW'])
+  recommended_severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+  evidence_basis: z.string().max(600).optional().describe(
+    'Required if the transcript shows Claude challenged this finding with cited evidence. ' +
+    'Explain NEW counter-evidence not already addressed in Claude\'s challenge. ' +
+    'Omitting this on a previously-challenged finding signals reassertion without new evidence.'
+  ),
+  cited_lines: z.array(z.string().max(100)).max(10).optional().describe(
+    'Specific line references cited in your reasoning (e.g. ["auth.js:132", "auth.js:137"]). ' +
+    'Include these so hallucinated citations can be detected and flagged post-hoc.'
+  ),
 });
 
 const GeminiFinalReviewSchema = z.object({
-  verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
+  verdict: z.enum(['APPROVE', 'CONCERNS', 'CONCERNS_REMAINING', 'REJECT']),
 
   deliberation_quality: z.object({
     claude_bias_detected: z.boolean().describe('Did Claude dismiss valid findings to protect its own code?'),
@@ -82,7 +91,7 @@ const REVIEW_SYSTEM = `You are an independent quality reviewer — the FINAL GAT
 CONTEXT: A software engineer (Claude) created work based on a plan. A separate auditor (GPT-5.4) reviewed it and raised findings. Claude then deliberated on each finding — accepting some, challenging others. GPT ruled on the challenges (sustain/overrule/compromise). The loop repeated until convergence.
 
 IMPORTANT — AUDIT MODE AWARENESS:
-If the transcript contains a PLAN audit (no code files, only plan text), your job is to assess PLAN QUALITY — completeness, soundness, specificity, risk coverage. Do NOT judge whether code implements the plan. A plan audit evaluates the plan itself.
+If the transcript contains a PLAN audit (no code files, only plan text), your job is to assess PLAN QUALITY — completeness, soundness, specificity, risk coverage. Do NOT judge whether code implements the plan. A plan audit evaluates the plan itself. The plan describes what WILL BE built — absent implementations are expected.
 If the transcript contains a CODE audit (code files present), assess CODE QUALITY — correctness, security, architecture, maintainability.
 
 YOUR JOB: Review the FULL audit transcript and render an independent verdict. You have NO stake in either model's output.
@@ -113,22 +122,65 @@ WHAT TO LOOK FOR:
    Cross-file consistency, naming patterns, data flow clarity.
 
 VERDICT GUIDE:
-- APPROVE: Code is production-ready. Minor issues at most. Deliberation was fair.
-- CONCERNS: Fixable issues found. Nothing blocking, but items need attention before merge.
-- REJECT: Significant issues — either missed bugs, clear bias in deliberation, or architectural problems that need human judgment.
+- APPROVE: Plan/code is production-ready. Minor issues at most. Deliberation was fair.
+- CONCERNS: Fixable issues found, Gemini is confident they need attention before proceeding.
+- CONCERNS_REMAINING: Mixed picture — at least one valid finding, but other findings were challenged
+  by the author with cited evidence. Use this when a blanket REJECT would be unfair because some
+  findings are legitimately disputed. Author decides whether disputed items need fixing before proceeding.
+- REJECT: Significant unambiguous issues — missed bugs, clear bias in deliberation, or architectural
+  problems that need human judgment. A single valid finding alongside legitimately challenged others
+  does NOT warrant REJECT — use CONCERNS_REMAINING instead.
 
 RULES:
 1. Be ruthlessly honest but fair. Neither model is always right or always wrong.
 2. Only raise genuinely NEW findings — do not re-raise what GPT already found (even if phrased differently).
 3. Quality over quantity — 3 real findings beat 10 vague ones.
 4. Quick-fix detection still applies — flag band-aids.
-5. If the deliberation was fair and the code is good, say APPROVE. Don't manufacture issues.
+5. If the deliberation was fair and the plan/code is good, say APPROVE. Don't manufacture issues.
 6. If the prompt includes a "Pre-filtered Debt" section, DO NOT re-raise any topic listed there.
    Those concerns are pre-existing, operator-deferred, and tracked outside this audit's scope.
-   They were explicitly filtered from the transcript by the upstream pipeline.`;
+   They were explicitly filtered from the transcript by the upstream pipeline.
+7. Wrongly-dismissed escalation cap: If the transcript shows Claude challenged a dismissed finding
+   with cited code evidence (file paths, line numbers, existing code), you MUST either:
+   (a) Accept the challenge — do not include it in wrongly_dismissed, OR
+   (b) Provide genuinely NEW counter-evidence in the evidence_basis field that was NOT addressed
+       by Claude's challenge. Re-asserting the prior position without new evidence is not acceptable.
+   Populate cited_lines with any specific line references you use, so hallucinated citations
+   can be detected. If you cite "line 132" of a file, it must actually contain relevant code.`;
 
 // Bootstrap prompt registry for Gemini review (enables variant selection + evolution)
 bootstrapFromConstants({ 'gemini-review': REVIEW_SYSTEM });
+
+// ── Plan Audit Mode Override ───────────────────────────────────────────────────
+// Appended to system prompt when --mode plan is passed. Overrides the generic
+// "AUDIT MODE AWARENESS" section with an explicit, hard-to-ignore constraint.
+
+const PLAN_MODE_BLOCK = `
+
+## PLAN AUDIT MODE — MANDATORY CONSTRAINTS
+
+You are reviewing a PLAN DOCUMENT, not implemented code.
+
+THE PLAN DESCRIBES FUTURE INTENT. Everything in the plan is describing what WILL BE built.
+Items the plan says "add", "create", "implement" or "define" DO NOT EXIST YET — that is the
+entire point of the plan. Their absence from the current codebase is expected and correct.
+
+WHAT THIS MEANS FOR YOUR REVIEW:
+- DO NOT flag absent implementations as bugs. If the plan says "add SolverInvariantError to
+  domainErrors.js", the absence of SolverInvariantError in domainErrors.js is not a bug —
+  it is what the plan is for.
+- DO NOT cite current codebase line numbers as evidence of plan flaws. The plan is not the code.
+  If you cite a line number, it must be a line in the PLAN DOCUMENT itself, not in a source file.
+- DO evaluate: Is the plan internally consistent? Are its contracts complete? Are there logical
+  gaps, ambiguous APIs, missing error paths, or unresolved dependencies between proposed components?
+- DO flag: Missing contracts between components the plan introduces, ambiguous data flows,
+  steps that assume dependencies not defined in the plan, or logical impossibilities.
+
+VERDICT CALIBRATION FOR PLAN AUDITS:
+- REJECT requires genuine logical flaws in the plan (circular dependencies, ambiguous contracts,
+  missing critical error paths). It does NOT apply when the plan simply hasn't been implemented yet.
+- CONCERNS_REMAINING is appropriate when some findings are about plan soundness and others
+  are disputed (e.g. one model expected code to exist, another correctly identified a plan gap).`;
 
 /**
  * Get the active review prompt — from registry if a promoted variant exists,
@@ -307,7 +359,7 @@ async function callClaudeOpus(anthropic, { systemPrompt, userPrompt, zodSchema, 
  * @param {string} projectContext
  * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
  */
-async function runFinalReview(provider, client, planContent, transcriptContent, projectContext) {
+async function runFinalReview(provider, client, planContent, transcriptContent, projectContext, auditMode = 'code') {
   // Parse transcript to extract code file paths for direct code inclusion
   let transcript;
   try {
@@ -375,7 +427,6 @@ async function runFinalReview(provider, client, planContent, transcriptContent, 
     '',
     debtBlock,
     debtBlock ? '---' : '',
-    debtBlock ? '' : '',
     '## Code Files',
     codeContext || '(No code files found — review based on transcript only)',
   ].filter(Boolean).join('\n');
@@ -393,7 +444,10 @@ async function runFinalReview(provider, client, planContent, transcriptContent, 
     sourceKind: 'REVIEWER',
     sourceName: selectedModel
   });
-  const systemPrompt = getReviewPrompt() + classificationBlock;
+  let systemPrompt = getReviewPrompt() + classificationBlock;
+  if (auditMode === 'plan') {
+    systemPrompt += PLAN_MODE_BLOCK;
+  }
 
   if (provider === 'gemini') {
     return callGemini(client, {
@@ -427,7 +481,8 @@ function formatReviewResult(result, usage, latencyMs, provider) {
   lines.push('');
 
   // Verdict
-  const icon = result.verdict === 'APPROVE' ? '✅' : result.verdict === 'CONCERNS' ? '⚠️' : '❌';
+  const VERDICT_ICONS = { APPROVE: '✅', CONCERNS: '⚠️', CONCERNS_REMAINING: '⚠️', REJECT: '❌' };
+  const icon = VERDICT_ICONS[result.verdict] ?? '❌';
   lines.push(`## Verdict: ${icon} **${result.verdict}**`);
   lines.push('');
 
@@ -532,10 +587,17 @@ async function main() {
   const outFile = outIdx !== -1 && args[outIdx + 1] ? args[outIdx + 1] : null;
   const providerIdx = args.indexOf('--provider');
   const providerOverride = providerIdx !== -1 && args[providerIdx + 1] ? args[providerIdx + 1] : null;
+  const modeIdx = args.indexOf('--mode');
+  const auditMode = modeIdx !== -1 && args[modeIdx + 1] ? args[modeIdx + 1] : 'code';
 
   if (mode !== 'review' || !planFile || !transcriptFile) {
-    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>] [--provider gemini|anthropic]');
+    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>] [--provider gemini|anthropic] [--mode plan|code]');
     console.error('       node scripts/gemini-review.mjs ping');
+    process.exit(1);
+  }
+
+  if (auditMode !== 'plan' && auditMode !== 'code') {
+    console.error(`Error: --mode must be "plan" or "code", got "${auditMode}"`);
     process.exit(1);
   }
 
@@ -556,13 +618,11 @@ async function main() {
   } else if (providerOverride) {
     console.error(`Error: Unknown provider "${providerOverride}". Use "gemini" or "anthropic".`);
     process.exit(1);
-  } else {
+  } else if (process.env.GEMINI_API_KEY) {
     // Auto-detect from env vars (existing behavior)
-    if (process.env.GEMINI_API_KEY) {
-      provider = 'gemini';
-    } else if (process.env.ANTHROPIC_API_KEY) {
-      provider = 'claude-opus';
-    }
+    provider = 'gemini';
+  } else if (process.env.ANTHROPIC_API_KEY) {
+    provider = 'claude-opus';
   }
   if (!provider) {
     console.error('Error: Final review requires GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY');
@@ -590,7 +650,7 @@ async function main() {
     const MAX_REVIEW_ATTEMPTS = 2;
     for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
       try {
-        ({ result, usage, latencyMs } = await runFinalReview(provider, client, planContent, transcriptContent, projectContext));
+        ({ result, usage, latencyMs } = await runFinalReview(provider, client, planContent, transcriptContent, projectContext, auditMode));
         break; // Success
       } catch (err) {
         const isTruncation = err.message?.includes('Unterminated string') ||
@@ -623,7 +683,7 @@ async function main() {
         // debt envelope signatures are short (category+section) while Gemini's
         // new_findings include long detail text — asymmetric signature lengths
         // dilute Jaccard. 0.30 captures real matches without over-suppressing.
-        const THRESHOLD = 0.30;
+        const THRESHOLD = 0.3;
         const before = result.new_findings.length;
         const kept = [];
         const debtSuppressed = [];
@@ -727,7 +787,7 @@ async function main() {
 
       // Update bandit for the review prompt variant
       // Reward based on verdict: APPROVE (fair deliberation) = good, REJECT (missed issues) = bad
-      const VERDICT_REWARDS = { APPROVE: 0.8, CONCERNS: 0.5, REJECT: 0.2 };
+      const VERDICT_REWARDS = { APPROVE: 0.8, CONCERNS: 0.5, CONCERNS_REMAINING: 0.35, REJECT: 0.2 };
       const verdictReward = VERDICT_REWARDS[result.verdict] ?? 0.5;
       bandit.update('gemini-review', revId, verdictReward);
       bandit.flush();
