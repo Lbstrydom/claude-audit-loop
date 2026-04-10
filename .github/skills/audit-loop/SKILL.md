@@ -56,6 +56,16 @@ Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<nam
 
 ## Step 2 — Run GPT-5.4 Audit
 
+### Working Directory — Verify First
+
+**CRITICAL**: Always confirm you are in the target repository before running any audit command. Running from the wrong directory causes the diff scope to resolve against the wrong codebase — producing phantom findings about files you never touched and missing the files you did.
+
+```bash
+pwd  # Must be the repo being audited, not claude-audit-loop or any other repo
+```
+
+If the plan file is in a different repo, `cd` to that repo first. The audit scripts use the cwd to resolve `git diff`, file paths, and the CLAUDE.md context.
+
 ### Audit Scope — Choose Deliberately
 
 **CRITICAL**: Code audits see whatever files you give them. GPT-5.4 doesn't know what's "new" vs pre-existing — it flags everything. To get signal, scope deliberately:
@@ -73,8 +83,11 @@ Only switch to `--scope plan` or `--scope full` when the user EXPLICITLY asks fo
 
 ### Round 1 — Audit (scope-aware)
 
+**Run R1 in the foreground.** The first ~10 seconds of stderr reveal whether the diff scope resolved correctly (file count, changed lines). Catching a wrong-directory or empty-diff problem early saves 5+ minutes versus discovering it after the run completes.
+
 ```bash
 # Default: audit only recent changes (preferred)
+# Run FOREGROUND — do not use run_in_background for R1
 node scripts/openai-audit.mjs code <plan-file> \
   --out /tmp/$SID-r1-result.json \
   2>/tmp/$SID-r1-stderr.log
@@ -252,6 +265,28 @@ Stability uses `_hash` for exact cross-round matching:
 | Round 6, not stable | Present to user, then REQUIRED Step 7 |
 
 Max 6 rounds for CODE audits.
+
+### Auto-Skip R2 for Small Code Diffs
+
+Before running R2, check the diff size:
+
+```bash
+git diff HEAD~1 --stat | tail -1  # e.g. "6 files changed, 134 insertions(+), 28 deletions(-)"
+```
+
+**If the diff is small (< 150 lines changed AND ≤ 3 files touched), skip R2 entirely and go straight to Step 6 → Step 7.** Gemini catches the same class of issues as R2 verification for this scope, in less time with no timeout risk.
+
+R2 earns its keep for substantial fix rounds (> 150 lines or > 3 files changed, or when R1 found multiple HIGH issues requiring architectural changes). Use judgment when near the threshold.
+
+### PLAN audits: GPT R1 only — R2 is opt-in
+
+**Default for plan audits: GPT R1 → fix → Step 7 (Gemini).** GPT R2 on plan audits almost always times out (the `plan` pass is a single wall of tokens with no map-reduce split) and adds rigor pressure rather than finding new correctness gaps.
+
+**Only run GPT R2 on a plan audit when**:
+- R1 HIGH count was ≥ 5 AND you expect multiple fixes changed the plan structure significantly
+- The user explicitly asks for another GPT round
+
+Otherwise proceed directly to Step 7 after fixing R1 findings.
 
 ### PLAN audits: Early-Stop on Rigor Pressure
 
@@ -529,10 +564,22 @@ When Step 7 is skipped, output `FINAL_GATE_SKIPPED` and do not claim full final-
 ### Build Transcript
 
 Assemble `/tmp/$SID-transcript.json` with the full audit trail:
-- Plan content, code files list
+- Plan content, **code files list** (critical — see below)
 - All rounds: GPT findings, Claude positions, GPT rulings, fixes applied
 - Final state: remaining findings, dismissed findings
 - Suppression data: kept/suppressed/reopened counts per round
+
+**CRITICAL — include `code_files` in the transcript envelope**. The gemini-review script reads `transcript.code_files` to load actual source for independent review. Without it, Gemini only sees the plan + GPT findings and cannot independently verify anything.
+
+```json
+{
+  "code_files": ["src/foo.ts", "src/bar.ts"],
+  "rounds": [...],
+  ...
+}
+```
+
+Use the same file list you passed to `--files` on your last GPT round (changed files + their direct importers). For plan audits this can be omitted or empty.
 
 ### Run Review
 

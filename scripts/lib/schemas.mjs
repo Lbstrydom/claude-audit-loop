@@ -156,7 +156,7 @@ export const LedgerEntrySchema = z.object({
   adjudicationOutcome: z.enum(['dismissed', 'accepted', 'severity_adjusted']),
   remediationState: z.enum(['pending', 'planned', 'fixed', 'verified', 'regressed']),
   originalSeverity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
-  ruling: z.enum(['sustain', 'overrule', 'compromise']),
+  ruling: z.enum(['sustain', 'overrule', 'compromise', 'defer']),
   rulingRationale: z.string(),
   resolvedRound: z.number(),
 });

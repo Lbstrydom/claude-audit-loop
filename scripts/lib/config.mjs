@@ -88,7 +88,7 @@ export const openaiConfig = Object.freeze({
 export const geminiConfig = Object.freeze({
   model: process.env.GEMINI_REVIEW_MODEL || 'gemini-3.1-pro-preview',
   timeoutMs: safeInt(process.env.GEMINI_REVIEW_TIMEOUT_MS, 120000),
-  maxOutputTokens: safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 16000),
+  maxOutputTokens: safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 32000),
 });
 
 // ── Claude Opus Fallback Config ─────────────────────────────────────────────

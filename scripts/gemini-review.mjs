@@ -82,6 +82,74 @@ const GeminiFinalReviewSchema = z.object({
 // Derived from GeminiFinalReviewSchema — single source of truth via Zod → JSON Schema
 const GeminiFinalReviewJsonSchema = zodToGeminiSchema(GeminiFinalReviewSchema);
 
+// ── Schema-driven truncation ──────────────────────────────────────────────────
+// Gemini verbosity regularly exceeds field maxLength constraints, causing Zod to
+// reject the entire response. Instead of failing, we truncate verbose fields and
+// log what was shortened. Map is built from the raw JSON Schema (before Gemini
+// stripping removes maxLength) so it stays in sync with the Zod definitions.
+
+/**
+ * Walk a JSON Schema tree and collect all path → maxLength entries.
+ * Handles nested objects, arrays (path[]), and $defs references.
+ * @param {object} schema - Raw JSON Schema node
+ * @param {string} path - Dot-path to current node
+ * @param {Map<string,number>} map - Accumulator
+ * @param {object} [defs] - Top-level $defs for $ref resolution
+ */
+function _collectMaxLengths(schema, path, map, defs) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.$ref) {
+    const refName = schema.$ref.replace('#/$defs/', '');
+    if (defs?.[refName]) _collectMaxLengths(defs[refName], path, map, defs);
+    return;
+  }
+  if (schema.type === 'string' && schema.maxLength) {
+    map.set(path, schema.maxLength);
+  }
+  if (schema.properties) {
+    for (const [k, v] of Object.entries(schema.properties)) {
+      _collectMaxLengths(v, path ? `${path}.${k}` : k, map, defs);
+    }
+  }
+  if (schema.items) {
+    _collectMaxLengths(schema.items, `${path}[]`, map, defs);
+  }
+}
+
+const _rawGeminiReviewSchema = z.toJSONSchema(GeminiFinalReviewSchema);
+const _maxLengthMap = new Map();
+_collectMaxLengths(_rawGeminiReviewSchema, '', _maxLengthMap, _rawGeminiReviewSchema.$defs);
+
+/**
+ * Recursively walk a parsed JSON result and truncate strings that exceed their
+ * schema-defined maxLength. Returns a new object (no mutation). Logs truncations.
+ * @param {*} obj
+ * @param {string} path
+ * @param {string[]} truncated - Accumulator for log messages
+ * @returns {*}
+ */
+function truncateToSchema(obj, path, truncated) {
+  if (typeof obj === 'string') {
+    const max = _maxLengthMap.get(path);
+    if (max && obj.length > max) {
+      truncated.push(`${path} (${obj.length} → ${max})`);
+      return obj.slice(0, max);
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => truncateToSchema(item, `${path}[]`, truncated));
+  }
+  if (obj && typeof obj === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = truncateToSchema(v, path ? `${path}.${k}` : k, truncated);
+    }
+    return out;
+  }
+  return obj;
+}
+
 // No verifySchemaSync needed — JSON Schema is derived from Zod, drift is impossible.
 
 // ── System Prompt ──────────────────────────────────────────────────────────────
@@ -238,6 +306,15 @@ async function callGemini(ai, { systemPrompt, userPrompt, zodSchema, jsonSchema,
       result = JSON.parse(text);
     } catch (parseErr) {
       throw new Error(`Failed to parse Gemini JSON response: ${parseErr.message}\nRaw: ${text.slice(0, 500)}`);
+    }
+
+    // Auto-truncate verbose fields before Zod validation.
+    // Gemini regularly exceeds per-field maxLength limits causing whole-response
+    // rejection. Truncating here prevents that without losing structural validity.
+    const truncated = [];
+    result = truncateToSchema(result, '', truncated);
+    if (truncated.length > 0) {
+      process.stderr.write(`  [${passName ?? 'gemini'}] Auto-truncated ${truncated.length} fields: ${truncated.join(', ')}\n`);
     }
 
     // Validate against Zod schema — reject invalid responses at the trust boundary
