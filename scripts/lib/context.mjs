@@ -245,6 +245,85 @@ function _getPassAddendum(passName) {
   return sections.join('\n\n').slice(0, 800);
 }
 
+// ── Session Context Cache ────────────────────────────────────────────────────
+// Cross-round cache: persists brief + repoProfile to a temp file so that R2, R3
+// etc. can skip the 10s brief-generation step. Cache key is the repo fingerprint
+// (SHA-256 of package.json + CLAUDE.md + file inventory) so stale caches from a
+// different repo or after deps change self-invalidate automatically.
+
+/**
+ * Attempt to load a previously-generated brief + repoProfile from a session
+ * cache file. Populates the module-level caches if the fingerprint matches.
+ * @param {string} cachePath - e.g. /tmp/audit-12345-ctx.json
+ * @returns {boolean} true if cache was loaded (brief + profile hydrated), false otherwise
+ */
+export function loadSessionCache(cachePath) {
+  if (!cachePath) return false;
+  try {
+    const raw = fs.readFileSync(path.resolve(cachePath), 'utf-8');
+    const cached = JSON.parse(raw);
+
+    // Stale-check: compare fingerprint against current repo state.
+    // Fingerprint is computed during generateRepoProfile() — we need at minimum
+    // the file inventory to build it. Do a quick lightweight hash here.
+    const currentFingerprint = _quickFingerprint();
+    if (cached.fingerprint && currentFingerprint && cached.fingerprint !== currentFingerprint) {
+      process.stderr.write(`  [session-cache] Fingerprint mismatch — regenerating (repo changed)\n`);
+      return false;
+    }
+
+    if (cached.brief) {
+      _auditBriefCache = cached.brief;
+    }
+    if (cached.repoProfile) {
+      _repoProfileCache = cached.repoProfile;
+      setRepoProfileCache(_repoProfileCache);
+    }
+    process.stderr.write(`  [session-cache] Loaded brief (${_auditBriefCache?.length ?? 0} chars) + repo profile from ${path.basename(cachePath)}\n`);
+    return true;
+  } catch { /* file missing or invalid JSON — cache miss */ }
+  return false;
+}
+
+/**
+ * Write the current brief + repoProfile to a session cache file.
+ * Called after generation so subsequent rounds in the same session reuse them.
+ * No-ops silently if write fails (non-fatal).
+ * @param {string} cachePath
+ */
+export function saveSessionCache(cachePath) {
+  if (!cachePath || !_auditBriefCache) return;
+  try {
+    const fingerprint = _repoProfileCache?.repoFingerprint || _quickFingerprint();
+    const data = {
+      fingerprint,
+      brief: _auditBriefCache,
+      repoProfile: _repoProfileCache,
+      generatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.resolve(cachePath), JSON.stringify(data), 'utf-8');
+    process.stderr.write(`  [session-cache] Saved to ${path.basename(cachePath)} (fingerprint: ${fingerprint?.slice(0, 8)})\n`);
+  } catch (err) {
+    process.stderr.write(`  [session-cache] Save failed: ${err.message} (non-fatal)\n`);
+  }
+}
+
+/**
+ * Lightweight repo fingerprint — fast enough to use for cache validation.
+ * Uses only package.json + CLAUDE.md (skips the full file scan).
+ */
+function _quickFingerprint() {
+  try {
+    const parts = [];
+    const pkgPath = path.resolve('package.json');
+    if (fs.existsSync(pkgPath)) parts.push(fs.readFileSync(pkgPath, 'utf-8'));
+    const claudePath = _getClaudeMdPath();
+    if (claudePath) parts.push(fs.readFileSync(claudePath, 'utf-8'));
+    if (parts.length === 0) return null;
+    return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
+  } catch { return null; }
+}
+
 // ── Exported Functions ──────────────────────────────────────────────────────
 
 /**

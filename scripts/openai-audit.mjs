@@ -48,7 +48,7 @@ import {
 import { semanticId, formatFindings, appendOutcome, loadOutcomes, FalsePositiveTracker } from './lib/findings.mjs';
 import {
   generateRepoProfile, initAuditBrief, readProjectContext, readProjectContextForPass,
-  extractPlanForPass, buildHistoryContext
+  extractPlanForPass, buildHistoryContext, loadSessionCache, saveSessionCache
 } from './lib/context.mjs';
 import { buildLanguageContext } from './lib/language-profiles.mjs';
 import { executeTools, normalizeToolResults, formatLintSummary } from './lib/linter.mjs';
@@ -121,6 +121,8 @@ const TIMEOUT_MS_CAP = openaiConfig.timeoutMsCap;
 const BACKEND_SPLIT_THRESHOLD = openaiConfig.backendSplitThreshold;
 const MAP_REDUCE_THRESHOLD = openaiConfig.mapReduceThreshold;
 const MAP_REDUCE_TOKEN_THRESHOLD = openaiConfig.mapReduceTokenThreshold;
+const HIGH_REASONING_MAP_REDUCE_THRESHOLD = openaiConfig.highReasoningMapReduceThreshold;
+const HIGH_REASONING_MAP_REDUCE_TOKEN_THRESHOLD = openaiConfig.highReasoningMapReduceTokenThreshold;
 
 // Robustness constants imported from lib/robustness.mjs
 
@@ -129,6 +131,17 @@ function shouldMapReduce(files) {
   if (files.length > MAP_REDUCE_THRESHOLD) return true;
   const totalChars = measureContextChars(files, 10000);
   return totalChars > MAP_REDUCE_TOKEN_THRESHOLD;
+}
+
+/**
+ * Like shouldMapReduce() but uses lower thresholds for reasoning:high passes
+ * (backend, frontend). These time out as single calls at ~36% on Windows —
+ * splitting into smaller map-reduce units keeps each unit under 140s.
+ */
+function shouldMapReduceHighReasoning(files) {
+  if (files.length > HIGH_REASONING_MAP_REDUCE_THRESHOLD) return true;
+  const totalChars = measureContextChars(files, 10000);
+  return totalChars > HIGH_REASONING_MAP_REDUCE_TOKEN_THRESHOLD;
 }
 
 // ── Adaptive Sizing ────────────────────────────────────────────────────────────
@@ -928,7 +941,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     if (splitBackend) {
       if (effectiveRoutes.length > 0) {
         backendPassNames.push('be-routes');
-        if (shouldMapReduce(effectiveRoutes)) {
+        if (shouldMapReduceHighReasoning(effectiveRoutes)) {
           process.stderr.write(`  [be-routes] ${effectiveRoutes.length} files — using map-reduce\n`);
           const beRoutesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
@@ -956,7 +969,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       }
       if (effectiveServices.length > 0) {
         backendPassNames.push('be-services');
-        if (shouldMapReduce(effectiveServices)) {
+        if (shouldMapReduceHighReasoning(effectiveServices)) {
           process.stderr.write(`  [be-services] ${effectiveServices.length} files — using map-reduce\n`);
           const beServicesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
@@ -984,7 +997,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       }
     } else if (effectiveBackend.length > 0) {
       backendPassNames.push('backend');
-      if (shouldMapReduce(effectiveBackend)) {
+      if (shouldMapReduceHighReasoning(effectiveBackend)) {
         process.stderr.write(`  [backend] ${effectiveBackend.length} files — using map-reduce\n`);
         const beSystemPrompt = (isR2Plus
           ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
@@ -1015,7 +1028,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   }
 
   if (shouldRunPass('frontend') && effectiveFrontend.length > 0) {
-    if (shouldMapReduce(effectiveFrontend)) {
+    if (shouldMapReduceHighReasoning(effectiveFrontend)) {
       process.stderr.write(`  [frontend] ${effectiveFrontend.length} files — using map-reduce\n`);
       const feSystemPrompt = (isR2Plus
         ? buildR2SystemPrompt(PASS_FRONTEND_RUBRIC, buildRulingsBlock(ledgerFile, 'frontend', impactSet))
@@ -1658,6 +1671,12 @@ async function main() {
   const noTools = args.includes('--no-tools');
   const strictLint = args.includes('--strict-lint');
 
+  // --session-cache <file>: cross-round cache for repo profile + audit brief.
+  // Write on first run, read on subsequent rounds to skip 10s brief generation.
+  // Cache self-invalidates when package.json or CLAUDE.md changes (fingerprint mismatch).
+  const sessionCacheIdx = args.indexOf('--session-cache');
+  const sessionCachePath = sessionCacheIdx !== -1 && args[sessionCacheIdx + 1] ? args[sessionCacheIdx + 1] : null;
+
   // Phase D — debt-memory flags
   // --no-debt-ledger: skip .audit/tech-debt.json entirely (clean-slate runs)
   // --debt-ledger <path>: override default path
@@ -1700,8 +1719,16 @@ async function main() {
   }
 
   const planContent = readFileOrDie(planFile);
-  await initAuditBrief(); // Pre-generate context brief (Gemini Flash → Claude Haiku → regex)
+  // Session cache: reuse brief + profile from prior round in the same session.
+  // First round writes the cache; subsequent rounds read it (skip ~10s of LLM work).
+  const cacheHit = loadSessionCache(sessionCachePath);
+  if (!cacheHit) {
+    await initAuditBrief(); // Pre-generate context brief (Gemini Flash → Claude Haiku → regex)
+  }
   const repoProfile = generateRepoProfile();
+  if (!cacheHit && sessionCachePath) {
+    saveSessionCache(sessionCachePath); // Persist for next round
+  }
   const projectContext = readProjectContext();
   const historyContext = buildHistoryContext(historyFile);
   // Initialize learning systems (graceful — never blocks audit)

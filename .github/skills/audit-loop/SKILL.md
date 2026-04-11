@@ -149,6 +149,23 @@ node scripts/openai-audit.mjs code <plan-file> \
   2>/tmp/$SID-r2-stderr.log
 ```
 
+### Session Context Cache (Round 2+)
+
+Pass `--session-cache /tmp/$SID-ctx.json` on every round to skip ~10s of LLM brief-generation. The first round writes it; subsequent rounds read it. Cache self-invalidates if `package.json` or `CLAUDE.md` changes.
+
+```bash
+# R1 — writes the cache
+node scripts/openai-audit.mjs code <plan-file> \
+  --session-cache /tmp/$SID-ctx.json \
+  --out /tmp/$SID-r1-result.json
+
+# R2 — reads the cache (brief generation skipped)
+node scripts/openai-audit.mjs code <plan-file> \
+  --round 2 --ledger /tmp/$SID-ledger.json \
+  --session-cache /tmp/$SID-ctx.json \
+  --out /tmp/$SID-r2-result.json
+```
+
 ### CLI Flag Contract
 
 | Flag | Source | Purpose |
@@ -159,6 +176,7 @@ node scripts/openai-audit.mjs code <plan-file> \
 | `--changed <list>` | Step 4 fix list | **Authoritative** source for what was modified (reopen detection) |
 | `--files <list>` | changed + dependents | Audit scope — what GPT sees in context |
 | `--passes <list>` | Smart selection | Which passes to run |
+| `--session-cache <path>` | SID-derived temp path | Cross-round brief + profile cache (skip LLM on R2+) |
 
 ### Smart Pass Selection (Round 2+)
 
@@ -643,6 +661,7 @@ After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 4. Cost tracking: `cost ≈ (input × 2.5 + output × 10) / 1M`
 5. Batch all user decisions into one prompt
 6. Progress: show pass timings from stderr
+7. **Background runs**: R1 is ALWAYS foreground (scope check in first 10s). Later rounds MAY use `run_in_background: true`. When a background notification arrives late, check if the output file already has content before re-processing: `test -s /tmp/$SID-rN-result.json` — if it does, the result was already consumed and the notification can be dismissed.
 
 ## Key Principles
 

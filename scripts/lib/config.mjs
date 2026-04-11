@@ -81,6 +81,10 @@ export const openaiConfig = Object.freeze({
   backendSplitThreshold: safeInt(process.env.OPENAI_AUDIT_SPLIT_THRESHOLD, 12),
   mapReduceThreshold: safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_THRESHOLD, 15),
   mapReduceTokenThreshold: safeInt(process.env.OPENAI_AUDIT_MAP_REDUCE_TOKEN_THRESHOLD, 50000),
+  // Lower thresholds for reasoning:high passes (backend, frontend).
+  // These time out at ~36% on Windows with single 280s calls — split earlier.
+  highReasoningMapReduceThreshold: safeInt(process.env.OPENAI_AUDIT_HIGH_REASONING_MAP_REDUCE_THRESHOLD, 8),
+  highReasoningMapReduceTokenThreshold: safeInt(process.env.OPENAI_AUDIT_HIGH_REASONING_MAP_REDUCE_TOKEN_THRESHOLD, 25000),
 });
 
 // ── Gemini / Final Review Config ────────────────────────────────────────────
