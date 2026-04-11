@@ -88,7 +88,7 @@ export async function upsertRepo(profile, repoName) {
  * Record the start of an audit run.
  * @returns {string|null} run ID
  */
-export async function recordRunStart(repoId, planFile, mode) {
+export async function recordRunStart(repoId, planFile, mode, { scopeMode } = {}) {
   if (!_supabase) return null;
 
   const { data, error } = await _supabase
@@ -101,7 +101,8 @@ export async function recordRunStart(repoId, planFile, mode) {
       total_findings: 0,
       accepted_count: 0,
       dismissed_count: 0,
-      fixed_count: 0
+      fixed_count: 0,
+      ...(scopeMode ? { scope_mode: scopeMode } : {}),
     })
     .select('id')
     .single();
@@ -115,25 +116,59 @@ export async function recordRunStart(repoId, planFile, mode) {
 
 /**
  * Update a completed audit run with final stats.
+ * @param {string} runId
+ * @param {object} stats
+ * @param {number}   stats.rounds
+ * @param {number}   stats.totalFindings
+ * @param {number}   stats.accepted
+ * @param {number}   stats.dismissed
+ * @param {number}   stats.fixed
+ * @param {string}   [stats.geminiVerdict]
+ * @param {number}   [stats.costEstimate]
+ * @param {number}   [stats.durationMs]
+ * @param {number}   [stats.diffLinesChanged]
+ * @param {number}   [stats.diffFilesChanged]
+ * @param {boolean}  [stats.sessionCacheHit]
+ * @param {string[]} [stats.mapReducePasses]
+ * @param {string}   [stats.r2SkipReason]
  */
 export async function recordRunComplete(runId, stats) {
   if (!_supabase || !runId) return;
 
-  const { error } = await _supabase
-    .from('audit_runs')
-    .update({
-      rounds: stats.rounds,
-      total_findings: stats.totalFindings,
-      accepted_count: stats.accepted,
-      dismissed_count: stats.dismissed,
-      fixed_count: stats.fixed,
-      gemini_verdict: stats.geminiVerdict,
-      total_cost_estimate: stats.costEstimate,
-      total_duration_ms: stats.durationMs
-    })
-    .eq('id', runId);
+  const update = {
+    rounds: stats.rounds,
+    total_findings: stats.totalFindings,
+    accepted_count: stats.accepted,
+    dismissed_count: stats.dismissed,
+    fixed_count: stats.fixed,
+    gemini_verdict: stats.geminiVerdict,
+    total_cost_estimate: stats.costEstimate,
+    total_duration_ms: stats.durationMs,
+  };
 
+  if (stats.diffLinesChanged != null) update.diff_lines_changed = stats.diffLinesChanged;
+  if (stats.diffFilesChanged != null) update.diff_files_changed = stats.diffFilesChanged;
+  if (stats.sessionCacheHit != null) update.session_cache_hit = stats.sessionCacheHit;
+  if (stats.mapReducePasses != null) update.map_reduce_passes = stats.mapReducePasses;
+  if (stats.r2SkipReason != null) update.r2_skip_reason = stats.r2SkipReason;
+
+  const { error } = await _supabase.from('audit_runs').update(update).eq('id', runId);
   if (error) process.stderr.write(`  [learning] recordRunComplete failed: ${error.message}\n`);
+}
+
+/**
+ * Update a subset of run metadata — used by the orchestrator after R2 decisions.
+ * @param {string} runId
+ * @param {object} meta — any subset of audit_runs columns
+ */
+export async function updateRunMeta(runId, meta) {
+  if (!_supabase || !runId) return;
+  const update = {};
+  if (meta.r2SkipReason != null) update.r2_skip_reason = meta.r2SkipReason;
+  if (meta.geminiVerdict != null) update.gemini_verdict = meta.geminiVerdict;
+  if (Object.keys(update).length === 0) return;
+  const { error } = await _supabase.from('audit_runs').update(update).eq('id', runId);
+  if (error) process.stderr.write(`  [learning] updateRunMeta failed: ${error.message}\n`);
 }
 
 // ── Finding & Adjudication Recording ────────────────────────────────────────

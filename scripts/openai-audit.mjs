@@ -674,8 +674,24 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null, sessionCacheHit = null, scopeMode = null } = {}) {
   const totalStart = Date.now();
+
+  // Count diff lines for metadata (lines starting with + or - but not +++ / ---)
+  let diffLinesChanged = null;
+  let diffFilesChanged = null;
+  if (diffFile) {
+    try {
+      const diffContent = fs.readFileSync(diffFile, 'utf-8');
+      const lines = diffContent.split('\n');
+      diffLinesChanged = lines.filter(l => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---')).length;
+      diffFilesChanged = (diffContent.match(/^diff --git/mg) || []).length || changedFiles.length;
+    } catch { /* diff file unreadable — skip */ }
+  }
+  if (diffFilesChanged == null && changedFiles.length > 0) diffFilesChanged = changedFiles.length;
+
+  // Track which passes trigger map-reduce
+  const mapReducePasses = [];
   const EMPTY_FINDINGS = { pass_name: 'empty', findings: [], quick_fix_warnings: [], summary: 'Pass skipped or failed.' };
   const EMPTY_STRUCTURE = { pass_name: 'structure', files_planned: 0, files_found: 0, files_missing: 0, missing_files: [], export_mismatches: [], findings: [], summary: 'Pass skipped.' };
   const EMPTY_WIRING = { pass_name: 'wiring', wiring_issues: [], findings: [], summary: 'Pass skipped.' };
@@ -699,7 +715,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   if (isCloudEnabled() && repoProfile) {
     cloudRepoId = await upsertRepo(repoProfile, path.basename(path.resolve('.'))).catch(() => null);
     if (cloudRepoId) {
-      cloudRunId = await recordRunStart(cloudRepoId, 'plan', 'code').catch(() => null);
+      cloudRunId = await recordRunStart(cloudRepoId, 'plan', 'code', { scopeMode }).catch(() => null);
     }
   }
 
@@ -942,6 +958,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       if (effectiveRoutes.length > 0) {
         backendPassNames.push('be-routes');
         if (shouldMapReduceHighReasoning(effectiveRoutes)) {
+          mapReducePasses.push('be-routes');
           process.stderr.write(`  [be-routes] ${effectiveRoutes.length} files — using map-reduce\n`);
           const beRoutesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
@@ -970,6 +987,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       if (effectiveServices.length > 0) {
         backendPassNames.push('be-services');
         if (shouldMapReduceHighReasoning(effectiveServices)) {
+          mapReducePasses.push('be-services');
           process.stderr.write(`  [be-services] ${effectiveServices.length} files — using map-reduce\n`);
           const beServicesSystemPrompt = (isR2Plus
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
@@ -998,6 +1016,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     } else if (effectiveBackend.length > 0) {
       backendPassNames.push('backend');
       if (shouldMapReduceHighReasoning(effectiveBackend)) {
+        mapReducePasses.push('backend');
         process.stderr.write(`  [backend] ${effectiveBackend.length} files — using map-reduce\n`);
         const beSystemPrompt = (isR2Plus
           ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
@@ -1029,6 +1048,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   if (shouldRunPass('frontend') && effectiveFrontend.length > 0) {
     if (shouldMapReduceHighReasoning(effectiveFrontend)) {
+      mapReducePasses.push('frontend');
       process.stderr.write(`  [frontend] ${effectiveFrontend.length} files — using map-reduce\n`);
       const feSystemPrompt = (isR2Plus
         ? buildR2SystemPrompt(PASS_FRONTEND_RUBRIC, buildRulingsBlock(ledgerFile, 'frontend', impactSet))
@@ -1075,6 +1095,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`\n── Wave 3: Sustainability (reasoning: medium) ──\n`);
 
     if (shouldMapReduce(sustainFiles)) {
+      mapReducePasses.push('sustainability');
       process.stderr.write(`  [sustainability] ${sustainFiles.length} files — using map-reduce\n`);
       const sustainSystemPrompt = (isR2Plus
         ? buildR2SystemPrompt(PASS_SUSTAINABILITY_RUBRIC, buildRulingsBlock(ledgerFile, 'sustainability', impactSet))
@@ -1540,7 +1561,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     syncFalsePositivePatterns(null, fpTracker.patterns).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
   }
 
-  // Phase 5b: Finalise cloud run record with counts
+  // Phase 5b: Finalise cloud run record with counts + run metadata
   if (cloudRunId) {
     recordRunComplete(cloudRunId, {
       rounds: round,
@@ -1550,6 +1571,10 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       fixed: allFindings.filter(f => f.remediationState === 'fixed').length,
       geminiVerdict: null, // updated by gemini-review after Step 7
       durationMs: totalLatency,
+      diffLinesChanged,
+      diffFilesChanged,
+      sessionCacheHit,
+      mapReducePasses: mapReducePasses.length > 0 ? mapReducePasses : null,
     }).catch(e => process.stderr.write(`  [learning] recordRunComplete: ${e.message}\n`));
   }
 
@@ -1808,7 +1833,7 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring, sessionCacheHit: cacheHit, scopeMode });
     return;
   }
 

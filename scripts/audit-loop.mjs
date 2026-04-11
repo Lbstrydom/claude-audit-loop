@@ -264,6 +264,14 @@ async function main() {
 
       if (stableCount >= 1 || round >= args.maxRounds) {
         console.log(`\n${G}Converged${X} after ${round} round(s). H:${counts.high} M:${counts.medium}`);
+        // Record R2 skip reason when we stop after round 1 (converged without running R2)
+        if (round === 1 && results._cloudRunId) {
+          const { updateRunMeta } = await import('./learning-store.mjs').catch(() => ({ updateRunMeta: null }));
+          if (updateRunMeta) {
+            const reason = round >= args.maxRounds ? 'max_rounds_1' : 'converged';
+            updateRunMeta(results._cloudRunId, { r2SkipReason: reason }).catch(() => null);
+          }
+        }
         break;
       }
     }
