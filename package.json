@@ -17,7 +17,10 @@
     "audit:refine": "node scripts/refine-prompts.mjs",
     "audit:bandit": "node scripts/bandit.mjs stats",
     "audit:phase7": "node scripts/phase7-check.mjs",
-    "audit:check-deps": "node scripts/check-deps.mjs"
+    "audit:check-deps": "node scripts/check-deps.mjs",
+    "sync": "node scripts/sync-to-repos.mjs",
+    "sync:dry": "node scripts/sync-to-repos.mjs --dry-run",
+    "sync:check": "node scripts/check-sync.mjs"
   },
   "keywords": [
     "claude",

@@ -1540,6 +1540,19 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     syncFalsePositivePatterns(null, fpTracker.patterns).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
   }
 
+  // Phase 5b: Finalise cloud run record with counts
+  if (cloudRunId) {
+    recordRunComplete(cloudRunId, {
+      rounds: round,
+      totalFindings: allFindings.length,
+      accepted: allFindings.filter(f => f.adjudicationOutcome === 'accepted').length,
+      dismissed: allFindings.filter(f => f.adjudicationOutcome === 'dismissed').length,
+      fixed: allFindings.filter(f => f.remediationState === 'fixed').length,
+      geminiVerdict: null, // updated by gemini-review after Step 7
+      durationMs: totalLatency,
+    }).catch(e => process.stderr.write(`  [learning] recordRunComplete: ${e.message}\n`));
+  }
+
   // 6. Output
   if (outFile) {
     const summaryLine = `Verdict: ${verdict} | H:${high} M:${medium} L:${low} | ${(totalLatency / 1000).toFixed(0)}s`;

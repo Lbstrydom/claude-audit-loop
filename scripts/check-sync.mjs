@@ -113,9 +113,9 @@ async function checkSync() {
 
   const { data: recentRuns } = await sb
     .from('audit_runs')
-    .select('id, plan_file, mode, started_at, verdict, rounds, total_findings')
+    .select('id, plan_file, mode, created_at, gemini_verdict, rounds, total_findings')
     .eq('repo_id', repoRow.id)
-    .order('started_at', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(5);
 
   if (recentRuns?.length) {
@@ -123,9 +123,9 @@ async function checkSync() {
     log('');
     log('  Recent runs:');
     for (const r of recentRuns) {
-      const date = r.started_at ? new Date(r.started_at).toLocaleDateString() : '?';
+      const date = r.created_at ? new Date(r.created_at).toLocaleDateString() : '?';
       const plan = r.plan_file ? path.basename(r.plan_file) : '?';
-      log(`    ${date}  ${r.mode || '?'}  ${plan}  R:${r.rounds ?? '?'}  F:${r.total_findings ?? '?'}  ${r.verdict || ''}`);
+      log(`    ${date}  ${r.mode || '?'}  ${plan}  R:${r.rounds ?? '?'}  F:${r.total_findings ?? '?'}  ${r.gemini_verdict || ''}`);
     }
   } else {
     info('No audit runs recorded yet');
