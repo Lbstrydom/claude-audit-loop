@@ -27,6 +27,38 @@ Each skill is a sibling — they share env vars and Supabase stores but have dis
 - **persona-test**: deployed app (live browser, user flows, UX findings)
 - **ship**: packaging and delivery
 
+## Browser Tool Setup (persona-test)
+
+`/persona-test` drives a real browser. **Playwright MCP is the preferred tool** — it's free, no credentials needed, works on your own apps.
+
+`.mcp.json` is included in this repo. Claude Code auto-discovers it and prompts you to enable Playwright MCP on first open. Just click **Allow** when prompted.
+
+**First-time setup — install the browser:**
+```bash
+npx playwright install chromium
+```
+This is required before the MCP server will start. Without it, the server crashes silently and no tools appear.
+
+**Verify it's working:**
+```bash
+npx @playwright/mcp@latest --version   # should print a version number
+```
+
+**Windows users** — if Playwright tools still don't appear after installing Chromium and restarting, add this override to `~/.claude/settings.json`:
+```json
+"mcpServers": {
+  "playwright": {
+    "command": "npx.cmd",
+    "args": ["@playwright/mcp@latest", "--headless"]
+  }
+}
+```
+Then restart Claude Code. Windows requires `npx.cmd` (the `.cmd` wrapper) rather than bare `npx` for Claude Code's process spawner to resolve it correctly.
+
+BrightData Scraping Browser is also supported (handles anti-bot/CAPTCHA) but requires a paid account and KYC approval. Playwright is preferred for testing your own apps.
+
+---
+
 ## Dependencies (CRITICAL — check versions before flagging issues)
 
 | Package | Version | Notes |

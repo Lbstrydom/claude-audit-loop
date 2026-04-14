@@ -7,7 +7,7 @@ description: |
   scoring, and returns a structured P0–P3 severity report plus a qualitative persona debrief.
   Personas are tracked per app URL — use "list" to see who's registered, "add" to register new ones.
   Use for exploratory QA against deployed apps — not scripted regression tests.
-  Works with BrightData MCP scraping browser (preferred) or Playwright MCP (fallback).
+  Works with Playwright MCP (preferred — free, no credentials) or BrightData Scraping Browser (for external/anti-bot sites).
   Triggers on: "persona test", "test as", "explore the app as", "run persona test",
   "test the site as", "browse the app as", "QA as", "list personas", "add persona",
   "who are my personas", "which persona should test".
@@ -255,6 +255,10 @@ that. Instead, let the fragility knowledge sharpen your Reflect judgement silent
 - Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
 - If it responds: `browser_tool = "Playwright MCP"`
 - Use for: own apps, localhost, any URL where anti-bot is not needed
+- Prerequisites: `npx playwright install chromium` must be run once before first use.
+  If tools don't appear after restart, this step was likely skipped — the server crashes
+  silently without a browser. Windows also requires `npx.cmd` in `~/.claude/settings.json`
+  (see repo CLAUDE.md for the override snippet).
 
 **Tier 2: BrightData Scraping Browser** (anti-bot, CAPTCHA — for external sites)
 - Attempt `mcp__brightdata__scraping_browser_navigate` with the target URL

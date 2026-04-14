@@ -7,7 +7,7 @@ description: |
   scoring, and returns a structured P0–P3 severity report plus a qualitative persona debrief.
   Personas are tracked per app URL — use "list" to see who's registered, "add" to register new ones.
   Use for exploratory QA against deployed apps — not scripted regression tests.
-  Works with BrightData MCP scraping browser (preferred) or Playwright MCP (fallback).
+  Works with Playwright MCP (preferred — free, no credentials) or BrightData Scraping Browser (for external/anti-bot sites).
   Triggers on: "persona test", "test as", "explore the app as", "run persona test",
   "test the site as", "browse the app as", "QA as", "list personas", "add persona",
   "who are my personas", "which persona should test".
@@ -244,26 +244,31 @@ that. Instead, let the fragility knowledge sharpen your Reflect judgement silent
 
 Try tools in this order. Use the FIRST one that responds.
 
-**Tier 1: BrightData Scraping Browser** (preferred — handles anti-bot, CAPTCHA)
+**Tier 1: Playwright MCP** (free, direct — preferred for own apps)
+- Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
+- If it responds: `browser_tool = "Playwright MCP"`
+- Use for: own apps, localhost, any URL where anti-bot is not needed
+- Prerequisites: `npx playwright install chromium` must be run once before first use.
+  If tools don't appear after restart, this step was likely skipped — the server crashes
+  silently without a browser. Windows also requires `npx.cmd` in `~/.claude/settings.json`
+  (see repo CLAUDE.md for the override snippet).
+
+**Tier 2: BrightData Scraping Browser** (anti-bot, CAPTCHA — for external sites)
 - Attempt `mcp__brightdata__scraping_browser_navigate` with the target URL
 - If it responds: `browser_tool = "BrightData Scraping Browser"`
 - Note: BrightData requires KYC approval from compliance@brightdata.com for password
   fields. If login is blocked, flag as a known limitation and continue unauthenticated.
 
-**Tier 2: BrightData Browser AI** (lighter serverless alternative)
+**Tier 3: BrightData Browser AI** (lighter serverless alternative to Tier 2)
 - Attempt `mcp__brightdata__browser_navigate` (browserai-mcp variant)
 - If it responds: `browser_tool = "BrightData Browser AI"`
-
-**Tier 3: Playwright MCP** (free, no anti-bot — good for own apps)
-- Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
-- If it responds: `browser_tool = "Playwright MCP"`
 
 **Tier 4: None available — STOP**
 ```
 [ERROR] No browser tool available.
-Install BrightData MCP or Playwright MCP to run persona tests.
+Install Playwright MCP or BrightData MCP to run persona tests.
+  Playwright:  npx playwright install chromium && npx @playwright/mcp@latest
   BrightData: Configure in Claude Code settings (MCP servers)
-  Playwright:  npx @playwright/mcp@latest
 Note: If running in a sub-agent context, MCP tools may not be exposed.
 Run /persona-test directly in your main Claude Code session.
 ```
