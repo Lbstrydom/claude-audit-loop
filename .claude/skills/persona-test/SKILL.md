@@ -242,21 +242,29 @@ that. Instead, let the fragility knowledge sharpen your Reflect judgement silent
 
 ## Phase 1 — Detect Browser Tool
 
-Try tools in this order. Use the FIRST one that responds.
+**First: check the URL hostname.**
 
-**Tier 1: BrightData Scraping Browser** (preferred — handles anti-bot, CAPTCHA)
+- If `localhost`, `127.0.0.1`, `0.0.0.0`, ends in `.local`/`.internal`, or matches a
+  known own-app domain (`*.railway.app`, `*.vercel.app`, `*.netlify.app`, `*.up.railway.app`) →
+  skip BrightData entirely and go directly to Playwright MCP (Tier 1 below).
+  Log: `[OWN APP] Using Playwright — BrightData skipped for own-app hostname`.
+
+- Otherwise (external/third-party URL) → try tools in order below.
+
+**Tier 1: Playwright MCP** (free, direct — preferred for own apps)
+- Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
+- If it responds: `browser_tool = "Playwright MCP"`
+- Use for: own apps, localhost, any URL where anti-bot is not needed
+
+**Tier 2: BrightData Scraping Browser** (anti-bot, CAPTCHA — for external sites)
 - Attempt `mcp__brightdata__scraping_browser_navigate` with the target URL
 - If it responds: `browser_tool = "BrightData Scraping Browser"`
 - Note: BrightData requires KYC approval from compliance@brightdata.com for password
   fields. If login is blocked, flag as a known limitation and continue unauthenticated.
 
-**Tier 2: BrightData Browser AI** (lighter serverless alternative)
+**Tier 3: BrightData Browser AI** (lighter serverless alternative to Tier 2)
 - Attempt `mcp__brightdata__browser_navigate` (browserai-mcp variant)
 - If it responds: `browser_tool = "BrightData Browser AI"`
-
-**Tier 3: Playwright MCP** (free, no anti-bot — good for own apps)
-- Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
-- If it responds: `browser_tool = "Playwright MCP"`
 
 **Tier 4: None available — STOP**
 ```
@@ -337,7 +345,7 @@ If the action is ambiguous but context implies mutation → treat as blocked. Ne
 3. Add to findings as: `P3 OBSERVATION — Mutation flow not tested (safe mode). Use --unsafe-mutations to enable.`
 4. Continue exploration — do not abort
 
-**Localhost/internal URL check (G1)**: Before selecting a provider, check the URL hostname. If it is `localhost`, `127.0.0.1`, `0.0.0.0`, or ends in `.local` or `.internal` — skip BrightData (cloud proxy cannot reach internal servers) and go directly to Playwright MCP. Log: `[LOCAL URL] Using Playwright — BrightData skipped for internal hostname`.
+**Own-app/local URL check (G1)**: Handled in Phase 1 — Playwright is used directly for `localhost`, `127.0.0.1`, `0.0.0.0`, `.local`/`.internal`, and known own-app domains (`*.railway.app`, `*.vercel.app`, `*.netlify.app`). BrightData is only attempted for external third-party URLs where anti-bot protection may be present.
 
 **Origin boundary**: Stay within the starting URL's origin by default. If navigation leads to a third-party domain (external auth, payment, CDN), screenshot the boundary, log `[BOUNDARY] External domain — not testing third-party services`, navigate back to primary origin, and continue. Do not follow cross-origin redirects into external services.
 
@@ -368,14 +376,14 @@ Execute exactly one action using the browser tool. Then take a screenshot immedi
 
 **Tool commands**:
 
-| Action | BrightData Scraping Browser | Playwright MCP |
-|--------|-----------------------------|----------------|
-| Navigate | `mcp__brightdata__scraping_browser_navigate` | `browser_navigate` |
-| Screenshot | `mcp__brightdata__scraping_browser_screenshot` | `browser_screenshot` |
-| Click | `mcp__brightdata__scraping_browser_click` | `browser_click` |
-| Type | `mcp__brightdata__scraping_browser_type` | `browser_type` |
-| Scroll | `mcp__brightdata__scraping_browser_scroll` | `browser_scroll` |
-| Get DOM text | `mcp__brightdata__scraping_browser_get_text` | `browser_get_text` |
+| Action | Playwright MCP | BrightData Scraping Browser |
+|--------|----------------|------------------------------|
+| Navigate | `browser_navigate` | `mcp__brightdata__scraping_browser_navigate` |
+| Screenshot | `browser_screenshot` | `mcp__brightdata__scraping_browser_screenshot` |
+| Click | `browser_click` | `mcp__brightdata__scraping_browser_click` |
+| Type | `browser_type` | `mcp__brightdata__scraping_browser_type` |
+| Scroll | `browser_scroll` | `mcp__brightdata__scraping_browser_scroll` |
+| Get DOM text | `browser_get_text` | `mcp__brightdata__scraping_browser_get_text` |
 
 **No sleep/wait tool exists** — to observe page settle, take a second screenshot immediately after the action. If still loading in screenshot 2, note "still loading" and proceed.
 
