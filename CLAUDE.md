@@ -74,11 +74,18 @@ BrightData Scraping Browser is also supported (handles anti-bot/CAPTCHA) but req
 scripts/
 ├── lib/                    # Focused modules (split from former shared.mjs monolith)
 │   ├── schemas.mjs         # Zod schemas + zodToGeminiSchema() — single source of truth
-│   ├── file-io.mjs         # File read/write, paths, plan path extraction (incl. fuzzy discovery)
+│   ├── file-io.mjs         # Core I/O (atomic writes, paths) + barrel re-exports
+│   ├── audit-scope.mjs     # Sensitive file filtering, audit-infra exclusion, context assembly
+│   ├── diff-annotation.mjs # Diff parsing, CHANGED/UNCHANGED markers for audit context
+│   ├── plan-paths.mjs      # Plan path extraction (regex + fuzzy keyword discovery)
 │   ├── ledger.mjs          # Adjudication ledger, R2+ suppression, finding metadata
 │   ├── code-analysis.mjs   # Chunking, dependency graphs, audit units, map-reduce
 │   ├── context.mjs         # Repo profiling, audit brief generation, CLAUDE.md parsing
-│   ├── findings.mjs        # Semantic IDs, FP tracker, outcome logging, formatting
+│   ├── findings.mjs        # Semantic IDs + barrel re-exports for findings subsystem
+│   ├── findings-format.mjs # Finding display formatting (pure renderer)
+│   ├── findings-tracker.mjs # FP tracker (v2), lazy-decay EMA, multi-scope counters
+│   ├── findings-outcomes.mjs # Outcome logging, effectiveness tracking, EWR
+│   ├── findings-tasks.mjs  # Remediation task CRUD + persistence
 │   └── config.mjs          # Centralized validated config (all env var reads)
 ├── shared.mjs              # Barrel re-export — backwards-compatible, imports from lib/
 ├── openai-audit.mjs        # GPT-5.4 multi-pass auditor (plan, code, rebuttal modes)
@@ -180,3 +187,15 @@ Two-axis state model: `adjudicationOutcome` (dismissed/accepted/severity_adjuste
 - Send `.env` or credential files to external APIs
 - Use `require()` — project is ESM-only
 - Create new Anthropic/OpenAI client instances per call — reuse the client created in `main()`
+
+## Accepted Technical Debt
+
+These items were evaluated and deliberately accepted:
+
+| Item | Rationale | Revisit trigger |
+|------|-----------|-----------------|
+| `atomicWriteFileSync` no fsync | CLI tool, not a database. Rename atomicity protects against process crash (the real failure mode). | Never — unless used in a daemon/server context |
+| `atomicWriteFileSync` temp naming (PID+timestamp) | Collision requires same PID + same millisecond + same directory. Probability negligible. | Never |
+| `readFileOrDie` process.exit(1) | Name is self-documenting. Only called from CLI entry points. | If ever called from a library context |
+| `normalizePath()` lowercasing | Correct for Windows (case-insensitive FS). On case-sensitive Linux, distinct files could collide — acceptable for local-repo auditing. | If deployed as a CI service on Linux |
+| Module-global caches (`_repoProfileCache`, `_taskStore`) | Safe in CLI-per-invocation model. Each process starts fresh. | If extracting as a library or running as a long-lived server |

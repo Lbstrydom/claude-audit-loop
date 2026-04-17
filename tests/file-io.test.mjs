@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 // readFilesAsAnnotatedContext requires a CWD with files — import after setup
-import { readFilesAsAnnotatedContext, isAuditInfraFile } from '../scripts/lib/file-io.mjs';
+import { readFilesAsAnnotatedContext, isAuditInfraFile, isSensitiveFile, readFilesAsContext } from '../scripts/lib/file-io.mjs';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -237,5 +237,90 @@ describe('isAuditInfraFile', () => {
   it('requires scripts/ prefix — bare basenames do not match', () => {
     assert.ok(!isAuditInfraFile('schemas.mjs'));
     assert.ok(!isAuditInfraFile('ledger.mjs'));
+  });
+});
+
+// ── isSensitiveFile (Phase 1 — full-path matching) ────────────────────────
+
+describe('isSensitiveFile — full path matching', () => {
+  it('catches files under sensitive directories', () => {
+    assert.ok(isSensitiveFile('config/credentials/prod.json'));
+    assert.ok(isSensitiveFile('secrets/db-config.json'));
+    assert.ok(isSensitiveFile('app/secret-keys/main.yaml'));
+  });
+
+  it('still catches basename-level matches', () => {
+    assert.ok(isSensitiveFile('.env'));
+    assert.ok(isSensitiveFile('.env.production'));
+    assert.ok(isSensitiveFile('server.pem'));
+    assert.ok(isSensitiveFile('id_rsa'));
+    assert.ok(isSensitiveFile('id_ed25519'));
+    assert.ok(isSensitiveFile('cert.pfx'));
+  });
+
+  it('does NOT false-positive on tokenizer or password-strength paths', () => {
+    assert.ok(!isSensitiveFile('src/tokenizer/utils.js'));
+    assert.ok(!isSensitiveFile('src/password-strength/check.mjs'));
+    assert.ok(!isSensitiveFile('lib/detokenize.mjs'));
+  });
+
+  it('catches actual token/password files and directories', () => {
+    assert.ok(isSensitiveFile('config/tokens/api.json'));
+    assert.ok(isSensitiveFile('password.txt'));
+    assert.ok(isSensitiveFile('token.json'));
+  });
+
+  it('handles Windows backslash paths', () => {
+    assert.ok(isSensitiveFile(String.raw`config\credentials\prod.json`));
+    assert.ok(isSensitiveFile(String.raw`secrets\db.json`));
+  });
+});
+
+// ── readFilesAsContext (Phase 1 — safety) ─────────────────────────────────
+
+describe('readFilesAsContext — safety', () => {
+  let tmpDir, origCwd;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-safety-'));
+    origCwd = process.cwd();
+    process.chdir(tmpDir);
+  });
+
+  afterEach(() => {
+    process.chdir(origCwd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('rejects paths that escape the CWD via ../', () => {
+    fs.writeFileSync('legit.js', 'ok');
+    const result = readFilesAsContext(['legit.js', '../escape.js']);
+    assert.ok(result.includes('legit.js'), 'legit file included');
+    assert.ok(result.includes('omitted'), 'escape path omitted');
+  });
+
+  it('skips non-existent files without aborting', () => {
+    fs.writeFileSync('a.js', 'aaa');
+    const result = readFilesAsContext(['a.js', 'ghost.js', 'phantom.js']);
+    assert.ok(result.includes('a.js'), 'existing file included');
+    assert.ok(result.includes('omitted'), 'missing files omitted');
+  });
+
+  it('skips directories in file list', () => {
+    fs.mkdirSync('subdir');
+    fs.writeFileSync('ok.js', 'content');
+    const result = readFilesAsContext(['ok.js', 'subdir']);
+    assert.ok(result.includes('ok.js'), 'regular file included');
+    assert.ok(result.includes('omitted'), 'directory omitted');
+  });
+
+  it('excludes sensitive files by full path', () => {
+    fs.mkdirSync('config/credentials', { recursive: true });
+    fs.writeFileSync('config/credentials/prod.json', '{"key":"val"}');
+    fs.writeFileSync('safe.js', 'ok');
+    const result = readFilesAsContext(['safe.js', 'config/credentials/prod.json']);
+    assert.ok(result.includes('safe.js'));
+    assert.ok(result.includes('sensitive'), 'sensitive file excluded');
+    assert.ok(!result.includes('prod.json'));
   });
 });

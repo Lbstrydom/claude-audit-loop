@@ -15,10 +15,10 @@ import { LedgerEntrySchema, BatchLedgerEntrySchema } from './schemas.mjs';
 import { semanticId } from './findings.mjs';
 import { buildFileReferenceRegex } from './language-profiles.mjs';
 
-// Single source of truth — regex built from registered profile extensions.
-// Handles ./foo.py, ../pkg/mod.py, /abs/foo.py, backticked, quoted forms.
-// Global regex, so callers must reset .lastIndex before use.
-const FILE_REGEX = buildFileReferenceRegex();
+// Factory — creates a fresh regex per call to avoid .lastIndex state bugs.
+// The global regex pattern is stateful; sharing one instance across calls
+// required manual .lastIndex = 0 resets, which is a latent-bug magnet.
+function getFileRegex() { return buildFileReferenceRegex(); }
 
 // ── Topic ID & Ledger Write ─────────────────────────────────────────────────
 
@@ -217,9 +217,9 @@ export function populateFindingMetadata(finding, passName) {
   // registry-derived regex (handles .py, .pyi, relative/absolute paths).
   const section = finding.section || '';
   const files = [];
-  FILE_REGEX.lastIndex = 0; // reset global regex state between calls
+  const fileRegex = getFileRegex();
   let match;
-  while ((match = FILE_REGEX.exec(section)) !== null) {
+  while ((match = fileRegex.exec(section)) !== null) {
     files.push(normalizePath(match[1]));
   }
 
