@@ -1270,8 +1270,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  [linter-overlap] Tool: ${toolFindingsInResult.length} | GPT: ${gptFindingsInResult.length} | Overlap: ${linterOverlapCount} | Linter-only: ${linterOnlyCount} | GPT-only: ${gptOnlyCount}\n`);
   }
 
-  // Store linter overlap stats in result for cloud sync
-  mergedResult._linterOverlap = { linterOverlapCount, linterOnlyCount, gptOnlyCount };
+  // Stored in temp var because mergedResult is defined later (TDZ).
+  var _linterOverlapData = { linterOverlapCount, linterOnlyCount, gptOnlyCount };
 
   // 5.5 Post-output suppression
   // Phase D: merge session ledger (R2+) with persistent debt ledger so debt
@@ -1547,6 +1547,9 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   }
   if (typeof _ledgerWriteError !== 'undefined') {
     mergedResult._ledgerWriteError = _ledgerWriteError;
+  }
+  if (typeof _linterOverlapData !== 'undefined') {
+    mergedResult._linterOverlap = _linterOverlapData;
   }
 
   // Phase 3-4: Record initial findings for learning (pre-triage — accepted is null).
