@@ -480,6 +480,47 @@ async function safeCallGPT(openai, opts, emptyResult) {
   }
 }
 
+// ── Intermediate Result Cache ────────────────────────────────────────────────
+// Write each wave's results to disk as they complete. If the merge step crashes
+// (TDZ, disk error, OOM), findings survive on disk and can be recovered.
+// The cache dir is derived from the --out path or uses os.tmpdir().
+
+import os from 'node:os';
+
+let _cacheDir = null;
+
+function initResultCache(outFile) {
+  const base = outFile
+    ? path.dirname(path.resolve(outFile))
+    : os.tmpdir();
+  _cacheDir = path.join(base, `.audit-cache-${process.pid}`);
+  try {
+    fs.mkdirSync(_cacheDir, { recursive: true });
+  } catch { _cacheDir = null; }
+}
+
+function cachePassResult(passName, result) {
+  if (!_cacheDir) return;
+  try {
+    const filePath = path.join(_cacheDir, `${passName}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(result), 'utf-8');
+  } catch (err) {
+    process.stderr.write(`  [cache] Failed to cache ${passName}: ${err.message}\n`);
+  }
+}
+
+function cacheWaveResults(passNames, results) {
+  for (let i = 0; i < passNames.length; i++) {
+    if (results[i]) cachePassResult(passNames[i], results[i]);
+  }
+  process.stderr.write(`  [cache] ${passNames.length} pass results cached to ${_cacheDir}\n`);
+}
+
+function cleanupCache() {
+  if (!_cacheDir) return;
+  try { fs.rmSync(_cacheDir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
 // buildReducePayload and normalizeFindingsForOutput imported from lib/robustness.mjs
 // Wrap normalizeFindingsForOutput to inject semanticId
 function normalizeFindingsForOutput(findings) {
@@ -690,6 +731,9 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  */
 async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null, sessionCacheHit = null, scopeMode = null } = {}) {
   const totalStart = Date.now();
+
+  // Initialize pass result cache — survives merge crashes
+  initResultCache(outFile);
 
   // Count diff lines for metadata (lines starting with + or - but not +++ / ---)
   let diffLinesChanged = null;
@@ -958,6 +1002,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   }
 
   const [structureResult, wiringResult] = await Promise.all(wave1Promises);
+  cacheWaveResults(['structure', 'wiring'], [structureResult, wiringResult]);
 
   // 3. Wave 2: Backend + Frontend quality (deep, reasoning: high)
   process.stderr.write('\n── Wave 2: Quality passes (parallel, reasoning: high) ──\n');
@@ -1106,6 +1151,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   const wave2Results = await Promise.all(wave2Promises);
   const backendResults = wave2Results.slice(0, backendPassNames.length);
   const frontendResult = wave2Results[backendPassNames.length] ?? { result: EMPTY_FINDINGS, usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: 0 }, latencyMs: 0 };
+  cacheWaveResults([...backendPassNames, 'frontend'], wave2Results);
 
   // 4. Wave 3: Sustainability (reasoning: medium)
   let sustainResult;
@@ -1144,6 +1190,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`\n── Sustainability SKIPPED (--passes) ──\n`);
     sustainResult = { result: EMPTY_SUSTAIN, usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: 0 }, latencyMs: 0 };
   }
+
+  cachePassResult('sustainability', sustainResult);
 
   // 5. Merge all pass results with semantic dedup
   const totalLatency = Date.now() - totalStart;
@@ -1731,6 +1779,10 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       process.stderr.write(`\n  [phase-7] ✓ ${runCount} runs — Phase 7 (predictive strategy) is ready to implement!\n`);
     }
   } catch { /* ignore */ }
+
+  // Clean up pass result cache on successful completion.
+  // On crash, the cache survives in the --out dir for manual recovery.
+  cleanupCache();
 }
 
 // resolveLedgerPath imported from lib/robustness.mjs
