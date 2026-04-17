@@ -1240,6 +1240,39 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     process.stderr.write(`  Added ${toolFindings.length} tool findings (H:${toolHigh} M:${toolMed} L:${toolLow})\n`);
   }
 
+  // 5.4b Linter overlap tracking (Phase 0G) — compares tool vs GPT findings
+  // Match by file + line proximity (G3 fix: both must have line numbers).
+  const toolFindingsInResult = allFindings.filter(f => f._pass === 'tool');
+  const gptFindingsInResult = allFindings.filter(f => f._pass !== 'tool');
+  let linterOverlapCount = 0, linterOnlyCount = 0, gptOnlyCount = 0;
+
+  if (toolFindingsInResult.length > 0) {
+    const matchedGpt = new Set();
+    for (const tf of toolFindingsInResult) {
+      const [tFile, tLineStr] = (tf.section || '').split(':');
+      const tLine = parseInt(tLineStr, 10);
+      let matched = false;
+      for (const gf of gptFindingsInResult) {
+        const gFile = gf._primaryFile || (gf.section || '').split(':')[0];
+        if (normalizePath(tFile || '') !== normalizePath(gFile || '')) continue;
+        const gLine = parseInt((gf.section || '').split(':')[1], 10);
+        if (isNaN(gLine) || isNaN(tLine)) continue; // G3 fix: both need line numbers
+        if (Math.abs(gLine - tLine) <= 5) {
+          matched = true;
+          matchedGpt.add(gf._hash);
+          break;
+        }
+      }
+      if (matched) linterOverlapCount++;
+      else linterOnlyCount++;
+    }
+    gptOnlyCount = gptFindingsInResult.filter(f => !matchedGpt.has(f._hash)).length;
+    process.stderr.write(`  [linter-overlap] Tool: ${toolFindingsInResult.length} | GPT: ${gptFindingsInResult.length} | Overlap: ${linterOverlapCount} | Linter-only: ${linterOnlyCount} | GPT-only: ${gptOnlyCount}\n`);
+  }
+
+  // Store linter overlap stats in result for cloud sync
+  mergedResult._linterOverlap = { linterOverlapCount, linterOnlyCount, gptOnlyCount };
+
   // 5.5 Post-output suppression
   // Phase D: merge session ledger (R2+) with persistent debt ledger so debt
   // gets suppressed in every round, not just R2+. Suppression runs when
@@ -1516,7 +1549,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     mergedResult._ledgerWriteError = _ledgerWriteError;
   }
 
-  // Phase 3-4: Record outcomes for learning (v2: include primaryFile + revision ID)
+  // Phase 3-4: Record initial findings for learning (pre-triage — accepted is null).
+  // Actual triage outcomes are written by outcome-sync.mjs AFTER deliberation.
   for (const f of allFindings) {
     const revId = getActiveRevisionId(f._pass) || 'default';
     appendOutcome('.audit/outcomes.jsonl', {
@@ -1527,7 +1561,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       primaryFile: f._primaryFile || f.section,
       affectedFiles: f.affectedFiles || [],
       pass: f._pass,
-      accepted: true, // Will be updated by orchestrator after deliberation
+      accepted: null, // Pre-triage: outcome-sync writes actual result after deliberation
       round,
       promptVariant: revId,
       promptRevisionId: revId,

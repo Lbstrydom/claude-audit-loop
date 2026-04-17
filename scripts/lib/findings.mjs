@@ -52,7 +52,7 @@ export {
 
 export {
   setRepoProfileCache,
-  appendOutcome, loadOutcomes, compactOutcomes,
+  appendOutcome, batchAppendOutcomes, loadOutcomes, compactOutcomes,
   computePassEffectiveness, computePassEWR
 } from './findings-outcomes.mjs';
 

@@ -836,7 +836,9 @@ async function main() {
       const fpTracker = new FalsePositiveTracker();
       const revId = getActiveRevisionId('gemini-review') || 'default';
 
-      // Record new_findings as outcomes (initially accepted=true, updated after deliberation)
+      // Record new_findings as outcomes (pre-triage — accepted is null).
+      // Separate claude_accepted / gemini_reconfirmed fields enable independent
+      // accuracy tracking without circular bias (M6 fix).
       if (Array.isArray(result.new_findings)) {
         for (const f of result.new_findings) {
           appendOutcome('.audit/outcomes.jsonl', {
@@ -844,9 +846,11 @@ async function main() {
             severity: f.severity,
             category: f.category,
             section: f.section,
-            pass: 'gemini-review',
-            accepted: true, // Will be updated by orchestrator after Step 7.1 deliberation
-            round: 0, // Final review = post-convergence
+            pass: 'gemini-new',
+            model: 'gemini',
+            accepted: null, // Pre-triage: outcome-sync writes actual result after deliberation
+            gemini_reconfirmed: true, // Gemini raised it — considers it valid
+            round: 0,
             promptVariant: revId,
             promptRevisionId: revId,
             semanticHash: f._hash,
@@ -863,8 +867,10 @@ async function main() {
             severity: w.recommended_severity,
             category: `[wrongly-dismissed] ${w.original_finding_id}`,
             section: w.reason_claude_was_wrong?.slice(0, 120) || '',
-            pass: 'gemini-review',
-            accepted: true, // Wrongly dismissed = Gemini was right
+            pass: 'gemini-wrongly-dismissed',
+            model: 'gemini',
+            accepted: null, // Pre-triage: deliberation determines actual outcome
+            gemini_reconfirmed: true,
             round: 0,
             promptVariant: revId,
             promptRevisionId: revId,

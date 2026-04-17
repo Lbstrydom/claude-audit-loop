@@ -50,6 +50,31 @@ export function appendOutcome(logPath, outcome) {
 }
 
 /**
+ * Batch-append multiple outcome records atomically.
+ * Uses atomicWriteFileSync for crash-safe batch write (G2 fix).
+ * @param {string} logPath
+ * @param {object[]} records
+ */
+export function batchAppendOutcomes(logPath, records) {
+  if (!records || records.length === 0) return;
+  const absPath = path.resolve(logPath || '.audit/outcomes.jsonl');
+  try {
+    // Read existing, append new, write atomically
+    let existing = '';
+    try { existing = fs.readFileSync(absPath, 'utf-8'); } catch { /* new file */ }
+    const newLines = records.map(r => JSON.stringify({
+      ...r,
+      timestamp: r.timestamp || Date.now(),
+      repoFingerprint: r.repoFingerprint || _repoProfileCache?.repoFingerprint || 'unknown'
+    }));
+    const combined = existing.trimEnd() + (existing ? '\n' : '') + newLines.join('\n') + '\n';
+    atomicWriteFileSync(absPath, combined);
+  } catch (err) {
+    process.stderr.write(`  [outcomes] Batch write failed: ${err.message}\n`);
+  }
+}
+
+/**
  * Load outcomes — pure read, no side effects.
  * @param {string} logPath
  * @returns {object[]}

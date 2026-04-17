@@ -174,3 +174,29 @@ export const learningConfig = Object.freeze({
   minFpSamples: safeInt(process.env.MIN_FP_SAMPLES, 5),
   minExamplesThreshold: safeInt(process.env.MIN_EXAMPLES_THRESHOLD, 3),
 });
+
+// ── Outcome Reward Weights ──────────────────────────────────────────────────
+
+export const rewardWeights = Object.freeze({
+  HIGH: 1,
+  MEDIUM: 0.7,
+  LOW: 0.4,
+  default: 0.5,
+});
+
+// ── Model Pricing (per 1M tokens) ───────────────────────────────────────────
+
+export const modelPricing = Object.freeze({
+  'gpt-5.4':    { input: 2.5, output: 10 },
+  'gemini-3.1': { input: 1.25, output: 5 },
+  'claude':     { input: 3, output: 15 },
+});
+
+// ── Predictive Strategy Config ──────────────────────────────────────────────
+
+export const predictiveConfig = Object.freeze({
+  explorationInterval: safeInt(process.env.PREDICTIVE_EXPLORATION_INTERVAL, 10),
+  freshnessWindowDays: safeInt(process.env.PREDICTIVE_FRESHNESS_DAYS, 14),
+  minLabeledRuns: safeInt(process.env.PREDICTIVE_MIN_LABELED_RUNS, 20),
+  skipFpThreshold: Number.parseFloat(process.env.PREDICTIVE_SKIP_FP_THRESHOLD || '0.7'),
+});

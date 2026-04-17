@@ -256,6 +256,69 @@ export async function recordPassStats(runId, passName, stats) {
 }
 
 /**
+ * Update pass stats with actual adjudication outcomes after deliberation.
+ * Called by outcome-sync.mjs after triage — fixes the data loop gap where
+ * findings_accepted/findings_dismissed were always written as 0.
+ * @param {string} runId
+ * @param {Object<string, {accepted: number, dismissed: number, compromised: number}>} passCounts
+ */
+export async function updatePassStatsPostDeliberation(runId, passCounts) {
+  if (!_supabase || !runId) return;
+
+  for (const [passName, counts] of Object.entries(passCounts)) {
+    const { error } = await _supabase
+      .from('audit_pass_stats')
+      .update({
+        findings_accepted: counts.accepted,
+        findings_dismissed: counts.dismissed,
+        findings_compromised: counts.compromised || 0,
+      })
+      .eq('run_id', runId)
+      .eq('pass_name', passName);
+
+    if (error) process.stderr.write(`  [learning] updatePassStats(${passName}) failed: ${error.message}\n`);
+  }
+}
+
+/**
+ * Retrieve average pass timing/token data for cost prediction.
+ * Groups by pass_name, returns averages only for passes with real data.
+ * @returns {Promise<Array<{passName: string, avgInputTokens: number, avgOutputTokens: number, avgLatencyMs: number, runCount: number}>>}
+ */
+export async function getPassTimings() {
+  if (!_supabase) return [];
+
+  const { data, error } = await _supabase
+    .from('audit_pass_stats')
+    .select('pass_name, input_tokens, output_tokens, latency_ms')
+    .gt('input_tokens', 0);
+
+  if (error || !data) {
+    process.stderr.write(`  [learning] getPassTimings failed: ${error?.message}\n`);
+    return [];
+  }
+
+  // Aggregate in-memory (simpler than a Supabase RPC for now)
+  const byPass = {};
+  for (const row of data) {
+    if (!byPass[row.pass_name]) byPass[row.pass_name] = { totalIn: 0, totalOut: 0, totalLat: 0, count: 0 };
+    const p = byPass[row.pass_name];
+    p.totalIn += row.input_tokens || 0;
+    p.totalOut += row.output_tokens || 0;
+    p.totalLat += row.latency_ms || 0;
+    p.count++;
+  }
+
+  return Object.entries(byPass).map(([passName, p]) => ({
+    passName,
+    avgInputTokens: Math.round(p.totalIn / p.count),
+    avgOutputTokens: Math.round(p.totalOut / p.count),
+    avgLatencyMs: Math.round(p.totalLat / p.count),
+    runCount: p.count,
+  }));
+}
+
+/**
  * Record suppression events from R2+ post-processing.
  */
 export async function recordSuppressionEvents(runId, suppressionResult) {

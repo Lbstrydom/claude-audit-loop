@@ -58,6 +58,7 @@ const CORE_SCRIPTS = [
   'scripts/lib/findings-tracker.mjs',
   'scripts/lib/findings-outcomes.mjs',
   'scripts/lib/findings-tasks.mjs',
+  'scripts/lib/outcome-sync.mjs',
   'scripts/lib/config.mjs',
   'scripts/lib/llm-auditor.mjs',
   'scripts/lib/llm-wrappers.mjs',
