@@ -24,6 +24,7 @@ node_modules/
 .audit/pipeline-state.json
 .audit/session-ledger.json
 .audit/meta-assessments.jsonl
+.audit/session-audit-*.json
 
 # Per-run audit artifacts (results, transcripts, rebuttals)
 .audit/*-result.json
