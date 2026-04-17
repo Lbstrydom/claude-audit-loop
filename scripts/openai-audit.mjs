@@ -31,7 +31,7 @@ import path from 'node:path';
 import OpenAI from 'openai';
 import { z } from 'zod';
 import { zodTextFormat } from 'openai/helpers/zod';
-import { FindingSchema, ProducerFindingSchema, WiringIssueSchema, LedgerEntrySchema } from './lib/schemas.mjs';
+import { FindingSchema, ProducerFindingSchema, WiringIssueSchema, LedgerEntrySchema, ReduceStatus, ExecutionMetaSchema } from './lib/schemas.mjs';
 import {
   safeInt, readFileOrDie, readFilesAsContext, readFilesAsAnnotatedContext,
   writeOutput, normalizePath, parseDiffFile, extractPlanPaths, classifyFiles
@@ -46,6 +46,7 @@ import {
   buildDependencyGraph, REDUCE_SYSTEM_PROMPT, measureContextChars
 } from './lib/code-analysis.mjs';
 import { semanticId, formatFindings, appendOutcome, loadOutcomes, FalsePositiveTracker } from './lib/findings.mjs';
+import { PlanFpTracker } from './lib/plan-fp-tracker.mjs';
 import {
   generateRepoProfile, initAuditBrief, readProjectContext, readProjectContextForPass,
   extractPlanForPass, buildHistoryContext, loadSessionCache, saveSessionCache
@@ -61,7 +62,8 @@ import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
 import {
   LlmError, classifyLlmError, buildReducePayload, normalizeFindingsForOutput as _normalizeFindingsForOutput,
   resolveLedgerPath, MAX_REDUCE_JSON_CHARS, MAP_FAILURE_THRESHOLD, RETRY_MAX_ATTEMPTS,
-  RETRY_BASE_DELAY_MS, RETRY_429_MAX_DELAY_MS, SEV_ORDER
+  RETRY_BASE_DELAY_MS, RETRY_429_MAX_DELAY_MS, SEV_ORDER,
+  tryRepairJson, computePassLimits, AUDIT_DIR, SESSION_MANIFEST_PREFIX, SESSION_LEDGER_FILE
 } from './lib/robustness.mjs';
 import {
   PASS_PROMPTS,
@@ -144,55 +146,7 @@ function shouldMapReduceHighReasoning(files) {
   return totalChars > HIGH_REASONING_MAP_REDUCE_TOKEN_THRESHOLD;
 }
 
-// ── Adaptive Sizing ────────────────────────────────────────────────────────────
-
-/**
- * Compute per-pass token limits and timeouts based on actual file content size.
- * This makes the script portable across codebases — a 3-file project gets small
- * limits, a 30-file project gets large ones, all within hard ceilings.
- *
- * Heuristics (calibrated from live GPT-5.4 runs):
- *   - ~4 chars per token (input estimation)
- *   - reasoning: high uses ~40-60% of output tokens for thinking
- *   - GPT-5.4 generates ~150-250 tokens/sec depending on reasoning effort
- *   - Each finding in the schema is ~200-400 output tokens
- *
- * @param {number} contextChars - Total chars being sent as user prompt
- * @param {string} reasoning - 'low' | 'medium' | 'high'
- * @returns {{ maxTokens: number, timeoutMs: number }}
- */
-function computePassLimits(contextChars, reasoning = 'high') {
-  const estimatedInputTokens = Math.ceil(contextChars / 4);
-
-  // Reasoning multiplier: high reasoning needs more output tokens for thinking
-  const reasoningMultiplier = reasoning === 'high' ? 0.4 : reasoning === 'medium' ? 0.25 : 0.1;
-
-  // Output tokens: base for findings + proportional to input size for reasoning
-  // High reasoning needs a higher base because ~60% of tokens go to internal thinking
-  // Minimum: low=4000, medium=6000, high=10000
-  const baseOutputTokens = reasoning === 'high' ? 10000 : reasoning === 'medium' ? 6000 : 4000;
-  const reasoningOverhead = Math.ceil(estimatedInputTokens * reasoningMultiplier);
-  const maxTokens = Math.min(
-    MAX_OUTPUT_TOKENS_CAP,
-    baseOutputTokens + reasoningOverhead
-  );
-
-  // Timeout: based on expected generation speed + reasoning overhead
-  // GPT-5.4 with reasoning: high spends 90-150s thinking BEFORE output starts
-  // low: ~250 tok/s, medium: ~150 tok/s, high: ~100 tok/s (conservative — includes reasoning pauses)
-  const tokensPerSec = reasoning === 'high' ? 100 : reasoning === 'medium' ? 150 : 250;
-  const estimatedGenerationSec = maxTokens / tokensPerSec;
-  // Reasoning think-time floor: high=150s, medium=60s, low=30s (before output starts)
-  // Calibrated from real audit runs: 15K token input + high reasoning routinely takes 200s+
-  const reasoningFloorSec = reasoning === 'high' ? 150 : reasoning === 'medium' ? 60 : 30;
-  const minTimeoutMs = (reasoningFloorSec + 60) * 1000; // floor + generous network buffer
-  const timeoutMs = Math.min(
-    TIMEOUT_MS_CAP,
-    Math.max(minTimeoutMs, Math.ceil((estimatedGenerationSec + reasoningFloorSec) * 1000))
-  );
-
-  return { maxTokens, timeoutMs };
-}
+// computePassLimits imported from lib/robustness.mjs (canonical owner)
 
 // ── Schemas (FindingSchema imported from shared.mjs) ─────────────────────────
 
@@ -423,8 +377,19 @@ async function _callGPTOnce(openai, { systemPrompt, userPrompt, schema, schemaNa
       }
     }
 
-    const result = response.output_parsed;
-    if (!result) throw new LlmError('No parsed output from model', { category: 'empty', usage });
+    let result = response.output_parsed;
+    if (!result) {
+      // Attempt bracket-balance repair on raw text before giving up
+      const rawText = response.output?.find(o => o.type === 'output_text')?.text ?? '';
+      if (rawText) {
+        const repairAttempt = tryRepairJson(rawText);
+        if (repairAttempt.ok) {
+          process.stderr.write(`  [${passName ?? 'call'}] output_parsed null — repaired truncated JSON\n`);
+          result = repairAttempt.result;
+        }
+      }
+      if (!result) throw new LlmError('No parsed output from model', { category: 'empty', usage });
+    }
 
     // Validate expected shape
     if (result.findings !== undefined && !Array.isArray(result.findings)) {
@@ -520,6 +485,35 @@ function normalizeFindingsForOutput(findings) {
   return _normalizeFindingsForOutput(findings, semanticId);
 }
 
+// ── Ledger Preflight ─────────────────────────────────────────────────────────
+
+/**
+ * Validate the R2+ ledger before running suppression.
+ * Returns { valid, suppressionUnavailable?, entryCount? }.
+ * A missing or corrupt ledger sets suppressionUnavailable=true so the caller
+ * can propagate the flag into _executionMeta without crashing.
+ */
+function validateLedgerForR2(ledgerPath, round) {
+  if (round < 2) return { valid: true };
+  if (!ledgerPath) {
+    process.stderr.write('  [ledger] WARNING: R2 started with no ledger — running without suppression\n');
+    return { valid: false, suppressionUnavailable: true };
+  }
+  if (!fs.existsSync(ledgerPath)) {
+    process.stderr.write(`  [ledger] WARNING: Ledger not found at ${ledgerPath} — running without suppression\n`);
+    return { valid: false, suppressionUnavailable: true };
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
+    if (!raw.entries || !Array.isArray(raw.entries)) throw new Error('missing entries array');
+    process.stderr.write(`  [ledger] R2 ledger valid — ${raw.entries.length} prior entries\n`);
+    return { valid: true, entryCount: raw.entries.length };
+  } catch (err) {
+    process.stderr.write(`  [ledger] WARNING: Ledger corrupted (${err.message}) — running without suppression\n`);
+    return { valid: false, suppressionUnavailable: true };
+  }
+}
+
 // ── Map-Reduce Pass ──────────────────────────────────────────────────────────
 
 /**
@@ -535,8 +529,8 @@ function normalizeFindingsForOutput(findings) {
  * @param {string} passName - Name of the pass (for logging)
  * @returns {Promise<{result: object, usage: object, latencyMs: number}>}
  */
-async function runMapReducePass(openai, files, systemPrompt, projectBrief, planContent, passName) {
-  const units = buildAuditUnits(files);
+async function runMapReducePass(openai, files, systemPrompt, projectBrief, planContent, passName, maxFilesPerUnit = Infinity) {
+  const units = buildAuditUnits(files, 30000, maxFilesPerUnit);
 
   // MAP phase: parallel calls with concurrency limit
   const CONCURRENCY_LIMIT = safeInt(process.env.MAP_REDUCE_CONCURRENCY, 5);
@@ -647,8 +641,8 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
   }
 
   // Reduce uses low reasoning — it's dedup/ranking, not deep analysis. Higher timeout for large finding sets.
-  const reduceLimits = computePassLimits(findingsJson.length + 2000, 'low');
-  reduceLimits.timeoutMs = Math.max(reduceLimits.timeoutMs, 180000); // Min 3 min for reduce
+  const reduceLimits = computePassLimits(findingsJson.length + 2000, 'low', openaiConfig.reduceMinTokens);
+  reduceLimits.timeoutMs = Math.max(reduceLimits.timeoutMs, 240000); // Min 4 min for reduce (frontend/backend sets can be large)
   const reduceResult = await safeCallGPT(openai, {
     systemPrompt: REDUCE_SYSTEM_PROMPT,
     userPrompt: `## Findings from ${units.length} audit units (${effectiveFailures} failed):\n\n${findingsJson}\n\n## Tasks:\n1. Deduplicate\n2. Elevate systemic patterns (3+ occurrences)\n3. Flag cross-file issues\n4. Rank by severity`,
@@ -658,6 +652,25 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
     ...reduceLimits,
     passName: `reduce-${passName}`
   }, { pass_name: passName, findings: allFindings, quick_fix_warnings: [], summary: 'Reduce phase failed — returning raw map findings' });
+
+  // Status-gated fallback: if safeCallGPT returned the empty-result sentinel (failed=true),
+  // classify the failure and preserve raw MAP findings rather than silently discarding them.
+  const reduceStatus = reduceResult._reduceStatus ?? (reduceResult.failed ? ReduceStatus.MODEL_ERROR : ReduceStatus.OK);
+  if (reduceStatus !== ReduceStatus.OK && allFindings.length > 0) {
+    process.stderr.write(`  [${passName}] REDUCE failed (${reduceStatus}) — preserving ${allFindings.length} raw MAP findings\n`);
+    const totalLatency = Date.now() - mapStart;
+    return {
+      result: {
+        pass_name: passName,
+        findings: normalizeFindingsForOutput(allFindings),
+        quick_fix_warnings: [],
+        summary: `REDUCE failed (${reduceStatus}) — ${allFindings.length} raw findings preserved`,
+        _executionMeta: { reduceStatus, reduceSkipped: true },
+      },
+      usage: { ...mapUsage, latency_ms: totalLatency },
+      latencyMs: totalLatency,
+    };
+  }
 
   const totalLatency = Date.now() - mapStart;
   return {
@@ -777,9 +790,14 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   // ── R2+ initialization ──────────────────────────────────────────────────────
   const isR2Plus = round >= 2;
   let ledger = null, diffMap = null, impactSet = [];
+  let suppressionUnavailable = false;
 
   if (isR2Plus) {
     process.stderr.write(`\n═══ R${round} MODE ═══\n`);
+
+    // Preflight: validate ledger before relying on it for suppression
+    const ledgerValidation = validateLedgerForR2(ledgerFile, round);
+    if (!ledgerValidation.valid) suppressionUnavailable = true;
 
     // Load ledger
     if (ledgerFile) {
@@ -789,6 +807,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       } catch (err) {
         process.stderr.write(`  [ledger] Failed: ${err.message} — proceeding without suppression\n`);
         ledger = { version: 1, entries: [] };
+        suppressionUnavailable = true;
       }
     } else {
       process.stderr.write(`  [ledger] No --ledger provided; R2+ suppression disabled\n`);
@@ -964,7 +983,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-routes', impactSet))
             : PASS_BACKEND_SYSTEM) + focusBlock;
           wave2Promises.push(
-            runMapReducePass(openai, effectiveRoutes, beRoutesSystemPrompt, beCtx, bePlan, 'be-routes')
+            runMapReducePass(openai, effectiveRoutes, beRoutesSystemPrompt, beCtx, bePlan, 'be-routes', openaiConfig.backendMaxFilesPerUnit)
           );
         } else {
           const limits = computePassLimits(baseContextChars + measureContextChars(effectiveRoutes, 8000) + sharedContext.length, 'high');
@@ -993,7 +1012,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
             ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'be-services', impactSet))
             : PASS_BACKEND_SYSTEM) + focusBlock;
           wave2Promises.push(
-            runMapReducePass(openai, effectiveServices, beServicesSystemPrompt, beCtx, bePlan, 'be-services')
+            runMapReducePass(openai, effectiveServices, beServicesSystemPrompt, beCtx, bePlan, 'be-services', openaiConfig.backendMaxFilesPerUnit)
           );
         } else {
           const limits = computePassLimits(baseContextChars + measureContextChars(effectiveServices, 8000), 'high');
@@ -1022,7 +1041,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
           ? buildR2SystemPrompt(PASS_BACKEND_RUBRIC, buildRulingsBlock(ledgerFile, 'backend', impactSet))
           : PASS_BACKEND_SYSTEM) + focusBlock;
         wave2Promises.push(
-          runMapReducePass(openai, effectiveBackend, beSystemPrompt, beCtx, bePlan, 'backend')
+          runMapReducePass(openai, effectiveBackend, beSystemPrompt, beCtx, bePlan, 'backend', openaiConfig.backendMaxFilesPerUnit)
         );
       } else {
         const limits = computePassLimits(baseContextChars + measureContextChars(effectiveBackend, 8000) + sharedContext.length, 'high');
@@ -1056,7 +1075,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       const feCtx = readProjectContextForPass('frontend');
       const fePlan = extractPlanForPass(planContent, 'frontend');
       wave2Promises.push(
-        runMapReducePass(openai, effectiveFrontend, feSystemPrompt, feCtx, fePlan, 'frontend')
+        runMapReducePass(openai, effectiveFrontend, feSystemPrompt, feCtx, fePlan, 'frontend', openaiConfig.frontendMaxFilesPerUnit)
       );
     } else {
       const limits = computePassLimits(baseContextChars + measureContextChars(effectiveFrontend, 10000) + sharedContext.length, 'high');
@@ -1478,7 +1497,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     overall_reasoning: summaryLines.join('\n'),
     _pass_timings: passTimings,
     _failed_passes: failedPasses.length > 0 ? failedPasses : undefined,
-    _usage: totalUsage
+    _usage: totalUsage,
+    _executionMeta: suppressionUnavailable ? { suppressionUnavailable: true } : undefined,
   };
 
   // Attach data accumulated before mergedResult was defined (var hoisting avoids TDZ)
@@ -1576,6 +1596,45 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       sessionCacheHit,
       mapReducePasses: mapReducePasses.length > 0 ? mapReducePasses : null,
     }).catch(e => process.stderr.write(`  [learning] recordRunComplete: ${e.message}\n`));
+  }
+
+  // P0-B: Session manifest + meta (written by openai-audit.mjs, not audit-loop.mjs)
+  // debtRunId is the stable SID for this session (audit-<timestamp>).
+  const sid = debtRunId;
+  mergedResult._sid = sid;
+
+  // Always increment runsSinceDebtReview in the stable session ledger
+  try {
+    fs.mkdirSync(path.resolve(AUDIT_DIR), { recursive: true });
+    const sessionLedgerPath = path.resolve(AUDIT_DIR, SESSION_LEDGER_FILE);
+    let currentRuns = 0;
+    try {
+      const sessionData = JSON.parse(fs.readFileSync(sessionLedgerPath, 'utf-8'));
+      currentRuns = sessionData?.meta?.runsSinceDebtReview ?? 0;
+    } catch { /* file absent or unreadable — start from 0 */ }
+    batchWriteLedger(sessionLedgerPath, [], {
+      meta: { runsSinceDebtReview: currentRuns + 1 },
+      targetMetaPath: sessionLedgerPath,
+    });
+  } catch (err) {
+    process.stderr.write(`  [session] meta update failed (non-blocking): ${err.message}\n`);
+  }
+
+  // Write SID-scoped session manifest so R2 can resolve the ledger path
+  if (round === 1 && ledgerFile) {
+    try {
+      const manifestPath = path.resolve(AUDIT_DIR, `${SESSION_MANIFEST_PREFIX}${sid}.json`);
+      const manifest = {
+        sid,
+        ledgerPath: ledgerFile,
+        startedAt: new Date().toISOString(),
+        round: 1,
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      process.stderr.write(`  [session] manifest written: ${manifestPath}\n`);
+    } catch (err) {
+      process.stderr.write(`  [session] manifest write failed (non-blocking): ${err.message}\n`);
+    }
   }
 
   // 6. Output
@@ -1887,6 +1946,22 @@ async function main() {
       systemPrompt, userPrompt, schema, schemaName,
       passName: mode
     });
+
+    // Plan mode: suppress recurring scope-pressure findings via PlanFpTracker
+    if (mode === 'plan' && Array.isArray(result.findings)) {
+      try {
+        const planFpTracker = new PlanFpTracker().load();
+        const before = result.findings.length;
+        result.findings = result.findings.filter(f => {
+          const text = `${f.category} ${f.detail || ''}`.trim();
+          const suppress = planFpTracker.shouldSuppress(text);
+          if (suppress) process.stderr.write(`  [plan-fp] Suppressed recurring: ${f.id} — ${f.category}\n`);
+          return !suppress;
+        });
+        const suppressed = before - result.findings.length;
+        if (suppressed > 0) process.stderr.write(`  [plan-fp] Suppressed ${suppressed} recurring scope-pressure findings\n`);
+      } catch { /* tracker unavailable — proceed without suppression */ }
+    }
 
     // Plan mode R2+: post-output suppression (same as code mode Layer 3)
     if (mode === 'plan' && round >= 2 && ledgerPath && Array.isArray(result.findings)) {

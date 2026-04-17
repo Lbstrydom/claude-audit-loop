@@ -8,9 +8,10 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import lockfile from 'proper-lockfile';
 
 import { normalizePath, atomicWriteFileSync } from './file-io.mjs';
-import { LedgerEntrySchema, AdjudicationLedgerSchema } from './schemas.mjs';
+import { LedgerEntrySchema, BatchLedgerEntrySchema } from './schemas.mjs';
 import { semanticId } from './findings.mjs';
 import { buildFileReferenceRegex } from './language-profiles.mjs';
 
@@ -59,18 +60,15 @@ export function writeLedgerEntry(ledgerPath, entry) {
   if (fs.existsSync(absPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(absPath, 'utf-8'));
-      const ledgerValidated = AdjudicationLedgerSchema.safeParse(raw);
-      if (ledgerValidated.success) {
-        ledger = ledgerValidated.data;
+      // Structural check only — strict schema validation rejects batch entries with
+      // adjudicationOutcome:'pending' (pre-adjudication state), causing false warnings.
+      // We only need version + entries array to be present; individual entry shape is
+      // validated at write time by LedgerEntrySchema / BatchLedgerEntrySchema.
+      if (raw && typeof raw === 'object' && Array.isArray(raw.entries)) {
+        ledger = raw;
       } else {
-        // Graceful: accept structurally valid ledgers even if individual entries are slightly off
-        if (raw && Array.isArray(raw.entries)) {
-          process.stderr.write(`  [ledger] WARNING: ${absPath} has schema warnings — using as-is\n`);
-          ledger = raw;
-        } else {
-          process.stderr.write(`  [ledger] WARNING: ${absPath} has invalid structure — backing up and starting fresh\n`);
-          fs.copyFileSync(absPath, `${absPath}.bak`);
-        }
+        process.stderr.write(`  [ledger] WARNING: ${absPath} has invalid structure — backing up and starting fresh\n`);
+        fs.copyFileSync(absPath, `${absPath}.bak`);
       }
     } catch (err) {
       process.stderr.write(`  [ledger] WARNING: ${absPath} corrupted — backing up and starting fresh: ${err.message}\n`);
@@ -103,62 +101,94 @@ export function writeLedgerEntry(ledgerPath, entry) {
  * Invalid entries are returned in `rejected[]` with a per-entry reason — the caller
  * decides whether to proceed or fail. Never silently drops data.
  *
+ * When `targetMetaPath` is set and `meta` is non-null, performs a locked
+ * read-modify-write on `targetMetaPath` to merge the meta fields into the
+ * existing `meta` block. Uses proper-lockfile for concurrent write safety and
+ * atomicWriteFileSync for crash safety.
+ *
  * @param {string} ledgerPath - Path to ledger JSON file
  * @param {object[]} entries - Array of LedgerEntry-shaped objects
+ * @param {object} [opts]
+ * @param {object|null} [opts.meta] - Meta fields to merge into targetMetaPath
+ * @param {string|null} [opts.targetMetaPath] - Path to session ledger for meta updates
  * @returns {{ inserted: number, updated: number, total: number, rejected: Array<{entry:object,reason:string}> }}
  * @throws {Error} on permission errors or corrupt ledger
  */
-export function batchWriteLedger(ledgerPath, entries) {
-  let ledger = { version: 1, entries: [] };
-
+/** Read ledger JSON from disk; returns default shape on ENOENT, throws on other errors. */
+function readLedgerJson(absPath) {
   try {
-    const raw = fs.readFileSync(path.resolve(ledgerPath), 'utf-8');
+    const raw = fs.readFileSync(absPath, 'utf-8');
     const parsed = JSON.parse(raw);
     if (!parsed.entries || !Array.isArray(parsed.entries)) {
       throw new Error('Corrupted ledger: missing entries array');
     }
-    ledger = parsed;
+    return parsed;
   } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
+    if (err.code === 'ENOENT') return { version: 1, entries: [] };
+    throw err;
   }
+}
 
+/** Upsert one entry into a topicId→entry map. Returns 'inserted' | 'updated' | 'rejected'. */
+function upsertEntry(byTopic, entry) {
+  const validated = BatchLedgerEntrySchema.safeParse(entry);
+  if (!validated.success) {
+    return { status: 'rejected', reason: validated.error.message.slice(0, 200) };
+  }
+  const validEntry = validated.data;
+  if (byTopic.has(validEntry.topicId)) {
+    const existing = byTopic.get(validEntry.topicId);
+    byTopic.set(validEntry.topicId, {
+      ...existing,
+      lastSeenRound: validEntry.round,
+      latestFindingId: validEntry.findingId,
+      detail: validEntry.detail,
+      severity: validEntry.severity,
+      adjudicationOutcome: existing.adjudicationOutcome,
+      remediationState: existing.remediationState,
+      ruling: existing.ruling,
+      rulingRationale: existing.rulingRationale,
+      firstSeenRound: existing.firstSeenRound ?? existing.round ?? validEntry.round
+    });
+    return { status: 'updated' };
+  }
+  byTopic.set(validEntry.topicId, { ...validEntry, firstSeenRound: validEntry.round, lastSeenRound: validEntry.round });
+  return { status: 'inserted' };
+}
+
+/** Locked read-modify-write of the meta block in a session ledger file. */
+function mergeMetaLocked(absMetaPath, meta) {
+  if (!fs.existsSync(absMetaPath)) {
+    atomicWriteFileSync(absMetaPath, JSON.stringify({ version: 1, meta: {}, entries: [] }, null, 2));
+  }
+  let release;
+  try {
+    release = lockfile.lockSync(absMetaPath, { stale: 10000 });
+    let existing;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(absMetaPath, 'utf-8'));
+      existing = (parsed && typeof parsed === 'object') ? parsed : { version: 1, meta: {}, entries: [] };
+    } catch {
+      existing = { version: 1, meta: null, entries: [] };
+    }
+    existing.meta = { ...(existing.meta ?? {}), ...meta };
+    atomicWriteFileSync(absMetaPath, JSON.stringify(existing, null, 2));
+  } finally {
+    if (release) release();
+  }
+}
+
+export function batchWriteLedger(ledgerPath, entries, { meta = null, targetMetaPath = null } = {}) {
+  const ledger = readLedgerJson(path.resolve(ledgerPath));
   const byTopic = new Map(ledger.entries.map(e => [e.topicId, e]));
   const rejected = [];
   let inserted = 0, updated = 0;
 
   for (const entry of entries) {
-    if (!entry.topicId) {
-      rejected.push({ entry, reason: 'missing topicId' });
-      continue;
-    }
-    if (!entry.severity || !entry.adjudicationOutcome) {
-      rejected.push({ entry, reason: 'missing severity or adjudicationOutcome' });
-      continue;
-    }
-
-    if (byTopic.has(entry.topicId)) {
-      const existing = byTopic.get(entry.topicId);
-      byTopic.set(entry.topicId, {
-        ...existing,
-        lastSeenRound: entry.round,
-        latestFindingId: entry.findingId,
-        detail: entry.detail,
-        severity: entry.severity,
-        adjudicationOutcome: existing.adjudicationOutcome,
-        remediationState: existing.remediationState,
-        ruling: existing.ruling,
-        rulingRationale: existing.rulingRationale,
-        firstSeenRound: existing.firstSeenRound ?? existing.round ?? entry.round
-      });
-      updated++;
-    } else {
-      byTopic.set(entry.topicId, {
-        ...entry,
-        firstSeenRound: entry.round,
-        lastSeenRound: entry.round
-      });
-      inserted++;
-    }
+    const { status, reason } = upsertEntry(byTopic, entry);
+    if (status === 'rejected') { rejected.push({ entry, reason }); continue; }
+    if (status === 'inserted') inserted++;
+    else updated++;
   }
 
   ledger.entries = [...byTopic.values()];
@@ -166,6 +196,11 @@ export function batchWriteLedger(ledgerPath, entries) {
     throw new Error('Ledger integrity check failed: entry without topicId');
   }
   atomicWriteFileSync(path.resolve(ledgerPath), JSON.stringify(ledger, null, 2));
+
+  if (targetMetaPath && meta) {
+    mergeMetaLocked(path.resolve(targetMetaPath), meta);
+  }
+
   return { inserted, updated, total: ledger.entries.length, rejected };
 }
 

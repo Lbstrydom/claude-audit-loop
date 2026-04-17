@@ -195,9 +195,10 @@ export function buildDependencyGraph(files, langContext = null) {
  * Files exceeding the budget are chunked by function boundaries.
  * @param {string[]} files - File paths to group
  * @param {number} [maxTokensPerUnit=30000] - Maximum tokens per audit unit
+ * @param {number} [maxFilesPerUnit=Infinity] - Maximum files per audit unit (additive cap on top of token limit)
  * @returns {Array<{files: string[], tokens: number, chunk?: object, strategy?: string}>}
  */
-export function buildAuditUnits(files, maxTokensPerUnit = 30000) {
+export function buildAuditUnits(files, maxTokensPerUnit = 30000, maxFilesPerUnit = Infinity) {
   // Score and sort files
   const scored = files.map(f => {
     const absPath = path.resolve(f);
@@ -210,7 +211,7 @@ export function buildAuditUnits(files, maxTokensPerUnit = 30000) {
   let current = { files: [], tokens: 0 };
 
   for (const file of scored) {
-    if (current.tokens + file.tokens > maxTokensPerUnit && current.files.length > 0) {
+    if ((current.tokens + file.tokens > maxTokensPerUnit || current.files.length >= maxFilesPerUnit) && current.files.length > 0) {
       units.push(current);
       current = { files: [], tokens: 0 };
     }

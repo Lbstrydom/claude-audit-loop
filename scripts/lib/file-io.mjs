@@ -162,8 +162,109 @@ export function readFilesAsContext(filePaths, { maxPerFile = 10000, maxTotal = 1
   return total;
 }
 
+// ── Diff Annotation Helpers ─────────────────────────────────────────────────
+
+/**
+ * File extensions that support inline block-comment markers (/* ... * /).
+ * JS/TS/CSS/Python/Go/Rust/Java/Ruby/Shell/C-family files get inline UNCHANGED markers.
+ */
+const CODE_EXTS = new Set(['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'go', 'rs', 'java', 'rb', 'sh', 'css', 'scss', 'c', 'cpp', 'h']);
+
+/**
+ * File extensions that cannot embed comment syntax — use header-only annotation.
+ * Line numbers are injected into the left margin instead.
+ */
+const HEADER_ONLY_EXTS = new Set(['json', 'yaml', 'yml', 'md', 'markdown', 'html', 'htm', 'xml', 'txt', 'toml', 'ini']);
+
+/**
+ * Route a file to its annotation style based on extension.
+ * @param {string} relPath
+ * @returns {'block' | 'header-only'}
+ */
+function getCommentStyle(relPath) {
+  const ext = relPath.split('.').pop()?.toLowerCase() ?? '';
+  if (CODE_EXTS.has(ext)) return 'block';
+  if (HEADER_ONLY_EXTS.has(ext)) return 'header-only';
+  return 'block'; // default to block for unknown extensions
+}
+
+/**
+ * Annotate a code file (JS/TS/Python/etc.) with inline block-comment markers.
+ * Unchanged regions get UNCHANGED CONTEXT markers; changed hunks get CHANGED markers.
+ * @param {string} raw - Raw file content
+ * @param {Array<{startLine: number, lineCount: number}>} sortedHunks - Hunks sorted ascending
+ * @returns {{ content: string, headerAnnotation: string }}
+ */
+function _annotateBlockStyle(raw, sortedHunks) {
+  const lines = raw.split('\n');
+  const annotated = [];
+  let cursor = 0; // 0-indexed line position
+
+  for (const hunk of sortedHunks) {
+    const hunkStart = Math.max(hunk.startLine - 1, 0); // convert to 0-indexed
+    const hunkEnd = Math.min(hunkStart + hunk.lineCount, lines.length);
+
+    // Unchanged region before this hunk
+    if (cursor < hunkStart) {
+      annotated.push(
+        '/* ━━━━ UNCHANGED CONTEXT — DO NOT FLAG ━━━━ */',
+        ...lines.slice(cursor, hunkStart),
+        '/* ━━━━ END UNCHANGED CONTEXT ━━━━ */'
+      );
+    }
+
+    // Changed region
+    annotated.push(
+      '// ── CHANGED ──',
+      ...lines.slice(hunkStart, hunkEnd),
+      '// ── END CHANGED ──'
+    );
+    cursor = hunkEnd;
+  }
+
+  // Trailing unchanged region after last hunk
+  if (cursor < lines.length) {
+    annotated.push(
+      '/* ━━━━ UNCHANGED CONTEXT — DO NOT FLAG ━━━━ */',
+      ...lines.slice(cursor),
+      '/* ━━━━ END UNCHANGED CONTEXT ━━━━ */'
+    );
+  }
+
+  return { content: annotated.join('\n'), headerAnnotation: ' [CHANGED]' };
+}
+
+/**
+ * Annotate a non-code file (JSON/YAML/Markdown/HTML) with line-number margins
+ * and a header annotation listing the changed line ranges.
+ * @param {string} raw - Raw file content
+ * @param {Array<{startLine: number, lineCount: number}>} sortedHunks - Hunks sorted ascending
+ * @returns {{ content: string, headerAnnotation: string }}
+ */
+function _annotateHeaderOnlyStyle(raw, sortedHunks) {
+  const numberedLines = raw.split('\n').map((line, i) => `${String(i + 1).padStart(4, ' ')} | ${line}`);
+  const totalLines = numberedLines.length;
+  const changedRanges = sortedHunks
+    .map(h => `${h.startLine}-${Math.min(h.startLine + h.lineCount - 1, totalLines)}`)
+    .join(', ');
+  return {
+    content: numberedLines.join('\n'),
+    headerAnnotation: ` [CHANGED — LINES ${changedRanges} — REVIEW ONLY THESE LINES]`,
+  };
+}
+
 /**
  * Wraps readFilesAsContext with diff-based change markers.
+ *
+ * For code files (JS/TS/Python/etc.): wraps unchanged regions with
+ *   /* ━━━━ UNCHANGED CONTEXT — DO NOT FLAG ━━━━ * / markers, and changed
+ *   hunks with // ── CHANGED ── / // ── END CHANGED ── markers.
+ *
+ * For non-code files (JSON/YAML/Markdown/HTML): injects 4-char line numbers
+ *   into the left margin and annotates the block header with changed line ranges.
+ *
+ * Files without diff entries are passed through unchanged.
+ *
  * @param {string[]} filePaths - Files to read
  * @param {Map} diffMap - Output of parseDiffFile()
  * @param {object} opts
@@ -177,43 +278,51 @@ export function readFilesAsAnnotatedContext(filePaths, diffMap, { maxPerFile = 1
   const cwdBoundary = path.resolve('.');
 
   for (const relPath of filePaths) {
-    if (isSensitiveFile(relPath)) continue;
-    const absPath = path.resolve(relPath);
-    if (!absPath.startsWith(cwdBoundary) || !fs.existsSync(absPath)) continue;
-
-    let raw = fs.readFileSync(absPath, 'utf-8');
-    const ext = relPath.split('.').pop();
-    const lang = { sql: 'sql', css: 'css', html: 'html', md: 'markdown', json: 'json', py: 'python', rs: 'rust', go: 'go', java: 'java', rb: 'ruby', sh: 'bash' }[ext] ?? 'js';
-
-    // Apply diff annotations if this file has changes
-    const normPath = normalizePath(relPath);
-    const diffInfo = diffMap?.get(normPath);
-    if (diffInfo && diffInfo.hunks.length > 0) {
-      const lines = raw.split('\n');
-      // Insert markers (reverse order to preserve line numbers)
-      const sortedHunks = [...diffInfo.hunks].sort((a, b) => b.startLine - a.startLine);
-      for (const hunk of sortedHunks) {
-        const endLine = Math.min(hunk.startLine + hunk.lineCount - 1, lines.length);
-        const startIdx = Math.max(hunk.startLine - 1, 0);
-        lines.splice(endLine, 0, '// ── END CHANGED ──');
-        lines.splice(startIdx, 0, '// ── CHANGED ──');
-      }
-      raw = lines.join('\n');
-    }
-
-    const content = raw.length > maxPerFile
-      ? raw.slice(0, maxPerFile) + `\n... [TRUNCATED — ${raw.length} chars total]`
-      : raw;
-
-    const annotation = diffInfo ? ' [CHANGED]' : '';
-    const block = `### ${relPath}${annotation}\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
-
+    const block = _buildFileBlock(relPath, diffMap, cwdBoundary, maxPerFile);
+    if (block === null) continue; // sensitive or out-of-bounds
     if (total.length + block.length > maxTotal) { omitted++; continue; }
     total += block;
   }
 
   if (omitted > 0) total += `\n... [${omitted} file(s) omitted — context budget reached]\n`;
   return total;
+}
+
+/**
+ * Build the fenced code block string for a single file, applying diff annotations.
+ * Returns null when the file should be skipped (sensitive, out-of-bounds, missing).
+ * @param {string} relPath
+ * @param {Map|undefined} diffMap
+ * @param {string} cwdBoundary
+ * @param {number} maxPerFile
+ * @returns {string|null}
+ */
+function _buildFileBlock(relPath, diffMap, cwdBoundary, maxPerFile) {
+  if (isSensitiveFile(relPath)) return null;
+  const absPath = path.resolve(relPath);
+  if (!absPath.startsWith(cwdBoundary) || !fs.existsSync(absPath)) return null;
+
+  let raw = fs.readFileSync(absPath, 'utf-8');
+  const ext = relPath.split('.').pop();
+  const lang = { sql: 'sql', css: 'css', html: 'html', md: 'markdown', json: 'json', py: 'python', rs: 'rust', go: 'go', java: 'java', rb: 'ruby', sh: 'bash' }[ext] ?? 'js';
+
+  const diffInfo = diffMap?.get(normalizePath(relPath));
+  let headerAnnotation = '';
+
+  if (diffInfo && diffInfo.hunks.length > 0) {
+    const sortedHunks = [...diffInfo.hunks].sort((a, b) => a.startLine - b.startLine);
+    const { content, headerAnnotation: ha } = getCommentStyle(relPath) === 'block'
+      ? _annotateBlockStyle(raw, sortedHunks)
+      : _annotateHeaderOnlyStyle(raw, sortedHunks);
+    raw = content;
+    headerAnnotation = ha;
+  }
+
+  const content = raw.length > maxPerFile
+    ? raw.slice(0, maxPerFile) + `\n... [TRUNCATED — ${raw.length} chars total]`
+    : raw;
+
+  return `### ${relPath}${headerAnnotation}\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
 }
 
 // ── File Path Extraction ────────────────────────────────────────────────────
@@ -300,7 +409,7 @@ export function extractPlanPaths(planContent) {
 
   const found = [];
   const missing = [];
-  for (const p of [...resolved.values()].sort()) {
+  for (const p of [...resolved.values()].sort((a, b) => a.localeCompare(b))) {
     (fs.existsSync(path.resolve(p)) ? found : missing).push(p);
   }
   return { found, missing, allPaths: new Set(resolved.values()) };

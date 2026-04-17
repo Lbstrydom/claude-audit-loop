@@ -85,6 +85,12 @@ export const openaiConfig = Object.freeze({
   // These time out at ~36% on Windows with single 280s calls — split earlier.
   highReasoningMapReduceThreshold: safeInt(process.env.OPENAI_AUDIT_HIGH_REASONING_MAP_REDUCE_THRESHOLD, 8),
   highReasoningMapReduceTokenThreshold: safeInt(process.env.OPENAI_AUDIT_HIGH_REASONING_MAP_REDUCE_TOKEN_THRESHOLD, 25000),
+  // P1-B: Per-unit file caps for frontend/backend map-reduce passes.
+  // Prevents single large files from saturating a unit and causing timeouts.
+  frontendMaxFilesPerUnit: safeInt(process.env.OPENAI_AUDIT_FRONTEND_MAX_FILES_PER_UNIT, 4),
+  backendMaxFilesPerUnit: safeInt(process.env.OPENAI_AUDIT_BACKEND_MAX_FILES_PER_UNIT, 6),
+  // P1-B: Minimum token floor for reduce computePassLimits to prevent reduce starvation.
+  reduceMinTokens: safeInt(process.env.OPENAI_AUDIT_REDUCE_MIN_TOKENS, 10000),
 });
 
 // ── Gemini / Final Review Config ────────────────────────────────────────────

@@ -161,10 +161,29 @@ export const LedgerEntrySchema = z.object({
   resolvedRound: z.number(),
 });
 
+/**
+ * Minimal schema for batch-ledger write entries (pre-adjudication).
+ * Less strict than LedgerEntrySchema — entries may not yet have ruling/rationale.
+ * Addresses H9: both write paths now validate against formal schemas.
+ */
+export const BatchLedgerEntrySchema = z.object({
+  topicId: z.string().min(1),
+  severity: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+  findingId: z.string().optional(),
+  category: z.string().optional(),
+  section: z.string().optional(),
+  detail: z.string().optional(),
+  round: z.number().optional(),
+  adjudicationOutcome: z.enum(['dismissed', 'accepted', 'severity_adjusted', 'pending']).optional(),
+  remediationState: z.enum(['pending', 'planned', 'fixed', 'verified', 'regressed']).optional(),
+});
+
 /** Zod 4 schema for the full adjudication ledger. */
 export const AdjudicationLedgerSchema = z.object({
   version: z.literal(1),
-  entries: z.array(LedgerEntrySchema)
+  entries: z.array(LedgerEntrySchema),
+  /** Arbitrary metadata preserved on round-trip (runsSinceDebtReview, sessionId, etc.) */
+  meta: z.record(z.unknown()).optional(),
 });
 
 // ── Debt Ledger Schemas (Phase D) ───────────────────────────────────────────
@@ -379,3 +398,39 @@ export const DebtReviewResultSchema = z.object({
   refactorPlan: z.array(RefactorCandidateSchema).max(10),
   reasoning: z.string().max(1500),
 });
+
+// ── Execution Meta Schema (P0 — audit pipeline status) ──────────────────────
+
+/**
+ * Canonical reduce execution status values — used by ReduceStatus constant and
+ * ExecutionMetaSchema. String literals so they work both as a Zod enum and as
+ * plain object properties without import coupling.
+ */
+export const REDUCE_STATUS_VALUES = /** @type {const} */ ([
+  'ok', 'parse_error', 'timeout', 'model_error', 'budget_exceeded', 'skipped'
+]);
+
+/**
+ * Explicit reduce execution status — avoids conflating success-with-zero vs failure.
+ * Import this constant instead of using raw strings.
+ */
+export const ReduceStatus = Object.freeze({
+  OK: 'ok',
+  PARSE_ERROR: 'parse_error',
+  TIMEOUT: 'timeout',
+  MODEL_ERROR: 'model_error',
+  BUDGET_EXCEEDED: 'budget_exceeded',
+  SKIPPED: 'skipped',
+});
+
+/**
+ * Optional execution-meta block added to audit result objects.
+ * Typed SSOT — all execution status flags live here, not as ad-hoc top-level booleans.
+ */
+export const ExecutionMetaSchema = z.object({
+  reduceStatus: z.enum(REDUCE_STATUS_VALUES).optional(),
+  reduceSkipped: z.boolean().optional(),
+  suppressionUnavailable: z.boolean().optional(),
+  passesSkipped: z.array(z.string()).optional(),
+  predictionUsed: z.boolean().optional(),
+}).optional();

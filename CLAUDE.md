@@ -138,6 +138,8 @@ Covers: atomic writes, schema derivation, ledger operations, finding identity, F
 | `SUPPRESS_SIMILARITY_THRESHOLD` | No | `0.35` | Jaccard threshold for R2+ suppression (0.0-1.0) |
 | `SUPABASE_AUDIT_URL` | No | — | Supabase project URL for audit-loop cloud learning store |
 | `SUPABASE_AUDIT_ANON_KEY` | No | — | Supabase anon key for audit-loop (falls back to local-only mode) |
+| `AUDIT_STORE` | No | auto | Storage backend: `supabase` (REST), `postgres` (direct — use with dedicated pooler on Pro), `sqlite`, `github`, `noop` |
+| `AUDIT_STORE_POSTGRES_URL` | No | — | Direct Postgres URL — use dedicated pooler string from Supabase dashboard → Connect (port 6543, transaction mode) for Pro plan |
 | `PERSONA_TEST_SUPABASE_URL` | No | — | Supabase project URL for persona-test session memory |
 | `PERSONA_TEST_SUPABASE_ANON_KEY` | No | — | Supabase anon key for persona-test |
 | `PERSONA_TEST_APP_URL` | No | — | Default app URL for persona-test list/add (per-project `.env`) |

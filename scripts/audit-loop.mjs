@@ -82,6 +82,22 @@ function isConverged(counts) {
 
 // ── Arg Parsing ──────────────────────────────────────────────────────────────
 
+/**
+ * Read the meta block from .audit/session-ledger.json.
+ * Returns {} if file missing, unreadable, or has no meta block.
+ * @param {string} ledgerFile - Absolute path to session ledger
+ * @returns {{ runsSinceDebtReview?: number, lastDebtReviewAt?: string, totalRuns?: number }}
+ */
+function readLedgerMeta(ledgerFile) {
+  try {
+    if (!fs.existsSync(ledgerFile)) return {};
+    const raw = JSON.parse(fs.readFileSync(ledgerFile, 'utf-8'));
+    return raw.meta || {};
+  } catch {
+    return {};
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     mode: argv[0],         // 'code' or 'plan'
@@ -96,6 +112,7 @@ function parseArgs(argv) {
     noTools: false,
     strictLint: false,
     dryRun: false,
+    debtReview: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -110,6 +127,7 @@ function parseArgs(argv) {
       case '--no-tools': args.noTools = true; break;
       case '--strict-lint': args.strictLint = true; break;
       case '--dry-run': args.dryRun = true; break;
+      case '--debt-review': args.debtReview = true; break;
     }
   }
 
@@ -192,6 +210,7 @@ async function main() {
   let stableCount = 0;
   let priorHashes = new Set();
   const roundResults = [];
+  let sessionId = null; // populated from R1 result._sid, passed to R2+
 
   while (round <= args.maxRounds) {
     const outFile = path.join(outDir, `${sid}-r${round}-result.json`);
@@ -202,10 +221,14 @@ async function main() {
     if (round >= 2) {
       auditArgs.push('--ledger', ledgerFile);
 
+      // Pass SID so R2 can resolve the ledger via the session manifest
+      if (sessionId) auditArgs.push('--session-id', sessionId);
+
       // Generate diff
       const diffFile = path.join(outDir, `${sid}-diff.patch`);
       try {
-        const diff = run('git', ['diff', 'HEAD~1'], { ignoreError: true });
+        const baseRef = args.base || 'HEAD~1';
+        const diff = run('git', ['diff', baseRef], { ignoreError: true });
         fs.writeFileSync(diffFile, diff || '');
         auditArgs.push('--diff', diffFile);
       } catch { /* no diff available */ }
@@ -242,6 +265,9 @@ async function main() {
     const counts = countFindings(results);
     roundResults.push({ round, counts, file: outFile });
 
+    // Capture SID from R1 for R2+ session manifest lookup
+    if (round === 1 && results._sid) sessionId = results._sid;
+
     // Show results card
     banner(`ROUND ${round} RESULTS — ${results.verdict || 'UNKNOWN'}\n  H:${counts.high} M:${counts.medium} L:${counts.low} | Total: ${counts.total}`);
 
@@ -254,8 +280,10 @@ async function main() {
       console.log(`  New: ${newFindings.length} | Resolved: ${resolved.length} | Recurring: ${currentHashes.size - newFindings.length}`);
     }
 
-    // Check convergence
-    if (isConverged(counts)) {
+    // Check convergence — skip stableCount increment when suppression was unavailable
+    // (round can't be declared converged if we didn't have a valid ledger to suppress against)
+    const suppressionUnavailable = results._executionMeta?.suppressionUnavailable === true;
+    if (isConverged(counts) && !suppressionUnavailable) {
       if (newFindings.length === 0 || round === 1) {
         stableCount++;
       } else {
@@ -297,7 +325,7 @@ async function main() {
     round++;
   }
 
-  // Step 8 — Debt Review (automatic when thresholds crossed)
+  // Step 8 — Debt Review (automatic when thresholds crossed or forced)
   try {
     const debtLedgerPath = path.resolve('.audit', 'tech-debt.json');
     if (fs.existsSync(debtLedgerPath)) {
@@ -307,28 +335,33 @@ async function main() {
       const ledger = readDebtLedger({ ledgerPath: debtLedgerPath });
       const entries = ledger.entries || [];
 
-      if (entries.length >= 5) {
+      // Read session ledger meta for run counter
+      const ledgerMeta = readLedgerMeta(ledgerFile);
+      const forceDebtReview = args.debtReview || (ledgerMeta?.runsSinceDebtReview ?? 0) >= 10;
+
+      if (entries.length >= 5 || forceDebtReview) {
         // Check thresholds: recurring items or file-level accumulation
         const recurring = findRecurringEntries(entries, 5);
         const clusters = buildLocalClusters(entries);
         const violations = findBudgetViolations(entries, ledger.budgets || {});
 
-        const shouldReview = recurring.length >= 2 || clusters.length >= 2 || violations.length > 0;
+        const shouldReview = forceDebtReview || recurring.length >= 2 || clusters.length >= 2 || violations.length > 0;
 
         if (shouldReview) {
-          banner(`STEP 8 — Debt Review\n  Entries: ${entries.length} | Recurring (5+): ${recurring.length} | Clusters: ${clusters.length} | Budget violations: ${violations.length}`);
+          const forceNote = forceDebtReview ? ' [FORCED]' : '';
+          banner(`STEP 8 — Debt Review${forceNote}\n  Entries: ${entries.length} | Recurring (5+): ${recurring.length} | Clusters: ${clusters.length} | Budget violations: ${violations.length}`);
 
           // Try LLM review, fall back to local
           const debtOutFile = path.join(outDir, `${sid}-debt-review.md`);
           try {
-            execFileSync('node', ['scripts/debt-review.mjs', '--out', debtOutFile, '--write-plan-doc'], {
+            execFileSync('node', ['scripts/debt-review.mjs', '--out', debtOutFile, '--write-plan-doc', '--sort-by-age'], {
               stdio: 'inherit', timeout: 120000
             });
             console.log(`  Debt review: ${debtOutFile}`);
           } catch {
             // Fall back to local-only clustering
             try {
-              execFileSync('node', ['scripts/debt-review.mjs', '--local-only', '--out', debtOutFile], {
+              execFileSync('node', ['scripts/debt-review.mjs', '--local-only', '--out', debtOutFile, '--sort-by-age'], {
                 stdio: 'inherit', timeout: 30000
               });
               console.log(`  Debt review (local): ${debtOutFile}`);

@@ -9,7 +9,7 @@ import {
   chunkLargeFile,
   buildDependencyGraph,
   extractExportsOnly,
-  estimateTokens
+  buildAuditUnits,
 } from '../scripts/lib/code-analysis.mjs';
 import { getProfile, buildLanguageContext } from '../scripts/lib/language-profiles.mjs';
 
@@ -327,5 +327,61 @@ describe('buildDependencyGraph — mixed JS+Python', () => {
     assert.ok(graph.has('data.xml'));
     // data.xml gets empty edge set (no profile = skip)
     assert.equal(graph.get('data.xml').size, 0);
+  });
+});
+
+// ── buildAuditUnits — maxFilesPerUnit cap ────────────────────────────────────
+
+/** Write a stub file and return its name. Content size controls token estimate. */
+function writeStub(name, byteSize = 400) {
+  fs.writeFileSync(name, 'x'.repeat(byteSize));
+  return name;
+}
+
+describe('buildAuditUnits — maxFilesPerUnit', () => {
+  let tmpDir;
+  const prevCwd = process.cwd();
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-units-'));
+    process.chdir(tmpDir);
+  });
+  afterEach(() => {
+    process.chdir(prevCwd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('packs all files into one unit when under both caps', () => {
+    const files = ['a.js', 'b.js', 'c.js'].map(f => writeStub(f, 400));
+    const units = buildAuditUnits(files, 30000, Infinity);
+    assert.equal(units.length, 1);
+    assert.equal(units[0].files.length, 3);
+  });
+
+  it('splits into multiple units when maxFilesPerUnit exceeded', () => {
+    const files = ['a.js', 'b.js', 'c.js', 'd.js'].map(f => writeStub(f, 400));
+    const units = buildAuditUnits(files, 30000, 2);
+    assert.equal(units.length, 2);
+    assert.equal(units[0].files.length, 2);
+    assert.equal(units[1].files.length, 2);
+  });
+
+  it('applies maxFilesPerUnit=4 (frontend default)', () => {
+    const files = Array.from({ length: 6 }, (_, i) => writeStub(`f${i}.tsx`, 400));
+    const units = buildAuditUnits(files, 30000, 4);
+    assert.equal(units.length, 2);
+    assert.equal(units[0].files.length, 4);
+    assert.equal(units[1].files.length, 2);
+  });
+
+  it('still splits on token threshold even when file count is under cap', () => {
+    // Two files ~600 tokens each (~2400 bytes) — token limit 1000 forces split
+    const files = [writeStub('big1.js', 2400), writeStub('big2.js', 2400)];
+    const units = buildAuditUnits(files, 1000, Infinity);
+    assert.equal(units.length, 2);
+  });
+
+  it('returns empty array for empty input', () => {
+    const units = buildAuditUnits([], 30000, 4);
+    assert.equal(units.length, 0);
   });
 });

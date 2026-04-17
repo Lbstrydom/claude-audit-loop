@@ -59,6 +59,8 @@ const CORE_SCRIPTS = [
   'scripts/lib/llm-wrappers.mjs',
   'scripts/lib/language-profiles.mjs',
   'scripts/lib/rng.mjs',
+  'scripts/lib/plan-fp-tracker.mjs',
+  'scripts/lib/predictive-strategy.mjs',
   'scripts/lib/robustness.mjs',
   'scripts/lib/sanitizer.mjs',
   'scripts/lib/secret-patterns.mjs',
@@ -85,6 +87,8 @@ const LEARNING_SCRIPTS = [
  * Debt-tracking scripts (full suite only).
  */
 const DEBT_SCRIPTS = [
+  'scripts/write-plan-outcomes.mjs',
+  'scripts/write-ledger-r1.mjs',
   'scripts/debt-auto-capture.mjs',
   'scripts/debt-backfill.mjs',
   'scripts/debt-budget-check.mjs',
