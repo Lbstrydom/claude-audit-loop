@@ -1,39 +1,187 @@
 {
-  "schemaVersion": 1,
-  "bundleVersion": "de99c8ded0745998",
+  "schemaVersion": 2,
+  "bundleVersion": "842dd42e7470bf66",
   "repoUrl": "https://github.com/Lbstrydom/claude-engineering-skills",
   "rawUrlBase": "https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main",
-  "updatedAt": "2026-04-07T13:49:08.817Z",
+  "updatedAt": "2026-04-19T15:45:14.913Z",
   "skills": {
     "audit-loop": {
       "path": "skills/audit-loop/SKILL.md",
-      "sha": "41e5e342a8e0",
-      "size": 25951,
-      "summary": "Self-driving plan-audit-fix loop with adaptive learning."
-    },
-    "plan-backend": {
-      "path": "skills/plan-backend/SKILL.md",
-      "sha": "ec062a7f72d6",
-      "size": 11866,
-      "summary": "Backend architecture planning with engineering principles. Use when the user asks to plan,"
-    },
-    "plan-frontend": {
-      "path": "skills/plan-frontend/SKILL.md",
-      "sha": "1e6d40dc26bf",
-      "size": 15850,
-      "summary": "Frontend UX and implementation planning with design and engineering principles. Use when the"
-    },
-    "ship": {
-      "path": "skills/ship/SKILL.md",
-      "sha": "b1262dffaed8",
-      "size": 10357,
-      "summary": "Sync all project documentation, optionally update a plan, then commit and push to git."
+      "sha": "bbbf91bd49f1",
+      "size": 13860,
+      "summary": "Self-driving plan-audit-fix loop with adaptive learning.",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "bbbf91bd49f1",
+          "size": 13860
+        },
+        {
+          "relPath": "references/debt-capture.md",
+          "sha": "6c2e17c33bc2",
+          "size": 4123
+        },
+        {
+          "relPath": "references/gemini-gate.md",
+          "sha": "c6150b5a3102",
+          "size": 2992
+        },
+        {
+          "relPath": "references/ledger-format.md",
+          "sha": "55acf54877e8",
+          "size": 3003
+        },
+        {
+          "relPath": "references/r2-plus-mode.md",
+          "sha": "127a6f9b120d",
+          "size": 4520
+        }
+      ]
     },
     "persona-test": {
       "path": "skills/persona-test/SKILL.md",
-      "sha": "auto",
-      "size": 28082,
-      "summary": "Persona-driven exploratory browser testing against a live URL. Plan→Act→Reflect loop, P0–P3 findings with confidence scoring, qualitative debrief, Supabase session memory, cross-references audit-loop findings. list/add sub-commands for per-app persona registry."
+      "sha": "85d9fae05442",
+      "size": 14461,
+      "summary": "Persona-driven exploratory browser testing against a live URL.",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "85d9fae05442",
+          "size": 14461
+        },
+        {
+          "relPath": "examples/report-and-debrief.md",
+          "sha": "d0ce9fdffb6c",
+          "size": 6661
+        },
+        {
+          "relPath": "references/audit-correlation.md",
+          "sha": "56dd488ff6b2",
+          "size": 4851
+        },
+        {
+          "relPath": "references/browser-tool-detection.md",
+          "sha": "3bfd5de2c7d4",
+          "size": 3377
+        },
+        {
+          "relPath": "references/interop.md",
+          "sha": "7ea1d8014dcc",
+          "size": 3652
+        },
+        {
+          "relPath": "references/persona-debrief-format.md",
+          "sha": "2437807d742d",
+          "size": 3258
+        },
+        {
+          "relPath": "references/session-history.md",
+          "sha": "18280295c17d",
+          "size": 2468
+        }
+      ]
+    },
+    "plan-backend": {
+      "path": "skills/plan-backend/SKILL.md",
+      "sha": "0d7d652256fe",
+      "size": 8891,
+      "summary": "Backend architecture planning with engineering principles. Use when the user asks to plan,",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "0d7d652256fe",
+          "size": 8891
+        },
+        {
+          "relPath": "references/engineering-principles.md",
+          "sha": "671d91216cf6",
+          "size": 3161
+        },
+        {
+          "relPath": "references/python-backend-profile.md",
+          "sha": "800c414577d2",
+          "size": 2159
+        }
+      ]
+    },
+    "plan-frontend": {
+      "path": "skills/plan-frontend/SKILL.md",
+      "sha": "c388aa1cad32",
+      "size": 10156,
+      "summary": "Frontend UX and implementation planning with design and engineering principles. Use when the",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "c388aa1cad32",
+          "size": 10156
+        },
+        {
+          "relPath": "references/python-frontend-profile.md",
+          "sha": "33d7d66170a5",
+          "size": 2196
+        },
+        {
+          "relPath": "references/technical-principles.md",
+          "sha": "7b9da0f3f43d",
+          "size": 3423
+        },
+        {
+          "relPath": "references/ux-principles.md",
+          "sha": "320ff5c98417",
+          "size": 4275
+        }
+      ]
+    },
+    "ship": {
+      "path": "skills/ship/SKILL.md",
+      "sha": "cb8910e49ba0",
+      "size": 9489,
+      "summary": "Sync all project documentation, optionally update a plan, then commit and push to git.",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "cb8910e49ba0",
+          "size": 9489
+        },
+        {
+          "relPath": "references/python-environment-discovery.md",
+          "sha": "3b3016df54a0",
+          "size": 2662
+        },
+        {
+          "relPath": "references/status-md-format.md",
+          "sha": "823b3e52c5c3",
+          "size": 2588
+        }
+      ]
+    },
+    "ux-lock": {
+      "path": "skills/ux-lock/SKILL.md",
+      "sha": "a436ee5ed2f0",
+      "size": 7969,
+      "summary": "Generate Playwright e2e specs. Two modes:",
+      "files": [
+        {
+          "relPath": "SKILL.md",
+          "sha": "a436ee5ed2f0",
+          "size": 7969
+        },
+        {
+          "relPath": "references/lock-mode-spec-generation.md",
+          "sha": "817fb2b4cfc5",
+          "size": 3839
+        },
+        {
+          "relPath": "references/scope-and-limitations.md",
+          "sha": "7711dc5f41cc",
+          "size": 3267
+        },
+        {
+          "relPath": "references/verify-mode-generation.md",
+          "sha": "c5cd92c4b45e",
+          "size": 6758
+        }
+      ]
     }
   }
 }

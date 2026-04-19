@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
+import { enumerateSkillFiles, listSkillNames } from './lib/skill-packaging.mjs';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const targetFilter = (() => {
@@ -113,21 +114,25 @@ const DEBT_SCRIPTS = [
   'scripts/lib/debt-review-helpers.mjs',
 ];
 
-/** SKILL.md files installed to both Claude Code (.claude/) and GitHub Copilot (.github/) */
-const SKILL_FILES = [
-  '.claude/skills/audit-loop/SKILL.md',
-  '.github/skills/audit-loop/SKILL.md',
-  '.claude/skills/persona-test/SKILL.md',
-  '.github/skills/persona-test/SKILL.md',
-  '.claude/skills/plan-backend/SKILL.md',
-  '.github/skills/plan-backend/SKILL.md',
-  '.claude/skills/plan-frontend/SKILL.md',
-  '.github/skills/plan-frontend/SKILL.md',
-  '.claude/skills/ship/SKILL.md',
-  '.github/skills/ship/SKILL.md',
-  '.claude/skills/ux-lock/SKILL.md',
-  '.github/skills/ux-lock/SKILL.md',
-];
+/**
+ * Skill files synced to both Claude Code (.claude/skills/) and GitHub Copilot
+ * (.github/skills/) surfaces. Phase B.2: replaced the hardcoded SKILL.md list
+ * with allowlist-based enumeration — new skills + references/ + examples/
+ * auto-register without editing this file.
+ */
+function buildSkillFiles() {
+  const out = [];
+  const skillsDir = path.join(SOURCE_ROOT, 'skills');
+  for (const name of listSkillNames(skillsDir)) {
+    const skillDir = path.join(skillsDir, name);
+    const files = enumerateSkillFiles(skillDir, { strict: true });
+    for (const rel of files) {
+      out.push(`.claude/skills/${name}/${rel}`, `.github/skills/${name}/${rel}`);
+    }
+  }
+  return out;
+}
+const SKILL_FILES = buildSkillFiles();
 
 /** Editor config files — MCP server wiring for VSCode Copilot Chat */
 const EDITOR_FILES = [

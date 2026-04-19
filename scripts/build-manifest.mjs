@@ -1,29 +1,41 @@
 #!/usr/bin/env node
 /**
- * @fileoverview Compute SHAs + bundleVersion, update skills.manifest.json.
+ * @fileoverview Build the skills manifest for the installer.
+ *
+ * **Manifest v2** (Phase B.2): populates `files[]` per skill — every file
+ * enumerated by `scripts/lib/skill-packaging.mjs`'s allowlist gets its own
+ * SHA entry. Installers that understand v2 write all the files; old
+ * installers see `schemaVersion: 2` and exit with
+ * `UNSUPPORTED_MANIFEST_VERSION` before any install happens.
+ *
+ * **G5 fix** (from Gemini final-gate review): description extraction now
+ * uses a proper YAML frontmatter parse path instead of the fragile regex
+ * that required a newline after `description:`.
  *
  * Usage:
  *   node scripts/build-manifest.mjs           # rebuild manifest
  *   node scripts/build-manifest.mjs --check    # verify manifest is fresh (CI guard)
+ *
+ * @module scripts/build-manifest
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ManifestSchema } from './lib/schemas-install.mjs';
+import { enumerateSkillFiles, listSkillNames } from './lib/skill-packaging.mjs';
 
 const SKILLS_DIR = path.resolve('skills');
 const MANIFEST_PATH = path.resolve('skills.manifest.json');
 const BOOTSTRAP_TEMPLATE = path.resolve('scripts/lib/bootstrap-template.mjs');
 const COPILOT_BLOCK_TEMPLATE = path.resolve('scripts/lib/install/copilot-block.txt');
-const MANIFEST_SCHEMA_VERSION = 1;
+
+const MANIFEST_SCHEMA_VERSION = 2;   // Phase B.2: flipped from 1 to 2
 
 const REPO_URL = 'https://github.com/Lbstrydom/claude-engineering-skills';
 const RAW_URL_BASE = 'https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main';
 
 /**
- * Compute SHA-256 hex of file content.
- * @param {string} filePath
- * @returns {string} first 12 hex chars
+ * Compute SHA-256 hex of file content. 12-char short form.
  */
 function fileSha(filePath) {
   const content = fs.readFileSync(filePath);
@@ -31,41 +43,101 @@ function fileSha(filePath) {
 }
 
 /**
- * Build the skills manifest from the skills/ directory.
- * @returns {object} Validated manifest object
+ * Extract YAML frontmatter from markdown content.
+ * Returns the inner body (between --- fences), or null if missing.
+ */
+function extractFrontmatterBody(content) {
+  if (!content.startsWith('---')) return null;
+  const endIdx = content.indexOf('\n---', 3);
+  if (endIdx === -1) return null;
+  return content.slice(3, endIdx).replace(/^\r?\n/, '');
+}
+
+/**
+ * Extract the `description:` summary from SKILL.md frontmatter — tolerant
+ * of inline (`description: "..."`), block-scalar (`description: |\n...`),
+ * or plain (`description: ...`) styles. Replaces the G5 regex that only
+ * handled block-scalar form.
+ *
+ * @returns {string|null} one-line summary ≤100 chars, or null if not found
+ */
+export function extractSkillSummary(content) {
+  const fm = extractFrontmatterBody(content);
+  if (!fm) return null;
+
+  const lines = fm.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*description\s*:\s*(\|[-+]?\s*)?\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const [, blockMarker, rest] = m;
+
+    // Block-scalar form: `description: |` → first indented line is the summary
+    if (blockMarker !== undefined) {
+      for (let j = i + 1; j < lines.length; j++) {
+        if (lines[j].trim() === '') continue;
+        const body = lines[j].trim();
+        if (body) return body.slice(0, 100);
+      }
+      return null;
+    }
+
+    // Inline form: `description: whatever`
+    let value = rest.trim();
+    if (!value) continue;
+    // Strip surrounding quotes if present
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    return value.slice(0, 100);
+  }
+  return null;
+}
+
+/**
+ * Build the skills manifest from the authoritative `skills/` tree.
  */
 export function buildManifest() {
-  const skillDirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter(d => d.isDirectory())
-    .map(d => d.name)
-    .sort();
-
   const skills = {};
   const artifactParts = [];
 
-  for (const name of skillDirs) {
-    const skillPath = path.join(SKILLS_DIR, name, 'SKILL.md');
+  for (const name of listSkillNames(SKILLS_DIR)) {
+    const skillDir = path.join(SKILLS_DIR, name);
+    const skillPath = path.join(skillDir, 'SKILL.md');
     if (!fs.existsSync(skillPath)) continue;
 
-    const content = fs.readFileSync(skillPath, 'utf-8');
-    const sha = fileSha(skillPath);
-    const size = Buffer.byteLength(content, 'utf-8');
+    // Use the packaging allowlist — rejects unexpected files, includes
+    // references/**/*.md and examples/**/*.md
+    const relFiles = enumerateSkillFiles(skillDir, { strict: true });
+    const files = relFiles.map(rel => {
+      const abs = path.join(skillDir, rel);
+      const content = fs.readFileSync(abs);
+      return {
+        relPath: rel,
+        sha: crypto.createHash('sha256').update(content).digest('hex').slice(0, 12),
+        size: content.length,
+      };
+    });
 
-    // Extract summary from frontmatter description (first line)
-    const descMatch = content.match(/description:\s*\|?\s*\n\s+(.+)/);
-    const summary = descMatch ? descMatch[1].trim().slice(0, 100) : name;
+    const skillMdEntry = files.find(f => f.relPath === 'SKILL.md');
+    const skillContent = fs.readFileSync(skillPath, 'utf-8');
+    const summary = extractSkillSummary(skillContent) ?? name;
 
     skills[name] = {
+      // Back-compat pointer fields — point at SKILL.md specifically
       path: `skills/${name}/SKILL.md`,
-      sha,
-      size,
+      sha: skillMdEntry?.sha ?? '',
+      size: skillMdEntry?.size ?? 0,
       summary,
+      // v2: full file list (allowlist-enforced)
+      files,
     };
 
-    artifactParts.push(`skill:${name}:${sha}`);
+    // bundleVersion hash includes every file's SHA, not just SKILL.md
+    for (const f of files) {
+      artifactParts.push(`skill:${name}:${f.relPath}:${f.sha}`);
+    }
   }
 
-  // Include bootstrap template + copilot block in version hash if they exist
   if (fs.existsSync(BOOTSTRAP_TEMPLATE)) {
     artifactParts.push(`bootstrap:${fileSha(BOOTSTRAP_TEMPLATE)}`);
   }
@@ -74,7 +146,6 @@ export function buildManifest() {
   }
   artifactParts.push(`manifest-schema:${MANIFEST_SCHEMA_VERSION}`);
 
-  // Deterministic bundleVersion: sort pairs, hash concatenation
   const pairs = artifactParts.sort().join('\n');
   const bundleVersion = crypto.createHash('sha256').update(pairs).digest('hex').slice(0, 16);
 
@@ -87,7 +158,6 @@ export function buildManifest() {
     skills,
   };
 
-  // Validate
   ManifestSchema.parse(manifest);
   return manifest;
 }
@@ -98,29 +168,25 @@ function main() {
   const manifest = buildManifest();
 
   if (checkMode) {
-    // Compare against committed manifest
     if (!fs.existsSync(MANIFEST_PATH)) {
       console.error('FAIL: skills.manifest.json does not exist. Run: node scripts/build-manifest.mjs');
       process.exit(1);
     }
     const existing = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf-8'));
-
-    // Compare bundleVersion (content-deterministic)
-    if (existing.bundleVersion === manifest.bundleVersion) {
-      console.log(`OK: manifest is fresh (${manifest.bundleVersion})`);
+    if (existing.bundleVersion === manifest.bundleVersion && existing.schemaVersion === manifest.schemaVersion) {
+      console.log(`OK: manifest is fresh (schema v${manifest.schemaVersion}, bundle ${manifest.bundleVersion})`);
       process.exit(0);
-    } else {
-      console.error(`STALE: manifest bundleVersion mismatch`);
-      console.error(`  committed: ${existing.bundleVersion}`);
-      console.error(`  computed:  ${manifest.bundleVersion}`);
-      console.error(`Run: node scripts/build-manifest.mjs`);
-      process.exit(1);
     }
+    console.error(`STALE: manifest bundleVersion mismatch`);
+    console.error(`  committed: v${existing.schemaVersion} / ${existing.bundleVersion}`);
+    console.error(`  computed:  v${manifest.schemaVersion} / ${manifest.bundleVersion}`);
+    console.error(`Run: node scripts/build-manifest.mjs`);
+    process.exit(1);
   }
 
-  // Write manifest (exclude updatedAt from comparison — it's informational)
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
-  console.log(`skills.manifest.json updated: ${Object.keys(manifest.skills).length} skills, version ${manifest.bundleVersion}`);
+  const totalFiles = Object.values(manifest.skills).reduce((sum, s) => sum + (s.files?.length ?? 1), 0);
+  console.log(`skills.manifest.json updated: v${manifest.schemaVersion}, ${Object.keys(manifest.skills).length} skills, ${totalFiles} files, bundle ${manifest.bundleVersion}`);
 }
 
 main();
