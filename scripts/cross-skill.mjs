@@ -33,7 +33,6 @@ import { execSync } from 'node:child_process';
 import {
   initLearningStore,
   isCloudEnabled,
-  upsertRepo,
   upsertPlan,
   updatePlanStatus,
   recordRegressionSpec,
@@ -46,9 +45,14 @@ import {
   readPersistentPlanFailures,
   getUnlockedFixes,
   readAuditEffectiveness,
+  listPersonasForApp,
+  upsertPersona,
+  recordPersonaSession,
+  isPersonaCloudEnabled,
 } from './learning-store.mjs';
 import { detectRepoStack, detectPythonEnvironmentManager } from './lib/repo-stack.mjs';
 import { StackProfileSchema } from './lib/schemas.mjs';
+import { z } from 'zod';
 
 // ── Arg parsing ─────────────────────────────────────────────────────────────
 
@@ -81,8 +85,14 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-function emitError(code, message, extra = {}) {
+/**
+ * Emit a structured error + exit. Default exit code is 2 (BAD_INPUT /
+ * validation failure) per the cross-skill CLI contract. Exceptions use
+ * exit 1 and go through main()'s catch directly without this helper.
+ */
+function emitError(code, message, extra = {}, exitCode = 2) {
   emit({ ok: false, error: { code, message, ...extra } });
+  process.exit(exitCode);
 }
 
 // ── Repo + commit resolution ────────────────────────────────────────────────
@@ -289,6 +299,85 @@ async function cmdAuditEffectiveness() {
   emit({ ok: true, cloud: true, row });
 }
 
+// ── Persona-test subcommands (replace curl blocks in persona-test SKILL.md) ──
+
+const ListPersonasRequestSchema = z.object({
+  url: z.url(),
+});
+
+async function cmdListPersonas() {
+  const urlFlag = argOption('url');
+  const p = urlFlag ? { url: urlFlag } : parsePayload();
+  const parsed = ListPersonasRequestSchema.safeParse(p);
+  if (!parsed.success) return emitError('BAD_INPUT', '--url <app_url> is required', { issues: parsed.error.issues });
+
+  const cloud = await isPersonaCloudEnabled();
+  if (!cloud) return emit({ ok: true, cloud: false, rows: [] });
+
+  const rows = await listPersonasForApp(parsed.data.url);
+  emit({ ok: true, cloud: true, rows });
+}
+
+const AddPersonaRequestSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1),
+  appUrl: z.url(),
+  appName: z.string().optional(),
+  notes: z.string().optional(),
+  repoName: z.string().optional(),
+});
+
+async function cmdAddPersona() {
+  const p = parsePayload();
+  const parsed = AddPersonaRequestSchema.safeParse(p);
+  if (!parsed.success) {
+    return emitError('BAD_INPUT', 'name, description, appUrl are required', { issues: parsed.error.issues });
+  }
+
+  const cloud = await isPersonaCloudEnabled();
+  if (!cloud) return emit({ ok: true, cloud: false, personaId: null, existed: false });
+
+  const { personaId, existed } = await upsertPersona(parsed.data);
+  emit({ ok: !!personaId, cloud: true, personaId, existed });
+}
+
+const RecordPersonaSessionRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  persona: z.string().min(1),
+  url: z.url(),
+  focus: z.string().optional(),
+  browserTool: z.string().min(1),
+  stepsTaken: z.number().int().nonnegative().optional(),
+  verdict: z.enum(['Ready for users', 'Needs work', 'Blocked']),
+  p0Count: z.number().int().nonnegative().optional(),
+  p1Count: z.number().int().nonnegative().optional(),
+  p2Count: z.number().int().nonnegative().optional(),
+  p3Count: z.number().int().nonnegative().optional(),
+  avgConfidence: z.number().min(0).max(1).optional(),
+  findings: z.array(z.any()).optional(),
+  reportMd: z.string().optional(),
+  debriefMd: z.string().optional(),
+  commitSha: z.string().optional(),
+  deploymentId: z.string().optional(),
+  repoName: z.string().optional(),
+  personaId: z.string().optional(),
+});
+
+async function cmdRecordPersonaSession() {
+  const p = parsePayload();
+  if (!p.commitSha) p.commitSha = currentCommitSha() || undefined;
+  const parsed = RecordPersonaSessionRequestSchema.safeParse(p);
+  if (!parsed.success) {
+    return emitError('BAD_INPUT', 'session payload failed validation', { issues: parsed.error.issues });
+  }
+
+  const cloud = await isPersonaCloudEnabled();
+  if (!cloud) return emit({ ok: true, cloud: false, sessionId: null, existed: false, statsUpdated: false });
+
+  const result = await recordPersonaSession(parsed.data);
+  emit({ ok: !!result.sessionId, cloud: true, ...result });
+}
+
 async function cmdDetectStack() {
   const cwd = argOption('cwd') || process.cwd();
   const includeEnvManager = rest.includes('--include-env-manager');
@@ -333,6 +422,9 @@ const commands = {
   'list-unlocked-fixes': cmdListUnlockedFixes,
   'audit-effectiveness': cmdAuditEffectiveness,
   'detect-stack': cmdDetectStack,
+  'list-personas': cmdListPersonas,
+  'add-persona': cmdAddPersona,
+  'record-persona-session': cmdRecordPersonaSession,
   'whoami': cmdWhoami,
 };
 
@@ -350,12 +442,13 @@ async function main() {
     emitError('UNKNOWN_SUBCOMMAND', `Unknown subcommand: ${subcommand}`, {
       validSubcommands: Object.keys(commands),
     });
-    process.exit(2);
+    // emitError exited — unreachable, but kept as belt-and-braces
+    return;
   }
   try {
     await handler();
   } catch (err) {
-    emitError('EXCEPTION', err.message, { stack: err.stack });
+    emit({ ok: false, error: { code: 'EXCEPTION', message: err.message, stack: err.stack } });
     process.exit(1);
   }
 }
