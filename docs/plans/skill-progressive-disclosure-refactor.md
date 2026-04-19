@@ -1,7 +1,8 @@
 # Plan: Skill Progressive Disclosure Refactor
 - **Date**: 2026-04-19
-- **Status**: Draft
+- **Status**: Approved-with-conditions (see §5 — Phase B.1 must fix bugs G2/G3/G5)
 - **Author**: Claude + Louis
+- **Audit trail**: GPT-5.4 R1 (8 findings, all fixed) → R2 (8 findings; 3 HIGH fixed + 1 LOW deferred + E2E gap documented) → Gemini 3.1 Pro final gate (5 findings; 3 accepted as pre-existing bugs, 2 challenged as category errors)
 
 ---
 
@@ -105,7 +106,28 @@ situations — read them only when the trigger applies.
 - ✅ "when the user asks about X" — trigger is detectable
 - ✅ "when step Y fails" — trigger is observable in the flow
 
+#### 2.2.1 Reference file frontmatter (drift detection)
+
+Every file under `references/` or `examples/` **MUST** begin with YAML frontmatter containing a canonical `summary` string:
+
+```markdown
+---
+summary: How this skill feeds /audit-loop, /ship, /plan-*.
+---
+
+# Rest of the reference file...
+```
+
+- `summary` is a single-line string, ≤120 chars.
+- The string is **byte-identical** to the `Summary` column entry in the parent SKILL.md's ref-index table.
+- `check-skill-refs.mjs` parses the frontmatter and does an exact string equality check against the index. Any mismatch fails the lint with a clear diff.
+- This replaces the earlier "first paragraph" heuristic — no fuzzy matching, no scoring, no implementer judgement.
+
+**Rationale**: a ref file that changes purpose without updating the index will drift silently — Claude keeps reading it based on an outdated trigger. The frontmatter `summary` is the contract between the ref body and its index entry; forcing exact equality with a simple failure mode keeps the contract honest.
+
 ### 2.3 Installer manifest extension
+
+#### 2.3.1 Schema changes (v1 → v2)
 
 `SkillEntrySchema` in `scripts/lib/schemas-install.mjs` gains a `files: Array<FileEntry>` field:
 
@@ -121,45 +143,194 @@ export const SkillEntrySchema = z.object({
   sha: z.string(),         // SHA of SKILL.md specifically
   size: z.number(),
   summary: z.string(),
-  files: z.array(FileEntrySchema).default([{relPath: 'SKILL.md', ...}]),  // NEW
+  files: z.array(FileEntrySchema).default([{relPath: 'SKILL.md', ...}]),  // NEW in v2
 });
 ```
 
 - `path` + `sha` + `size` stay pointing at SKILL.md so existing consumers don't break.
 - `files` lists everything that must be installed for the skill to work.
 - `schemaVersion` bumps from 1 → 2.
-- Installer reads `files` when present, falls back to single-file behaviour when absent (old manifests still parse).
+
+#### 2.3.2 Version-gated entrypoint (two-step rollout)
+
+`schemaVersion` alone doesn't protect old installers — they still parse the manifest, ignore the new field, and silently skip the reference files. The migration must be **two-step**:
+
+**Step 1 — Compat installer (ships first)**: update `scripts/install-skills.mjs` to read `schemaVersion` **before** parsing the rest of the manifest. Behaviour:
+- `schemaVersion: 1` → existing single-file install path (unchanged).
+- `schemaVersion: 2` → new multi-file install path. Consumes `files[]` as the canonical file list. Backfills `files = [{relPath:'SKILL.md', sha, size}]` when the array is empty (legacy data in a v2 manifest).
+- `schemaVersion > 2` → exit non-zero with `UNSUPPORTED_MANIFEST_VERSION` and the minimum installer version required.
+
+Ship this installer alone. Tag it. Give consumer repos time to pick it up (one `git pull` cycle).
+
+**Step 2 — v2 manifests (ships after)**: only after Step 1 is in every consumer repo's installed copy do we flip `MANIFEST_SCHEMA_VERSION = 2` in `scripts/build-manifest.mjs`. Older installers that never picked up Step 1 now fail-fast with a clear error, instead of silently skipping reference files.
+
+Compatibility-test matrix (in `tests/install-multi-file-skill.test.mjs`):
+- v1 installer × v1 manifest → pass (regression)
+- v1 installer × v2 manifest → fail cleanly with `UNSUPPORTED_MANIFEST_VERSION`
+- v2 installer × v1 manifest → pass (backward compat)
+- v2 installer × v2 manifest → pass + all files installed
+
+#### 2.3.3 File lifecycle — additions, updates, deletions
+
+Multi-file skills need deterministic deletion: when a skill version bumps and removes a reference file, the old file must not linger in the consumer's skill directory. The install transaction extends as follows:
+
+The transaction must survive process crash / power loss. Use a write-ahead-log pattern (same shape as `atomicWriteFileSync` already used in this repo — temp-file + rename):
+
+```
+On install (crash-safe):
+1. Read previousReceipt.managedFiles for this skill (if receipt exists).
+2. Compute:
+   toWrite = manifest.files[]
+   toDelete = previousReceipt.managedFiles[] − manifest.files[]
+3. Open a transaction journal at `<skillDir>/.install-txn.json` describing the
+   planned writes + deletes + next receipt state. fsync the journal.
+4. Stage every write: for each file in toWrite, write to `<path>.tmp-<pid>`
+   (same directory as target — rename is atomic).
+5. Rename every `.tmp-<pid>` to the target path in a deterministic order.
+6. Delete every file in toDelete (skip user-modified per orphan-protection below).
+7. Write the new receipt to `<receipt>.tmp-<pid>`, rename into place.
+8. Delete the transaction journal. Done.
+
+On next startup (crash recovery):
+1. If `.install-txn.json` exists, the last install was interrupted.
+2. Read the journal. For every entry, either (a) roll forward — complete any
+   rename whose target doesn't yet exist; or (b) roll back — delete any
+   stray `.tmp-<pid>` files whose corresponding rename didn't happen.
+3. Delete the journal when state is consistent.
+```
+
+**Orphan protection**: if `previousReceipt.managedFiles[i].sha` doesn't match the current on-disk SHA, the file has been user-modified — `toDelete` skips it and emits a `CONFLICT_DELETION_SKIPPED` warning. The user resolves manually.
+
+**Atomicity boundary**: filesystems give us atomic rename only within a directory and only for single operations. Multi-file installs are *not* atomic at the OS level. The journal + fsync pattern gives us **eventual consistency** — the next installer run reconciles to a valid state. This is the best we can do without a real database; it matches the atomicity guarantees of the existing `atomicWriteFileSync` used elsewhere in the repo.
+
+Receipt schema in `scripts/lib/schemas-install.mjs` already supports multiple entries per skill (`managedFiles: ManagedFile[]`) — no schema change needed, just installer logic.
 
 ### 2.4 Shared-library extractions
 
-Only one true cross-skill duplication is worth extracting:
+Only one true cross-skill duplication is worth extracting. Because skills invoke shell commands (not Node imports), the extraction needs an **executable interface**, not just a library.
 
-**`scripts/lib/repo-stack.mjs`** — detection shared by `plan-backend`, `plan-frontend`, `ship`:
+**Library**: `scripts/lib/repo-stack.mjs` — pure functions, unit-testable:
 
 ```js
-export function detectRepoStack(cwd = process.cwd()) { /* ... */ }
-export function detectPythonFramework(deps) { /* ... */ }
-export function detectPythonEnvironmentManager(cwd) { /* ship-specific */ }
+export function detectRepoStack(cwd = process.cwd()) { /* ... */ }  // → StackProfile
+export function detectPythonFramework(deps) { /* ... */ }           // → 'fastapi'|'django'|'flask'|'none'
+export function detectPythonEnvironmentManager(cwd) { /* ship-specific */ } // → 'poetry'|'uv'|'pipenv'|'venv'|'none'
 ```
 
-The three skills' Phase 0 / Step 0 sections become 3–5 lines each, pointing to the library. Output shape is well-defined so skills can render the stack profile sections without having to reason about the detection logic inline.
+**CLI wrapper**: `node scripts/cross-skill.mjs detect-stack` — the skill-facing interface:
+
+```bash
+node scripts/cross-skill.mjs detect-stack [--cwd <path>] [--include-env-manager]
+```
+
+Output — stable JSON on stdout (Zod-validated via `StackProfileSchema`):
+
+```json
+{
+  "ok": true,
+  "stack": "js-ts" | "python" | "mixed" | "unknown",
+  "pythonFramework": "fastapi" | "django" | "flask" | "none" | null,
+  "environmentManager": "poetry" | "uv" | "pipenv" | "venv" | "none" | null,
+  "detectedFrom": ["package.json", "pyproject.toml"]
+}
+```
+
+- `environmentManager` only populated when `--include-env-manager` passed (used by `/ship`; other skills don't need it).
+- `detectedFrom` is always populated — shows which marker files drove the decision (useful for diagnostics in mixed repos).
+- Stable exit codes: 0 = detection succeeded (any stack); 2 = bad input.
+
+**Schema lives in** `scripts/lib/schemas.mjs` (single source of truth — not duplicated in cross-skill.mjs). Consumers of the JSON output can import the Zod schema if they want to validate.
+
+**Skill call pattern**:
+```bash
+STACK=$(node scripts/cross-skill.mjs detect-stack --cwd .)
+# parse the JSON and render the matching profile section
+```
+
+plan-backend, plan-frontend, ship each call this at Phase 0 / Step 0 and render the appropriate profile from the JSON. Phase 0 in each SKILL.md becomes ~8 lines (invoke CLI + parse JSON + branch on `stack` value).
 
 **NOT extracting**: browser tool detection (currently in persona-test Phase 1 only — no real duplication yet). Flagged as preemptive-extraction candidate only when `/ux-lock verify` grows anti-bot support.
 
 ### 2.5 Replacing curl recipes with `cross-skill.mjs`
 
-`persona-test` still hand-writes 4 curl blocks (lines 58–59, 109–119, 195–197, 640–666). These all go through `scripts/cross-skill.mjs` or need new subcommands:
+`persona-test` still hand-writes 4 curl blocks. Each gets a dedicated CLI subcommand with a fully specified contract (Zod schemas, exit codes, error semantics).
 
-- List personas → new subcommand `list-personas --url <url>` (reads from the persona_dashboard view)
-- Add persona → new subcommand `add-persona --json {...}`
-- Save session → new subcommand `record-persona-session --json {...}` (returns session_id)
-- Update persona stats → handled inside `record-persona-session` (same txn)
+The three new subcommands — all following the existing `cross-skill.mjs` pattern (graceful no-op when cloud unavailable, single-line JSON on stdout):
 
-This eliminates ~400 tokens of curl recipe from `persona-test` SKILL.md and gives all skills a consistent persistence API. The skill file says `node scripts/cross-skill.mjs add-persona --json '...'` — short, learnable, testable.
+#### `list-personas`
+
+```bash
+node scripts/cross-skill.mjs list-personas --url <app_url>
+```
+
+- **Request schema**: `ListPersonasRequestSchema = { url: z.string().url() }`
+- **Response schema**: `ListPersonasResponseSchema = { ok: boolean, cloud: boolean, rows: Array<PersonaDashboardRow> }` where `PersonaDashboardRow` mirrors the `persona_dashboard` view (name, description, test_count, last_tested_at, last_verdict, days_since_last_test, recent_sessions).
+- **Empty state**: `{ok:true, cloud:true, rows:[]}` — NOT an error. Skill renders "no personas registered for this URL".
+- **Cloud unavailable**: `{ok:true, cloud:false, rows:[]}` — exit 0.
+- **Exit codes**: 0 = success (incl. empty); 2 = bad input (missing/invalid URL); 1 = unexpected.
+
+#### `add-persona`
+
+```bash
+node scripts/cross-skill.mjs add-persona --json '{"name":"...","description":"...","appUrl":"...","appName":"...","notes":"..."}'
+```
+
+- **Request schema**: `AddPersonaRequestSchema = { name: z.string().min(1), description: z.string().min(1), appUrl: z.string().url(), appName: z.string().optional(), notes: z.string().optional(), repoName: z.string().optional() }`
+- **Response schema**: `{ ok: boolean, cloud: boolean, personaId: string|null, existed: boolean }` — `existed=true` means a persona with the same `(name, appUrl)` unique key already existed and was updated in-place (idempotent upsert).
+- **Transaction**: single `upsert` with `onConflict: 'name,app_url'`. Atomic at the Supabase level.
+- **Exit codes**: 0 = success; 2 = validation failure; 1 = unexpected.
+
+#### `record-persona-session`
+
+```bash
+node scripts/cross-skill.mjs record-persona-session --json '{...}'
+```
+
+- **Request schema**: all fields currently written by the Phase 6 curl block, including optional `personaId`, `commitSha`, `deploymentId`, `repoName`. Zod validates `verdict in {...}`, severity counts are non-negative, `findings` is a JSON array.
+- **Response schema**: `{ ok: boolean, cloud: boolean, sessionId: string|null, existed: boolean, statsUpdated: boolean }`. `existed=true` when a prior insert with the same `session_id` is found (idempotent replay). `statsUpdated=false` when the session insert succeeded but the secondary persona stats update failed — the skill can decide whether to surface that.
+- **Transaction boundary**: the session insert + persona stats update run as a best-effort sequence. The session insert is the source of truth; the stats row (`personas.test_count`, `personas.last_tested_at`) is a **derived cache** — `test_count = COUNT(*) FROM persona_test_sessions WHERE persona_id = X`. A nightly reconciler (`scripts/reconcile-persona-stats.mjs`, Phase D+1 follow-up — not blocking this refactor) recomputes stats from sessions so any missed update self-heals.
+- **Idempotency**: `session_id` (e.g. `persona-test-<timestamp>`) is UNIQUE. Re-posting the same id is a no-op via `onConflict: 'session_id', ignoreDuplicates: true`. Response returns the existing row's `sessionId` + `existed: true`; no error.
+- **Exit codes**: 0 = success (including idempotent replay); 2 = validation; 1 = unexpected.
+
+All three subcommands emit single-line JSON on stdout (same pattern as existing subcommands) and diagnostic text on stderr. Tests for each in `tests/cross-skill-persona.test.mjs` cover: happy path, empty-list, validation error, cloud-unavailable no-op.
+
+**Design rule (restated and enforced)**: `scripts/cross-skill.mjs` is the **guaranteed shipped surface** for cross-skill persistence. SKILL.md files never hand-write curl to these tables. If the CLI is unavailable in a consumer repo, the skill logs `WARN: cross-skill CLI not available — persistence disabled for this session` and continues in degraded mode. **No curl fallback is shipped** (superseding the earlier draft of this plan which proposed a `references/supabase-persistence-recipes.md` file — that reference is deleted from the plan).
 
 ---
 
 ## 3. Sustainability Notes
+
+### Canonical source of truth (for skill content)
+
+**Design decision**: the top-level `skills/` tree is **authoritative**. `.claude/skills/` and `.github/skills/` are **generated** from it — one-way, never edited directly.
+
+- Authors edit only `skills/<name>/*`.
+- A new script `scripts/regenerate-skill-copies.mjs` produces `.claude/skills/` and `.github/skills/` from `skills/` (the content is byte-identical across all three; the surfaces only exist because different tools look in different places).
+- The script runs in a pre-commit hook (via existing hook infrastructure) and in CI. Out-of-sync copies fail the build — no silent drift.
+- `scripts/check-sync.mjs` becomes a read-only verifier (does `skills/` → generated output match the committed `.claude/` and `.github/` output?) rather than a three-way equality checker. Equality checking detects drift *after* it happens; one-way generation *prevents* drift.
+
+Editor guidance + documentation call-out in `CONTRIBUTING.md`: "Never edit `.claude/skills/` or `.github/skills/` directly — run `node scripts/regenerate-skill-copies.mjs` after editing `skills/`."
+
+### Packaging allowlist (for manifest + sync)
+
+Neither `build-manifest.mjs` nor `sync-to-repos.mjs` does a naïve recursive walk. Both consume an explicit allowlist defined once in `scripts/lib/skill-packaging.mjs`:
+
+```js
+export const SKILL_ALLOWED_PATTERNS = [
+  'SKILL.md',                    // canonical file — always present
+  'references/**/*.md',          // reference files
+  'examples/**/*.md',            // example outputs
+];
+
+export const SKILL_EXCLUDED_PATTERNS = [
+  '**/.*',                       // dotfiles (.DS_Store, .gitkeep)
+  '**/*.swp', '**/*.swo',        // editor swap files
+  '**/*.bak', '**/*~',           // editor backups
+  '**/node_modules/**',          // belt-and-braces
+];
+```
+
+Everything goes through `enumerateSkillFiles(skillDir) → string[]` which applies both lists. A file that matches both (e.g. `references/.DS_Store`) is excluded. Unknown file types inside a skill directory (e.g. `.json`, `.js`) are **rejected with an explicit error** — skills are pure markdown surfaces by design; code belongs in `scripts/`.
 
 ### Assumptions that could change
 
@@ -167,21 +338,23 @@ This eliminates ~400 tokens of curl recipe from `persona-test` SKILL.md and give
 |---|---|---|
 | Claude Code loads only SKILL.md on invocation; sibling files require explicit Read() | Auto-preloading would make progressive disclosure moot | The refactor still pays off for maintainability; content organisation remains useful |
 | The "Read when" trigger approach works — model decides to Read based on trigger | Model might over-Read (load everything) or under-Read (miss needed content) | Tune trigger phrasing; monitor in practice; fall back to embedding in SKILL.md if over-/under-reading is systemic |
-| Installer manifest schema v1 consumers can handle v2 gracefully | Old installers crash on `files` field | `files` is additive + optional; v1 `SkillEntrySchema.parse()` will reject unknown fields → we bump schemaVersion so old installers know to skip |
-| The 3 skill copies (`.claude/` + `.github/` + top-level `skills/`) stay in sync manually | Copies drift | Add a CI check (`npm run check-sync` or similar) comparing the 3 copies of each skill directory |
+| Installer manifest schema v1 consumers can handle v2 gracefully | Old installers silently skip new fields | Version-gated entrypoint (see §2.3.2) rejects with explicit `UNSUPPORTED_MANIFEST_VERSION`; two-step rollout ships the compat installer before publishing v2 manifests |
+| Skills stay pure-markdown | A skill wants to ship helper scripts alongside SKILL.md | Allowlist rejects non-markdown; the right answer is always `scripts/<name>.mjs` at repo root, not inside the skill dir |
 
 ### How the design accommodates future change
 
-- **New skill**: copy the structure (SKILL.md + empty `references/`). No new sync config unless the manifest builder walks the directory (which it will, post-refactor).
-- **New reference type**: add to `references/`; the reference-index table updates; no global changes.
-- **Cross-skill content migration**: a ref file can move from one skill to another by filesystem move + index update in both files.
-- **Schema v3 (hypothetical future)**: installer already speaks versioned manifests.
+- **New skill**: add `skills/<name>/SKILL.md` + optional `references/` and `examples/`. Re-run `regenerate-skill-copies.mjs`. `build-manifest.mjs` picks it up automatically (allowlist covers the whole tree).
+- **New reference type**: add to `references/`; the ref-index table updates; no global changes.
+- **Cross-skill content migration**: a ref file can move from one skill to another by filesystem move + ref-index update in both files.
+- **Schema v3 (hypothetical future)**: installer already speaks versioned manifests — add an entry to the version-gated entrypoint for v3, ship as a compat installer, then publish v3 manifests.
 
 ### Extension points deliberately built in
 
-1. **Manifest walks the skill directory, not a hardcoded list** — new files auto-register.
-2. **Trigger syntax is a free-form `Read when:` clause** — can be tightened later into structured metadata (e.g. YAML triggers) without breaking existing skills.
-3. **`examples/` directory is optional** — skills that don't need it pay zero tokens; skills that do can add large output bodies there without inflating SKILL.md.
+1. **Authoritative source tree** — one place to edit; copies are generated.
+2. **Allowlist, not directory walk** — predictable packaging; rejects unexpected files.
+3. **Version-gated installer entrypoint** — future schema changes don't silently corrupt consumer state.
+4. **Trigger syntax is a free-form `Read when:` clause** — can be tightened later into structured metadata (e.g. YAML triggers) without breaking existing skills.
+5. **`examples/` directory is optional** — skills that don't need it pay zero tokens; skills that do can add large output bodies there without inflating SKILL.md.
 
 ---
 
@@ -193,12 +366,17 @@ Grouped by work-phase. Each file has purpose + imports + what-imports-it.
 
 | File | Purpose | Imports | Imported by |
 |---|---|---|---|
-| `docs/skill-reference-format.md` (NEW) | Canonical spec for the SKILL.md ref-index table format. Documents the required 3-column table, trigger rules, anti-patterns. Source of truth for the lint script. | — | Referenced by every SKILL.md; read by lint script authors |
-| `scripts/lib/skill-refs-parser.mjs` (NEW) | Parse the "Reference files" section of a SKILL.md into structured entries. Validates format. | `node:crypto` | `scripts/check-skill-refs.mjs`, future meta tools |
-| `scripts/check-skill-refs.mjs` (NEW) | CLI lint: for each skill, parse its ref-index, verify every listed file exists, verify no orphan files in `references/` that aren't listed. Exits non-zero on violations. | `skill-refs-parser.mjs`, `node:fs` | `npm test` (added to `package.json` test scripts) |
-| `tests/skill-refs-parser.test.mjs` (NEW) | Unit tests for the parser (valid formats pass; missing files / malformed table fail). | — | `npm test` |
-| `scripts/lib/repo-stack.mjs` (NEW) | Shared stack-detection library. `detectRepoStack`, `detectPythonFramework`, `detectPythonEnvironmentManager`. | `node:fs` | Indirectly referenced by SKILL.md files; no Node import (skills invoke via shell) |
-| `tests/repo-stack.test.mjs` (NEW) | Tests for stack detection — JS/TS, Python, mixed, unknown; Python framework detection. | `node:fs` (fixtures) | `npm test` |
+| `docs/skill-reference-format.md` (NEW) | Canonical spec for the SKILL.md ref-index table format + reference-file `summary:` frontmatter. Documents trigger rules, anti-patterns, the drift-detection contract. Source of truth for the lint script. | — | Referenced by every SKILL.md; read by lint script authors |
+| `scripts/lib/skill-refs-parser.mjs` (NEW) | Parse the "Reference files" section of a SKILL.md into structured entries. Parse frontmatter `summary` from referenced files. Validates format. | `node:crypto`, `node:fs` | `scripts/check-skill-refs.mjs`, future meta tools |
+| `scripts/check-skill-refs.mjs` (NEW) | CLI lint: for each skill, parse its ref-index, verify every listed file exists, verify no orphan files, verify each ref's frontmatter `summary` exactly matches the index row. Exits non-zero on any violation. | `skill-refs-parser.mjs`, `node:fs` | `npm test` (added to `package.json` test scripts) |
+| `tests/skill-refs-parser.test.mjs` (NEW) | Unit tests for the parser — valid formats pass; missing files / malformed table / frontmatter mismatch fail. | — | `npm test` |
+| `scripts/lib/schemas.mjs` (MODIFY) | Add `StackProfileSchema` (output of `detect-stack` CLI). Single source of truth — don't duplicate in cross-skill.mjs. | zod | `cross-skill.mjs`, stack detection consumers |
+| `scripts/lib/repo-stack.mjs` (NEW) | Pure stack-detection library. `detectRepoStack`, `detectPythonFramework`, `detectPythonEnvironmentManager`. | `node:fs` | `cross-skill.mjs detect-stack` subcommand (§2.4) |
+| `scripts/cross-skill.mjs` (MODIFY) | Add `detect-stack` subcommand using `repo-stack.mjs` + `StackProfileSchema`. | `schemas.mjs`, `repo-stack.mjs` | Skills shell out to this |
+| `tests/repo-stack.test.mjs` (NEW) | Tests for stack detection — JS/TS, Python, mixed, unknown; Python framework detection; environment manager detection. | `node:fs` (fixtures) | `npm test` |
+| `scripts/lib/skill-packaging.mjs` (NEW) | Defines `SKILL_ALLOWED_PATTERNS`, `SKILL_EXCLUDED_PATTERNS`, `enumerateSkillFiles(skillDir)`. Single source of truth for what ships. | `node:fs`, `node:path` | `build-manifest.mjs`, `regenerate-skill-copies.mjs`, `sync-to-repos.mjs`, `check-sync.mjs` |
+| `tests/skill-packaging.test.mjs` (NEW) | Tests: SKILL.md + refs/examples included; dotfiles, swap files, backups excluded; non-markdown files rejected with clear error. | `node:fs` (fixtures) | `npm test` |
+| `scripts/regenerate-skill-copies.mjs` (NEW) | Reads from authoritative `skills/`, byte-copies to `.claude/skills/` and `.github/skills/`. Uses `enumerateSkillFiles` for the allowlist. **Prunes** any file present in a destination tree but not in the source (skill deleted, ref file renamed, etc.) — so `.claude/skills/` and `.github/skills/` exactly mirror `skills/` after every run. Idempotent. | `skill-packaging.mjs`, `node:fs` | Pre-commit hook + CI; invoked manually when editing skills |
 
 **Why these files**:
 - `docs/skill-reference-format.md` → Principle 10 (Single Source of Truth — one place defines the format).
@@ -206,18 +384,37 @@ Grouped by work-phase. Each file has purpose + imports + what-imports-it.
 - `scripts/check-skill-refs.mjs` → Principle 19 (Observability — catches ref rot before it ships).
 - `scripts/lib/repo-stack.mjs` → Principle 1 (DRY — eliminates 3x duplication).
 
-### Phase B — Installer extension
+### Phase B — Installer extension (two-step rollout — see §2.3.2)
 
-| File | Purpose | Imports | Imported by |
-|---|---|---|---|
-| `scripts/lib/schemas-install.mjs` (MODIFY) | Add `FileEntrySchema`; extend `SkillEntrySchema` with `files` array. Bump `MANIFEST_SCHEMA_VERSION` to 2. | zod | `build-manifest.mjs`, installer |
-| `scripts/build-manifest.mjs` (MODIFY) | Walk each `skills/<name>/` directory recursively; compute SHA for each file; populate `files` array. Keep `path`/`sha`/`size` pointing at SKILL.md for backward-compat. | `schemas-install.mjs` | CI + manual rebuild |
-| `scripts/lib/install/surface-paths.mjs` (MODIFY) | `resolveSkillTargets` returns `{surface, dir, filePath}` as before BUT adds `resolveSkillFiles(name, surface, repoRoot, files[])` that returns per-file targets. | `node:fs`, `node:path` | `install-skills.mjs`, `transaction.mjs` |
-| `scripts/lib/install/transaction.mjs` (MODIFY) | Install every file in the manifest's `files` array into the skill's target dir, not just SKILL.md. Receipts track all installed files. | existing | `install-skills.mjs` |
-| `scripts/lib/install/receipt.mjs` (MODIFY) | `managedFiles` already supports multiple entries per skill — no schema change, but ensure the installer populates them all. | existing | `install-skills.mjs` |
-| `scripts/lib/install/conflict-detector.mjs` (MODIFY) | Check conflicts on every file in a skill, not just SKILL.md. | existing | `install-skills.mjs` |
-| `scripts/sync-to-repos.mjs` (MODIFY) | Replace the hardcoded `SKILL_FILES` array with a directory-walking helper: for each skill name × each surface (`.claude/skills/<n>/`, `.github/skills/<n>/`, `skills/<n>/`), enumerate all files under that directory. | `node:fs`, `node:path` | CI + manual sync |
-| `tests/install-multi-file-skill.test.mjs` (NEW) | Integration test: build a mock skill dir with references/, run buildManifest, verify `files` array is correct; run a dry-run install, verify all files would be written. | existing installer libs | `npm test` |
+**Phase B.1 — Compat installer (ships alone, first)**
+
+B.1 teaches the installer to **understand** v2 manifests; it does not change what manifests the build pipeline **produces**. The version bump lives in Phase B.2.
+
+| File | Purpose |
+|---|---|
+| `scripts/lib/schemas-install.mjs` (MODIFY) | Add `FileEntrySchema`; extend `SkillEntrySchema` with an **optional** `files` array (v1 manifests without it still parse). Define a `MANIFEST_SUPPORTED_VERSIONS = [1, 2]` constant used by the entrypoint. **Do not change** the `MANIFEST_SCHEMA_VERSION` constant that `build-manifest.mjs` writes — that flip happens in B.2. |
+| `scripts/install-skills.mjs` (MODIFY) | Read `schemaVersion` **before** parsing the rest of the manifest. `schemaVersion ∈ MANIFEST_SUPPORTED_VERSIONS` → route to v1 or v2 install path. Otherwise → exit with `UNSUPPORTED_MANIFEST_VERSION` and the minimum installer version required. |
+| `scripts/lib/install/surface-paths.mjs` (MODIFY) | Add `resolveSkillFiles(name, surface, repoRoot, files[])` that returns per-file targets. Keep existing `resolveSkillTargets` for v1 compat. |
+| `scripts/lib/install/transaction.mjs` (MODIFY) | Multi-file install path: writes every file in `files[]`, deletes files in `previousReceipt.managedFiles` that are not in the new manifest (see §2.3.3), with all-or-nothing rollback. Respects `CONFLICT_DELETION_SKIPPED` for user-modified files. |
+| `scripts/lib/install/conflict-detector.mjs` (MODIFY) | Detect conflicts on every file in a skill, not just SKILL.md. Adds `deletionConflicts[]` for files the installer would delete but whose SHA has been user-modified. |
+| `scripts/lib/install/receipt.mjs` (MODIFY) | `managedFiles` schema unchanged; ensure installer populates every entry on write. |
+| `tests/install-version-gate.test.mjs` (NEW) | Matrix from §2.3.2: v1 installer × v1 manifest; v1 × v2 (should fail cleanly); v2 × v1 (back-compat); v2 × v2. |
+| `tests/install-lifecycle.test.mjs` (NEW) | Add/update/delete scenarios: skill gains a ref → installed; loses a ref → deleted; user-modified file → deletion skipped with warning; partial failure → rollback restores prior state. |
+
+Ship B.1 as its own tagged release. Wait for consumer repos to `git pull` and pick it up.
+
+**Phase B.2 — v2 manifests (ships after consumers have B.1 installed)**
+
+Readiness check (before starting B.2): consumer repos must have B.1 installed. `scripts/sync-to-repos.mjs` already reports per-repo file SHAs — extend it with a `--check-installer-version` flag that verifies each consumer's installed `scripts/install-skills.mjs` SHA matches the B.1 release SHA. All green → safe to proceed.
+
+| File | Purpose |
+|---|---|
+| `scripts/lib/schemas-install.mjs` (MODIFY) | Flip the `MANIFEST_SCHEMA_VERSION` constant from 1 to 2. |
+| `scripts/build-manifest.mjs` (MODIFY) | Use `enumerateSkillFiles` from `skill-packaging.mjs` (allowlist-based, not directory walk). Populate `files[]` per skill. Keep `path`/`sha`/`size` pointing at SKILL.md for back-compat. |
+| `scripts/sync-to-repos.mjs` (MODIFY) | Replace hardcoded `SKILL_FILES` array with `enumerateSkillFiles()` calls against the authoritative `skills/` tree plus the generated `.claude/skills/` and `.github/skills/` trees. |
+| `scripts/check-sync.mjs` (MODIFY) | Becomes a read-only verifier: does running `regenerate-skill-copies.mjs` produce output byte-identical to the committed `.claude/skills/` and `.github/skills/`? If not, fail with the generator command to run. |
+| `tests/install-multi-file-skill.test.mjs` (NEW) | End-to-end: build a v2 manifest from fixture skills, run a v2 install, verify all files + receipt correctness. |
+| `tests/packaging-allowlist.test.mjs` (NEW) | Verify `build-manifest` and `sync-to-repos` both reject non-allowlisted files, both exclude dotfiles/backups/swap files identically. |
 
 **Why these files**:
 - Principle 14 (Transaction Safety — installer already uses transactional installs; extending to multi-file must preserve all-or-nothing semantics).
@@ -235,7 +432,7 @@ Move to `references/`:
 - `references/session-history.md` — Phase 6c (745–771). Trigger: *session save succeeded AND Supabase configured*.
 - `references/browser-tool-detection.md` — Phase 1 detailed tier logic (248–295; 48 lines). Trigger: *setup failing OR first-run environment*.
 - `references/persona-debrief-format.md` — Phase 5b full tone-rules + template (577–620). Trigger: *about to generate the debrief section*.
-- `references/supabase-persistence-recipes.md` — the 4 curl blocks → replaced by `cross-skill.mjs` CLI calls. Trigger: *CLI unavailable, fall back to raw curl*.
+- ~~`references/supabase-persistence-recipes.md`~~ — **deleted from the plan**. The 4 curl blocks are replaced by `cross-skill.mjs` subcommands (see §2.5); no curl fallback is shipped. CLI unavailable in a consumer repo → skill logs a warning and continues in degraded mode.
 
 Kept canonical:
 - Phase 0 routing + sub-command entries
@@ -334,7 +531,7 @@ Kept canonical:
 |---|---|---|---|
 | Over-reading — model reads every ref "just in case" | Medium | Erases the token savings | Write tight triggers; measure via a quick check after Phase C1 (count Read() calls on persona-test across 5 sample invocations) |
 | Under-reading — model misses needed content that moved to a ref | Medium | Skill quality degrades silently | For each ref, keep a 1-line *semantic summary* in SKILL.md alongside the trigger, so model has enough to decide; keep triggers specific enough to fire when content matters |
-| Ref rot — summaries in the index drift from the ref bodies | High over time | Triggers fire for wrong content | `check-skill-refs.mjs` lint: parse each ref's first paragraph; compare to index summary; flag large divergence |
+| Ref rot — summaries in the index drift from the ref bodies | High over time | Triggers fire for wrong content | See §2.2.1 — every reference file declares a canonical `Summary:` line in frontmatter; lint does an **exact string match** against the index table entry. No heuristic prose comparison. |
 | Installer v1 → v2 migration breaks downstream repos | Low if done right | Skills stop working in downstream repos | Ship v2 schema with `files` as optional (default: `[{relPath: 'SKILL.md', ...}]`); old installers reading v2 manifests work fine for single-file skills |
 | 3-way skill copies drift after refactor | High (this already happens) | Inconsistent behaviour in consumer repos | `check-sync.mjs` enforces byte equality across all 3 copies; CI gate |
 | "Read when" triggers are subjective | Always | Inconsistent reading behaviour across runs | Anti-pattern section in `docs/skill-reference-format.md` catches the worst cases ("when relevant" etc.); over time, trigger phrasing converges through review |
@@ -353,6 +550,35 @@ Kept canonical:
 - Automatic reference-index generation — defer. Human-authored triggers are higher quality than LLM-generated ones at this stage.
 - Structured trigger metadata (YAML instead of free-form clauses) — defer. Free-form is sufficient for the current 6 skills; revisit if we grow to 15+.
 - `examples/` directories — create only when a specific skill needs one (audit-loop + ux-lock likely qualify).
+
+### Pre-existing installer bugs this plan inherits
+
+Gemini's final-gate review surfaced three real bugs in the current installer infrastructure. They don't block Phase B but the implementation must address them or the refactor will land on broken foundations.
+
+| # | File | Bug | Fix lands in |
+|---|---|---|---|
+| G2 | `scripts/install-skills.mjs` (global `claude` surface) | Receipt path uses `path.relative(repoRoot, target.filePath)` for files that live in `~/.claude/skills/` — produces machine-specific backward-traversing paths. Prevents portable receipts. | **Phase B.1** — split receipts by scope: global receipt (at `~/.audit-loop-install-receipt.json`) for `claude` surface; repo receipt for `copilot`/`agents`. Store absolute paths for global targets, repo-relative for per-repo targets. |
+| G3 | `scripts/lib/install/conflict-detector.mjs` for merged files | Stores `sha: blockSha` in `managedFiles` but `detectConflicts` computes `currentSha` as SHA of the full merged file on disk — these can never match for files with any other content. Idempotent re-install always flags a "conflict". | **Phase B.1** — for merged targets, store SHA of final merged content in `managedFiles.sha`; keep `blockSha` as a separate `blockSha:` metadata field used only for block-update detection. |
+| G5 | `scripts/build-manifest.mjs` — `descMatch = content.match(/description:\s*\|?\s*\n\s+(.+)/)` | Strictly requires newline after `description:`. Skills using inline YAML (`description: "..."`) fall through to the skill-name fallback silently. | **Phase B.2** — replace with a proper YAML frontmatter parser (`js-yaml`) OR extend the regex to `/description:\s*(?:\|\s*\n\s+)?([^\n]+)/` + strip surrounding quotes. Preference: `js-yaml` since we're changing packaging anyway. |
+
+All three fixes ship inside the `Phase B.1` commit since they affect installer internals the refactor touches. Each needs a regression test added to the Phase B test matrix.
+
+### Gemini final-gate deliberation record
+
+Gemini verdict: **REJECT** — 5 findings. Claude deliberation:
+
+- **#2 Path Resolution, #3 Broken Idempotency, #5 Parsing Logic** — **ACCEPTED** as pre-existing bugs in scope of Phase B.1. Recorded above.
+- **#1 Missing Crash-Safe Transaction (Failed Implementation)** — **CHALLENGED**. Evidence: the finding asserts `executeTransaction` "still uses an in-memory snapshots Map" — this is the **current** implementation, pre-dating this plan. The plan describes the WAL journal to be built during Phase B.1; it is not a failure to ship behaviour that hasn't been implemented yet. The `.install-txn.json` pattern in §2.3.3 is the commitment. Reviewer conflated "plan" with "implementation".
+- **#4 Missing Implementation (`FileEntrySchema` absent)** — **CHALLENGED**, same category error. The plan prescribes adding `FileEntrySchema` in Phase B.1; §2.3.1 defines it explicitly. Current `schemas-install.mjs` correctly does not have it — that's the state the refactor leaves.
+
+**Decision**: challenges held. Category-error findings do not require a re-run of Gemini; the three accepted findings are addressed in the table above and re-verified by Phase B.1 tests (`tests/install-version-gate.test.mjs`, `tests/install-lifecycle.test.mjs`). Plan status flips to **Approved-with-conditions**: Phase B.1 must include regression tests for bugs G2, G3, G5.
+
+### Known limitations (acknowledged, not blocking)
+
+1. **Progressive-disclosure classification is a judgement call.** Some refs (e.g. `persona-debrief-format.md`) will be read on every happy-path invocation — not because they're "edge content" but because they house a large format-heavy template that bloats SKILL.md. Acceptable as long as the trigger is **deterministic** ("when generating the debrief section"). The true measure of success is per-invocation token count; the CANONICAL vs REFERENCE split is a proxy.
+2. **Trigger-quality lint is policy-by-documentation.** `check-skill-refs.mjs` enforces table shape + file existence + summary equality, but does NOT algorithmically flag low-quality triggers like "when relevant". Reviewers catch those during code review. Adding a deny-list of banned phrases is easy if this turns out to leak in practice — tracked as a follow-up, not part of Phase A.
+3. **No fully-closed end-to-end test.** The E2E chain (`skills/ → regenerate → manifest → install → Claude Code consumes`) cannot be fully automated — the final step requires a live Claude Code harness. The delivered tests cover every stage up to *"files land on disk in the correct tree"*. Manual dogfood (C1 validation run on `persona-test`) bridges the last-mile gap.
+4. **Persona stats are cached, not authoritative.** `personas.test_count` / `last_tested_at` are derived from `persona_test_sessions` and may go stale if `record-persona-session` fails mid-call. A reconciler (`scripts/reconcile-persona-stats.mjs`) is scheduled as a follow-up but out of scope for this refactor.
 
 ---
 
@@ -399,16 +625,21 @@ Before-and-after metric captured in the plan's close-out:
 
 | Phase | What | Depends on | Atomicity |
 |---|---|---|---|
-| **A** | Format spec, parser, lint script, repo-stack lib, tests | — | Single commit (format + lint + lib are independent, but all required for safety net) |
-| **B** | Installer + sync multi-file support, manifest schema v2 | A (lint script is ready) | Single commit; bump `MANIFEST_SCHEMA_VERSION` |
-| **D** | Cross-skill CLI subcommands for persona-test curl replacement | — (can start anytime) | One commit per subcommand + tests |
-| **C1** | Refactor persona-test | A, B, D (D subcommands must exist) | One commit: refs created + SKILL.md trimmed + sync copies |
-| **C2** | Refactor audit-loop | A, B | One commit |
-| **C3** | Refactor ux-lock | A, B | One commit |
-| **C4** | Refactor plan-frontend | A, B, + repo-stack lib | One commit |
-| **C5** | Refactor ship | A, B, + repo-stack lib | One commit |
-| **C6** | Refactor plan-backend | A, B, + repo-stack lib | One commit |
-| **E** | check-sync extension, CI gate, `npm run check-skills` | All C phases | Single commit |
+| **A** | Format spec, parser, lint script, `repo-stack` lib, `detect-stack` CLI, `skill-packaging` lib, `regenerate-skill-copies` script, all Phase A tests | — | Single commit. Lint + packaging + regenerate ship together so they can validate each other. |
+| **B.1** | Compat installer (version-gated entrypoint, multi-file install path, lifecycle delete, tests). No v2 manifest published yet. | A | Single commit; **tag release**. |
+| **B.2** | Publish v2 manifest via `build-manifest.mjs`; switch sync to allowlist; `check-sync` becomes read-only verifier. | B.1 deployed to consumer repos (verified via `git pull` + receipt) | Single commit; publish only after confirming B.1 is installed everywhere |
+| **D** | Cross-skill CLI subcommands for persona-test curl replacement (`list-personas`, `add-persona`, `record-persona-session`) + schemas + tests | — (independent) | One commit per subcommand + tests |
+| **C1** | Refactor persona-test | A, B.1, D | One commit: edit `skills/persona-test/`, regenerate copies, tests pass |
+| **C2** | Refactor audit-loop | A, B.1 | One commit |
+| **C3** | Refactor ux-lock | A, B.1 | One commit |
+| **C4** | Refactor plan-frontend | A, B.1, `detect-stack` CLI | One commit |
+| **C5** | Refactor ship | A, B.1, `detect-stack` CLI | One commit |
+| **C6** | Refactor plan-backend | A, B.1, `detect-stack` CLI | One commit |
+| **E** | `npm run check-skills` wiring, CI gate, pre-commit hook calling `regenerate-skill-copies`, CONTRIBUTING.md update | All C phases | Single commit |
+
+**Why B.1 and B.2 ship separately**: a v1 installer that encounters a v2 manifest with reference files will silently drop the references — consumer repos end up with broken skills. Shipping the version-gated installer alone (B.1) gives consumer repos time to pick it up via `git pull` before any v2 manifest reaches them. B.2 only flips the version bit once B.1 is confirmed installed everywhere.
+
+C1–C6 can run in parallel once B.1 is shipped (B.2 is not required for skill refactors — skills work fine against v1 manifests until the manifest itself is regenerated). Sequential order above is suggested so we validate the approach on persona-test first.
 
 C1–C6 can run in parallel (independent files). Sequential order is suggested above (biggest saving first) so we can validate the approach on `persona-test` before propagating.
 
