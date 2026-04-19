@@ -57,7 +57,7 @@ import { executeTools, normalizeToolResults, formatLintSummary } from './lib/lin
 import {
   selectEventSource, loadDebtLedger, appendEvents, reconcileLocalToCloud, mergeLedgers as mergeLedgersForSuppression
 } from './lib/debt-memory.mjs';
-import { initLearningStore, isCloudEnabled, upsertRepo, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
+import { initLearningStore, isCloudEnabled, upsertRepo, upsertPlan, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
 import {
@@ -739,7 +739,7 @@ async function runMapReducePass(openai, files, systemPrompt, projectBrief, planC
  * Large backend file sets are split into route+service sub-passes.
  * Each pass uses safeCallGPT for graceful degradation on timeout/error.
  */
-async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null, sessionCacheHit = null, scopeMode = null } = {}) {
+async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext = '', { passFilter = null, fileFilter = null, round = 1, ledgerFile = null, diffFile = null, changedFiles = [], repoProfile = null, bandit = null, fpTracker = null, noLedger = false, noTools = false, strictLint = false, noDebtLedger = false, readOnlyDebt = false, debtLedgerPath = undefined, debtEventsPath = undefined, escalateRecurring = null, sessionCacheHit = null, scopeMode = null, planFile = null } = {}) {
   const totalStart = Date.now();
 
   // Initialize pass result cache — survives merge crashes
@@ -783,7 +783,34 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   if (isCloudEnabled() && repoProfile) {
     cloudRepoId = await upsertRepo(repoProfile, path.basename(path.resolve('.'))).catch(() => null);
     if (cloudRepoId) {
-      cloudRunId = await recordRunStart(cloudRepoId, 'plan', 'code', { scopeMode }).catch(() => null);
+      // Best-effort commit + branch capture — anchors the audit run to a code state.
+      let commitSha = null;
+      let branch = null;
+      try {
+        const { execFileSync } = await import('node:child_process');
+        commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      } catch { /* not a git repo, or git not on PATH */ }
+
+      // If we have a plan file path, register it so audit_runs.plan_id links back.
+      let planId = null;
+      if (planFile) {
+        const inferredSkill = /plan[-_]?frontend|\bfrontend\b|\bui\b/i.test(planFile)
+          ? 'plan-frontend'
+          : /plan[-_]?backend|\bbackend\b|\bapi\b/i.test(planFile)
+            ? 'plan-backend'
+            : 'manual';
+        planId = await upsertPlan(cloudRepoId, {
+          path: planFile,
+          skill: inferredSkill,
+          status: 'in_progress',
+          commitSha,
+        }).catch(() => null);
+      }
+
+      cloudRunId = await recordRunStart(cloudRepoId, planFile || 'ad-hoc', 'code', {
+        scopeMode, commitSha, branch, planId,
+      }).catch(() => null);
     }
   }
 
@@ -2003,7 +2030,7 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
-    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring, sessionCacheHit: cacheHit, scopeMode });
+    await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring, sessionCacheHit: cacheHit, scopeMode, planFile });
     return;
   }
 

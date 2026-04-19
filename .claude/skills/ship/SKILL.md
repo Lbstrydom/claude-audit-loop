@@ -77,6 +77,56 @@ When generating/updating status.md for Python repos:
 
 ---
 
+## Step 0.5 — Pre-Ship Gate Queries (non-blocking by default)
+
+Collect signals before proceeding so the ship_event emitted at the end is
+accurate. All queries are best-effort; if any fails, log it and proceed.
+
+### 0.5a — Recent persona-test P0s for this repo
+
+If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set:
+
+```bash
+curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&p0_count=gt.0&order=created_at.desc&limit=1&select=persona,focus,verdict,p0_count,p1_count,created_at,debrief_md" \
+  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+```
+
+Capture `open_p0_count` and `open_p1_count` from the latest session (within
+the last 14 days). These feed the ship_event record. If a session has P0s:
+
+```
+⚠ UX GATE (non-blocking)
+  Last persona test: "<persona>" — <N> days ago → <verdict> (P0: <n>, P1: <n>)
+  Unresolved P0s detected. These are user-visible broken flows.
+  Shipping anyway — consider fixing before next user-facing release.
+```
+
+### 0.5b — Fixes that lack a /ux-lock regression spec
+
+Query the `unlocked_fixes` view for recent HIGH-severity fixes without a
+regression spec (these are the refactor-fragile spots):
+
+```bash
+node scripts/cross-skill.mjs list-unlocked-fixes
+```
+
+The command prints `{"ok":true,"cloud":true,"rows":[...]}`. Count the rows
+as `missing_spec_count`. If > 0:
+
+```
+⚠ REGRESSION LOCK GATE (non-blocking)
+  <n> recent HIGH-severity fix(es) have no /ux-lock spec:
+    • <primary_file>: <one-line detail>
+  These will silently regress under future refactors.
+  Consider: /ux-lock <commit-hash> for each.
+```
+
+### 0.5c — Override flags
+
+If `$ARGUMENTS` contains `--no-tests`, `--ignore-p0`, or `--skip-ux-lock`,
+note which override was used — it's recorded with the ship_event.
+
 ## Step 1 — Assess What Changed
 
 Before updating any docs, understand the current state:
@@ -255,6 +305,41 @@ git push origin <current-branch>
 
 If push fails (e.g., behind remote), inform the user and suggest the fix.
 Do NOT force push.
+
+---
+
+## Step 7 — Emit Ship Event (always)
+
+After the commit + push completes (or is blocked), record the outcome so the
+cross-skill store has a full history of what was gated, overridden, or let
+through. This runs even on block/abort so gate effectiveness can be measured.
+
+```bash
+node scripts/cross-skill.mjs record-ship-event --json '{
+  "outcome": "shipped" | "blocked" | "warned" | "overridden" | "aborted",
+  "blockReasons": ["test-failure","lint-failure","type-check-failure","format-failure","open-p0","missing-regression-spec","secrets-detected"],
+  "openP0Count": <from Step 0.5a>,
+  "openP1Count": <from Step 0.5a>,
+  "missingSpecCount": <from Step 0.5b>,
+  "overriddenByUser": <true if any override flag was used>,
+  "overrideFlag": "<e.g. --no-tests or null>",
+  "stackDetected": "js-ts" | "python" | "mixed" | "unknown",
+  "framework": "<fastapi|django|flask|null>",
+  "durationMs": <wall-clock ms from step 0.5 to now>
+}'
+```
+
+**Outcome semantics**:
+- `shipped` — everything passed, commit pushed
+- `warned` — shipped despite non-blocking warnings (UX gate triggered but still pushed)
+- `overridden` — user passed `--no-tests` or similar to bypass a block
+- `blocked` — a blocking check failed and the push did not occur
+- `aborted` — Claude aborted before pushing (e.g. secrets detected, nothing to commit)
+
+`blockReasons` is always an array — empty on `shipped`, populated otherwise.
+
+The command is fire-and-forget; do not block on its output. If cloud mode is
+off, the CLI prints `{"ok":true,"cloud":false}` and returns 0.
 
 ---
 

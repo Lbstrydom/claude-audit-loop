@@ -43,6 +43,7 @@ const CORE_SCRIPTS = [
   'scripts/gemini-review.mjs',
   'scripts/bandit.mjs',
   'scripts/learning-store.mjs',
+  'scripts/cross-skill.mjs',
   'scripts/phase7-check.mjs',
   'scripts/shared.mjs',
   'scripts/check-sync.mjs',

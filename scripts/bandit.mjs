@@ -295,25 +295,31 @@ export class PromptBandit {
 
 /**
  * Canonical per-finding reward formula.
- * Components: procedural (40%) + substantive (30%) + deliberation quality (30%).
+ * Components: procedural (35%) + substantive (25%) + deliberation (25%) + user-impact (15%).
+ * The user-impact term is 0 when no correlation data exists — formula reduces
+ * to the prior 40/30/30 split scaled by (1 - userImpactWeight), keeping legacy
+ * rewards in the same [0, 1] range and comparable across time.
  * @param {object} resolution - Deliberation resolution
  * @param {object} [evaluationRecord] - PassEvaluationRecord with findingEditLinks
+ * @param {object} [userImpact] - Optional persona-test correlation augmentation
+ * @param {'confirmed_hit'|'severity_understated'|'severity_overstated'|'audit_false_positive'|'audit_missed'|null} [userImpact.correlationType]
+ * @param {'P0'|'P1'|'P2'|'P3'} [userImpact.personaSeverity]
  * @returns {number} Reward in [0, 1]
  */
-export function computeReward(resolution, evaluationRecord = null) {
+export function computeReward(resolution, evaluationRecord = null, userImpact = null) {
   const positionWeights = { accept: 1.0, partial_accept: 0.6, challenge: 0.0 };
   const rulingWeights = { sustain: 1.0, compromise: 0.5, overrule: 0.0 };
   const severityMult = { HIGH: 1.0, MEDIUM: 0.7, LOW: 0.4 };
 
   const sevMult = severityMult[resolution.final_severity] ?? 0;
 
-  // 1. Procedural signal (40%)
+  // 1. Procedural signal
   const procedural = (
     (positionWeights[resolution.claude_position] ?? 0) * 0.4 +
     (rulingWeights[resolution.gpt_ruling] ?? 0) * 0.6
   ) * sevMult;
 
-  // 2. Substantive signal (30%) — verification-gated from finding-edit-links
+  // 2. Substantive signal — verification-gated from finding-edit-links
   let substantive = 0;
   if (evaluationRecord) {
     const link = evaluationRecord.findingEditLinks?.find(
@@ -326,10 +332,49 @@ export function computeReward(resolution, evaluationRecord = null) {
     substantive = changeBonus * sevMult;
   }
 
-  // 3. Deliberation quality signal (30%)
+  // 3. Deliberation quality signal
   const deliberation = deliberationSignal(resolution);
 
+  // 4. User-impact signal — from persona_audit_correlations (15% when present)
+  const userImpactReward = computeUserImpactReward(userImpact);
+  const hasUserImpact = userImpactReward !== null;
+
+  if (hasUserImpact) {
+    return procedural * 0.35 + substantive * 0.25 + deliberation * 0.25 + userImpactReward * 0.15;
+  }
+  // Legacy weights unchanged when no correlation data exists
   return procedural * 0.4 + substantive * 0.3 + deliberation * 0.3;
+}
+
+/**
+ * Convert a persona_audit_correlation row into a reward contribution in [0, 1].
+ * confirmed_hit → 1.0 (strong positive: user hit something audit caught)
+ * severity_understated → 0.9 (audit found it but undersold impact)
+ * severity_overstated → 0.3 (audit cried wolf — should have been lower)
+ * audit_false_positive → 0.0 (strong negative: user couldn't reproduce)
+ * audit_missed → NOT per-finding — attributes to pass-level via negative pressure
+ * @returns {number|null} null when no impact data is supplied
+ */
+export function computeUserImpactReward(userImpact) {
+  if (!userImpact || !userImpact.correlationType) return null;
+
+  const base = {
+    confirmed_hit:        1.0,
+    severity_understated: 0.9,
+    severity_overstated:  0.3,
+    audit_false_positive: 0.0,
+    audit_missed:         0.0, // rare at per-finding level — mostly a pass-level signal
+  }[userImpact.correlationType];
+
+  if (base == null) return null;
+
+  // Persona P0 carries more signal weight than P3
+  const personaWeight = {
+    P0: 1.0, P1: 0.85, P2: 0.6, P3: 0.4,
+  }[userImpact.personaSeverity] ?? 0.7;
+
+  // Blend toward 0.5 neutral when persona severity is unknown
+  return Math.max(0, Math.min(1, base * personaWeight + (1 - personaWeight) * 0.5));
 }
 
 /**

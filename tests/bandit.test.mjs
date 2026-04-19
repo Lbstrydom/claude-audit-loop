@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  PromptBandit, computeReward, deliberationSignal,
+  PromptBandit, computeReward, computeUserImpactReward, deliberationSignal,
   computePassReward, buildContext, contextSizeTier, contextBucketKey
 } from '../scripts/bandit.mjs';
 import { createRNG } from '../scripts/lib/rng.mjs';
@@ -245,6 +245,92 @@ describe('computeReward (v2)', () => {
     const high = computeReward({ claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' });
     const low = computeReward({ claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'LOW' });
     assert.ok(low < high);
+  });
+
+  it('user-impact confirmed_hit on P0 increases reward above baseline', () => {
+    const baseline = computeReward({
+      claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH',
+    });
+    const withConfirmedHit = computeReward(
+      { claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' },
+      null,
+      { correlationType: 'confirmed_hit', personaSeverity: 'P0' }
+    );
+    assert.ok(withConfirmedHit > baseline,
+      `confirmed_hit (${withConfirmedHit}) should exceed baseline (${baseline})`);
+  });
+
+  it('user-impact audit_false_positive on P0 drags reward below baseline', () => {
+    const baseline = computeReward({
+      claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH',
+    });
+    const withFP = computeReward(
+      { claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' },
+      null,
+      { correlationType: 'audit_false_positive', personaSeverity: 'P0' }
+    );
+    assert.ok(withFP < baseline,
+      `audit_false_positive (${withFP}) should be below baseline (${baseline})`);
+  });
+
+  it('user-impact null leaves reward at legacy 40/30/30 weights', () => {
+    const withNull = computeReward(
+      { claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' },
+      null,
+      null
+    );
+    const withUndef = computeReward(
+      { claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' }
+    );
+    assert.equal(withNull, withUndef);
+  });
+
+  it('user-impact reward stays in [0, 1]', () => {
+    for (const type of ['confirmed_hit', 'severity_understated', 'severity_overstated', 'audit_false_positive', 'audit_missed']) {
+      for (const sev of ['P0', 'P1', 'P2', 'P3']) {
+        const r = computeReward(
+          { claude_position: 'accept', gpt_ruling: 'sustain', final_severity: 'HIGH' },
+          null,
+          { correlationType: type, personaSeverity: sev }
+        );
+        assert.ok(r >= 0 && r <= 1, `${type}/${sev} → ${r} out of range`);
+      }
+    }
+  });
+});
+
+describe('computeUserImpactReward', () => {
+  it('returns null when no impact supplied', () => {
+    assert.equal(computeUserImpactReward(null), null);
+    assert.equal(computeUserImpactReward({}), null);
+    assert.equal(computeUserImpactReward({ personaSeverity: 'P0' }), null);
+  });
+
+  it('confirmed_hit ranks higher than severity_understated', () => {
+    const hit = computeUserImpactReward({ correlationType: 'confirmed_hit', personaSeverity: 'P0' });
+    const under = computeUserImpactReward({ correlationType: 'severity_understated', personaSeverity: 'P0' });
+    assert.ok(hit > under, `confirmed_hit (${hit}) should exceed severity_understated (${under})`);
+  });
+
+  it('audit_false_positive gives the lowest reward', () => {
+    const fp = computeUserImpactReward({ correlationType: 'audit_false_positive', personaSeverity: 'P0' });
+    const hit = computeUserImpactReward({ correlationType: 'confirmed_hit', personaSeverity: 'P0' });
+    assert.ok(fp < hit);
+    assert.ok(fp >= 0);
+  });
+
+  it('P3 severity compresses reward toward neutral', () => {
+    const p0 = computeUserImpactReward({ correlationType: 'confirmed_hit', personaSeverity: 'P0' });
+    const p3 = computeUserImpactReward({ correlationType: 'confirmed_hit', personaSeverity: 'P3' });
+    // P3 should be closer to 0.5 neutral than P0
+    assert.ok(Math.abs(p3 - 0.5) < Math.abs(p0 - 0.5),
+      `P3 (${p3}) should be closer to 0.5 than P0 (${p0})`);
+  });
+
+  it('unknown persona severity still produces a finite reward', () => {
+    const r = computeUserImpactReward({ correlationType: 'confirmed_hit', personaSeverity: 'unknown' });
+    assert.ok(Number.isFinite(r));
+    assert.ok(r >= 0 && r <= 1);
   });
 });
 

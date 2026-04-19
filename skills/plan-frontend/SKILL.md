@@ -71,22 +71,6 @@ Focus on server-rendered frontends (Jinja, Django templates, HTMX) -- the domina
 
 ## Phase 1 — Explore the Existing UI
 
-### Phase 1 Pre-Step — Persona Test History (if available)
-
-Before auditing the UI, check what real users have already found. If `PERSONA_TEST_SUPABASE_URL`
-and `PERSONA_TEST_REPO_NAME` are set:
-
-```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,debrief_md,p0_count,p1_count" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
-```
-
-If sessions overlap with the UI area being planned:
-- Include their P0/P1 findings in **Current UI Audit** as "Known user-visible issues"
-- Pull the first 200 words of the most relevant `debrief_md` as "User perspective" context
-- These are ground-truth UX signals — weight them as highly as code inspection findings
-
 **Understand what exists BEFORE designing anything new.** Study the current frontend
 to ensure consistency and reuse.
 
@@ -238,6 +222,10 @@ these principles.
 - **God component**: One JS file handling rendering, state, events, API, and validation
 - **Design inconsistency**: Same action looks different in different places
 - **Invisible state**: Component behaves differently but gives no visual cue about its state
+- **Stacked modals / LIFO cascade**: If a modal's action handler opens another modal
+  without closing itself first, the user gets trapped in a growing modal stack. Rule:
+  **always close the current modal before opening the next one** — `closeModal()` then
+  `openModal()`, never nested. Check every modal action handler in the plan.
 
 ## Phase 5 — Present the Plan
 
@@ -292,6 +280,80 @@ For each file to be created or modified:
 - Responsive breakpoints to verify
 - Edge case scenarios
 
+### 9. Acceptance Criteria (Playwright-verifiable)
+
+This section is **machine-parseable** and drives `/ux-lock verify` — which
+runs a real browser against the live implementation and grades each criterion.
+Stick to the format exactly so the parser and spec generator can do their work.
+
+**Format**:
+
+```
+- [SEVERITY] [CATEGORY] <one-line description>
+  - Setup: <how to reach the state this asserts on>
+  - Assert: <what to check, as a semantic DOM contract>
+```
+
+**Severity** (same scale as `/persona-test`):
+- `P0` — must work for the feature to be considered shipped
+- `P1` — should work; failure is a degraded experience but not a blocker
+- `P2` — cosmetic or secondary
+- `P3` — observation only; nice to pass
+
+**Category** (closed set — must be one of):
+- `visibility`    — an element is / isn't on screen
+- `interaction`   — click / type / submit → expected result
+- `a11y`          — WCAG AA / axe-core / keyboard / ARIA contract
+- `state`         — empty / loading / error / success state renders correctly
+- `responsive`    — layout at a specific viewport
+- `text`          — literal or regex content check
+- `navigation`    — URL / route change on action
+- `other`         — escape hatch; avoid if possible
+
+**Assertion rules** (critical — verify mode cannot work if you break these):
+- Assert on **semantic DOM contracts only**: `getByRole(...)`, `getByLabel(...)`,
+  `getByTestId(...)`, `aria-*` attributes, ARIA roles, axe-core violations
+- **Never** reference CSS class names, internal state, or implementation details
+- **Never** describe "it should feel fast" or other aesthetic qualities —
+  those are `/persona-test` territory, not `/ux-lock verify`
+- If a criterion can only be expressed via a brittle selector, either
+  (a) propose adding a `data-testid` during implementation so the criterion
+  becomes verifiable, or (b) move it to Section 8 as a manual test
+
+**Example**:
+
+```markdown
+### 9. Acceptance Criteria (Playwright-verifiable)
+
+- [P0] [visibility] Cellar grid is visible after login
+  - Setup: login → navigate to /cellar
+  - Assert: getByRole('grid', { name: /cellar/i }) is visible
+- [P0] [interaction] Wine card opens detail modal on click
+  - Setup: login → navigate to /cellar
+  - Assert: click getByRole('article').first() → getByRole('dialog') is visible
+- [P0] [state] Empty state shows when no wines exist
+  - Setup: login as empty-user → navigate to /cellar
+  - Assert: getByText(/no wines yet/i) is visible AND getByRole('grid') has toHaveCount(0) for articles
+- [P1] [a11y] Grid has no WCAG AA violations
+  - Setup: login → navigate to /cellar
+  - Assert: axe-core violations on [role="grid"] == 0
+- [P1] [responsive] At 390px viewport, grid collapses to 1 column
+  - Setup: setViewportSize 390×844 → login → navigate to /cellar
+  - Assert: grid has 1 column (flex-direction: column OR grid-template-columns: 1fr)
+- [P2] [navigation] Back button from detail modal returns to grid
+  - Setup: login → open detail modal → press Escape
+  - Assert: URL is /cellar AND getByRole('dialog') is hidden
+```
+
+**Coverage guidance**:
+- At least **one P0 per primary user flow** the plan introduces
+- At least **one a11y criterion** per new component
+- At least **one state criterion** for any component with a loading / error / empty state
+- At least **one responsive criterion** if mobile is a supported target
+
+If you can't write ≥5 criteria for a non-trivial plan, the plan may be
+under-specified — revisit Phase 5 §2 (User Flow) and §5 (State Map).
+
 ## Phase 6 — Persist the Plan
 
 **Save the plan to the repository's `docs/` folder.**
@@ -321,3 +383,4 @@ For each file to be created or modified:
 - **Wireframe before code** — ASCII layouts in the plan prevent expensive rework
 - **Consistency beats novelty** — Match existing patterns unless there is a strong UX reason not to
 - **Accessibility is not optional** — It is a baseline, not a nice-to-have
+- **Section 9 is the ship gate** — `/ux-lock verify <plan.md>` will grade the live implementation against these criteria. Brittle or aesthetic criteria make the grade meaningless — stick to semantic DOM contracts

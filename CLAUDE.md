@@ -24,9 +24,9 @@ deploy to Railway / live URL
 ```
 
 Each skill is a sibling — they share env vars and Supabase stores but have distinct scopes:
-- **plan-***: code that doesn't exist yet
+- **plan-***: code that doesn't exist yet. `/plan-frontend` produces a machine-parseable "Section 9 — Acceptance Criteria" that `/ux-lock verify` consumes.
 - **audit-loop**: code that was just written (static analysis + LLM audit)
-- **ux-lock**: code that was just fixed (Playwright e2e regression lock)
+- **ux-lock**: code that was just fixed (Playwright e2e regression lock). **Verify mode** (`/ux-lock verify <plan.md>`) grades a plan-frontend plan against its live implementation — each criterion becomes a Playwright test case; results populate `plan_verification_runs` + `plan_verification_items`.
 - **persona-test**: deployed app (live browser, user flows, UX findings)
 - **ship**: packaging and delivery
 
@@ -91,10 +91,11 @@ scripts/
 │   ├── findings-tasks.mjs  # Remediation task CRUD + persistence
 │   └── config.mjs          # Centralized validated config (all env var reads)
 ├── shared.mjs              # Barrel re-export — backwards-compatible, imports from lib/
-├── openai-audit.mjs        # GPT-5.4 multi-pass auditor (plan, code, rebuttal modes)
+├── openai-audit.mjs        # GPT-5.4 multi-pass auditor (plan, code, rebuttal modes) — links audit_runs to commit_sha + plan_id
 ├── gemini-review.mjs       # Gemini 3.1 Pro independent final reviewer (Claude Opus fallback)
-├── bandit.mjs              # Thompson Sampling for prompt variant selection
-├── learning-store.mjs      # Supabase cloud persistence for audit outcomes + learning
+├── bandit.mjs              # Thompson Sampling + user-impact-aware reward (consumes persona_audit_correlations)
+├── learning-store.mjs      # Supabase cloud persistence for audit outcomes + learning + cross-skill data loop
+├── cross-skill.mjs         # CLI facade invoked by /ux-lock /persona-test /ship — writes plans, regression_specs, persona_audit_correlations, ship_events
 ├── refine-prompts.mjs      # LLM-driven prompt refinement from outcome data
 └── phase7-check.mjs        # Pre-flight check for Step 7 readiness
 
@@ -154,6 +155,54 @@ Covers: atomic writes, schema derivation, ledger operations, finding identity, F
 | `PERSONA_TEST_SUPABASE_ANON_KEY` | No | — | Supabase anon key for persona-test |
 | `PERSONA_TEST_APP_URL` | No | — | Default app URL for persona-test list/add (per-project `.env`) |
 | `PERSONA_TEST_REPO_NAME` | No | — | Repo name for cross-referencing audit-loop findings (per-project `.env`) |
+
+## Cross-Skill Data Loop
+
+Migration `20260419120000_cross_skill_data_loop.sql` closes the feedback loop
+between the 6 skills. Every skill writes to a shared learning store via
+`scripts/cross-skill.mjs` — graceful no-op when Supabase is off.
+
+### Tables
+
+| Table | Writer | Reader | Purpose |
+|-------|--------|--------|---------|
+| `plans` | `/plan-backend`, `/plan-frontend`, `openai-audit.mjs` | `/audit-loop`, `/ux-lock verify` | Register plan artefact, link audit_runs via plan_id |
+| `regression_specs` | `/ux-lock`, `/ux-lock verify` | `/ship` | Record every Playwright spec authored (lock or verify mode) |
+| `regression_spec_runs` | `/ux-lock`, CI | `meta-assess.mjs` | Per-run pass/fail history — `captured_regression=true` is a "save" |
+| `persona_audit_correlations` | `/persona-test` | `bandit.mjs` | The highest-leverage table — persona P0/P1 ↔ audit finding ground-truth labels |
+| `ship_events` | `/ship` | Dashboards | Outcome log: shipped / blocked / warned / overridden / aborted |
+| `plan_verification_runs` | `/ux-lock verify` | `/ship`, dashboards | One row per verify invocation; totals for satisfaction % |
+| `plan_verification_items` | `/ux-lock verify` | `/ship`, meta-assess | Per-criterion pass/fail with stable `criterion_hash` for time-series |
+
+### Added columns
+
+| Column | Table | Writer |
+|--------|-------|--------|
+| `commit_sha`, `branch`, `plan_id` | `audit_runs` | `openai-audit.mjs` in `runMultiPassCodeAudit` |
+| `commit_sha`, `deployment_id` | `persona_test_sessions` | `/persona-test` Phase 6 |
+
+### Views
+
+| View | Query for | Used by |
+|------|-----------|---------|
+| `audit_effectiveness` | User-visible precision + recall per repo | `meta-assess.mjs` (prompt evolution) |
+| `unlocked_fixes` | Recent HIGH fixes without a /ux-lock spec | `/ship` Step 0.5b |
+| `regression_saves` | Spec runs that caught a real regression | Dashboards |
+| `ship_gate_effectiveness` | How often each block reason fires + override rate | Dashboards |
+| `plan_satisfaction` | Latest verify run per plan + failing P0/P1 criteria | `/ship`, `/ux-lock verify` report |
+| `persistent_plan_failures` | Criteria that have failed ≥2 consecutive runs | Meta-assess (chronic gaps) |
+
+### Bandit reward extension
+
+`computeReward(resolution, evaluationRecord, userImpact)` — when a
+`persona_audit_correlations` row exists for a finding, the reward formula
+shifts from 40/30/30 (procedural/substantive/deliberation) to
+35/25/25/15 with the user-impact term weighted by persona severity. See
+`computeUserImpactReward()` in [scripts/bandit.mjs](scripts/bandit.mjs).
+
+**Design rule**: all cross-skill writes go through `scripts/cross-skill.mjs`.
+Never hand-write curl POSTs in a SKILL.md for these tables — the CLI handles
+auth, graceful no-op, git-derived commit_sha, and error normalisation.
 
 ## R2+ Audit Mode (Phase 1)
 

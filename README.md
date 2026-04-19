@@ -13,9 +13,9 @@ Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Ge
 | **[audit-loop](skills/audit-loop/SKILL.md)** | Self-driving plan-audit-fix loop with 3 models + adaptive learning | `/audit-loop code docs/plans/X.md` |
 | **[plan-backend](skills/plan-backend/SKILL.md)** | Backend architecture planning with 20 engineering principles | `/plan-backend` |
 | **[plan-frontend](skills/plan-frontend/SKILL.md)** | Frontend UX + implementation planning with Gestalt principles | `/plan-frontend` |
-| **[ship](skills/ship/SKILL.md)** | Pre-push quality gate: test, lint, format, commit, push | `/ship` |
+| **[ux-lock](skills/ux-lock/SKILL.md)** | Generate Playwright e2e regression specs that lock in a fix's public DOM contract | `/ux-lock <commit-or-description>` |
 | **[persona-test](skills/persona-test/SKILL.md)** | Persona-driven exploratory browser testing with Plan→Act→Reflect, P0–P3 findings, qualitative debrief, Supabase session memory | `/persona-test "first-time user" https://myapp.com` |
-| **[persona-test list](skills/persona-test/SKILL.md)** | List registered personas per app, sorted by most overdue | `/persona-test list` |
+| **[ship](skills/ship/SKILL.md)** | Pre-push quality gate: test, lint, format, commit, push (warns on open persona-test P0s + missing regression specs) | `/ship` |
 
 All skills support **JavaScript/TypeScript** and **Python** (FastAPI, Django, Flask) with automatic stack detection.
 
@@ -30,19 +30,24 @@ The 6 skills form a complete code-to-production loop:
 /audit-loop                      ← GPT-5.4 audit → Claude triage → Gemini final gate
         |
         v
+/ux-lock                         ← Playwright e2e spec locks the fix's public DOM contract
+        |
+        v
 /ship                            ← Quality gate (test, lint, format, commit, push)
         |                          ↑ blocks on open P0s from persona-test
-        v
+        v                          ↑ warns if recent fixes lack a /ux-lock regression spec
 /persona-test                    ← Real-user simulation against live URL (P0–P3)
         |
         └──► feeds back into /plan-backend + /plan-frontend as "Known user-visible issues"
-             and into /audit-loop as "Known code fragilities from user testing"
+             into /audit-loop as "Known code fragilities from user testing"
+             and triggers /ux-lock for every P0 fix, so it never regresses
 ```
 
 Each skill reads the outputs of previous skills:
 - **plan-backend / plan-frontend** query persona-test session history for recurring user pain points before designing
 - **audit-loop** queries persona-test for P0/P1s tied to the current repo when building code context
-- **ship** queries persona-test for open P0s and blocks or warns before pushing
+- **ux-lock** reads the audit-loop fix or persona-test P0 and generates a Playwright spec asserting on semantic DOM contracts (role, aria-*, data-testid) — not CSS classes
+- **ship** queries persona-test for open P0s and blocks or warns before pushing; also warns if recent fixes lack regression specs
 - **persona-test** queries audit-loop for HIGH findings and cross-references them against UX observations
 
 ## Quick Start
@@ -145,8 +150,27 @@ The audit loop gets smarter over time:
 | **Meta-Assessment** | Every ~4 runs, evaluates FP rate, severity calibration, convergence speed; recommends prompt changes |
 | **Prompt Evolution** | Creates experimental prompt variants, tests them via bandit, promotes winners |
 | **Debt Review** | Clusters deferred findings by file/principle/recurrence; ranks refactor candidates by leverage |
+| **User-Impact Reward** | Bandit also rewards findings that `/persona-test` later confirmed in a live browser (ground-truth labels via `persona_audit_correlations`) |
 
 Learning applies to **both GPT audit passes and Gemini final review**.
+
+### Cross-Skill Data Loop
+
+All 6 skills write to a shared Supabase store (graceful no-op when unconfigured)
+via [`scripts/cross-skill.mjs`](scripts/cross-skill.mjs). Migration
+`20260419120000_cross_skill_data_loop.sql` adds:
+
+| Table | Written by | Closes which gap |
+|-------|-----------|------------------|
+| `plans` | `/plan-*`, `/audit-loop` | Plan ↔ audit_runs linkage via `plan_id`, commit-anchored |
+| `regression_specs` + `regression_spec_runs` | `/ux-lock` | Every Playwright spec recorded with source finding + pass/fail history |
+| `persona_audit_correlations` | `/persona-test` | Ground-truth labels feeding bandit user-impact reward |
+| `ship_events` | `/ship` | Outcome + block reason log (which gates fire, which get overridden) |
+| `commit_sha` on `audit_runs` + `persona_test_sessions` | orchestrator + `/persona-test` | Ties every run to a concrete code version |
+
+Views surface the rollups: `audit_effectiveness` (user-visible precision/recall),
+`unlocked_fixes` (fixes without a `/ux-lock` spec), `regression_saves` (specs
+that caught a real regression), `ship_gate_effectiveness` (block rate + override rate).
 
 ## Persona Testing
 
@@ -178,6 +202,55 @@ The `/persona-test` skill simulates how a real user with a specific background a
 
 The registry tracks test history, last verdict, and days since last test — so you always know which persona is most overdue for a check.
 
+## UX Regression Locking (`/ux-lock`)
+
+After a bug fix converges through the audit loop — or after `/persona-test` finds a P0 that you patch — the fix is only half-done. Without a regression spec, the next refactor can silently re-break it.
+
+`/ux-lock` generates a Playwright e2e spec that **locks in the fix's public DOM contract**:
+
+```bash
+/ux-lock "modal closes before retry"              # plain-English description
+/ux-lock abc1234                                  # commit hash — reads the diff
+/ux-lock "role=list on wine grid" --url https://myapp.railway.app
+```
+
+### What it asserts on (and what it deliberately does not)
+
+| Good assertions (stable)                    | Bad assertions (brittle)                    |
+|---|---|
+| Element with `role="list"` exists           | Element has class `wine-list-v3`            |
+| Modal closes when action button clicked     | Internal state variable changes             |
+| Button is `aria-disabled` when form invalid | CSS opacity is 0.5                          |
+| Axe-core reports no WCAG violations         | `document.querySelector('.grid-abc')`       |
+
+The spec tests **public DOM contracts** — roles, aria attributes, `data-testid` hooks, user-visible behaviour. It survives CSS rewrites and internal refactors, and fails only when the user-observable contract regresses.
+
+### Browser setup (Playwright MCP)
+
+`/persona-test` and `/ux-lock` both use Playwright. An `.mcp.json` is included in this repo — Claude Code will prompt you to enable Playwright MCP on first open.
+
+**First-time install (required):**
+```bash
+npx playwright install chromium
+```
+
+**Windows users** — if Playwright tools still don't appear after install, add this override to `~/.claude/settings.json` (Windows needs the `.cmd` wrapper for Claude Code's process spawner):
+
+```json
+"mcpServers": {
+  "playwright": {
+    "command": "npx.cmd",
+    "args": ["@playwright/mcp@latest", "--headless"]
+  }
+}
+```
+
+BrightData Scraping Browser is also supported for sites behind anti-bot/CAPTCHA, but requires a paid account. For testing your own apps, Playwright MCP is preferred — it's free and needs no credentials.
+
+### Obsidian plugins (limitation)
+
+Playwright can't attach to Obsidian's Electron process. For Obsidian plugins, unit-test logic with vitest and test extracted UI in a mock HTML harness. Full Electron e2e (`_electron.launch()`) works but is heavy — reserve for critical user flows only.
+
 ## Supported Platforms
 
 | Platform | Skill Location | How to Invoke |
@@ -190,8 +263,6 @@ The registry tracks test history, last verdict, and days since last test — so 
 
 ## Environment Variables
 
-| Variable | Required | Default | Purpose |
-|----------|----------|---------|---------|
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `OPENAI_API_KEY` | **Yes** | -- | GPT-5.4 auditing |

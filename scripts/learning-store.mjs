@@ -86,9 +86,17 @@ export async function upsertRepo(profile, repoName) {
 
 /**
  * Record the start of an audit run.
+ * @param {string} repoId
+ * @param {string} planFile
+ * @param {'plan'|'code'} mode
+ * @param {object} [options]
+ * @param {string} [options.scopeMode]
+ * @param {string} [options.commitSha]  — current HEAD at audit time
+ * @param {string} [options.branch]     — current branch at audit time
+ * @param {string} [options.planId]     — UUID from plans table (from upsertPlan)
  * @returns {string|null} run ID
  */
-export async function recordRunStart(repoId, planFile, mode, { scopeMode } = {}) {
+export async function recordRunStart(repoId, planFile, mode, { scopeMode, commitSha, branch, planId } = {}) {
   if (!_supabase) return null;
 
   const { data, error } = await _supabase
@@ -103,6 +111,9 @@ export async function recordRunStart(repoId, planFile, mode, { scopeMode } = {})
       dismissed_count: 0,
       fixed_count: 0,
       ...(scopeMode ? { scope_mode: scopeMode } : {}),
+      ...(commitSha ? { commit_sha: commitSha } : {}),
+      ...(branch ? { branch } : {}),
+      ...(planId ? { plan_id: planId } : {}),
     })
     .select('id')
     .single();
@@ -829,4 +840,418 @@ export async function getFalsePositivePatterns(repoId) {
     return [];
   }
   return data || [];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Cross-Skill Data Loop — plans / regression_specs / correlations / ship
+// ═══════════════════════════════════════════════════════════════════════════
+// These tables close the feedback loop between /plan-*, /audit-loop, /ux-lock,
+// /persona-test, and /ship — see migration 20260419120000_cross_skill_data_loop.
+// Every function gracefully no-ops when cloud mode is off.
+
+// ── Plans ──────────────────────────────────────────────────────────────────
+
+/**
+ * Upsert a plan artefact record. Returns the plan UUID so audit_runs can link.
+ *
+ * @param {string|null} repoId — from upsertRepo
+ * @param {object} plan
+ * @param {string}   plan.path              — repo-relative path to the plan file
+ * @param {'plan-backend'|'plan-frontend'|'manual'|'other'} plan.skill
+ * @param {string}   [plan.status]          — default 'draft'
+ * @param {string[]} [plan.principlesCited] — principle identifiers the plan cites
+ * @param {string[]} [plan.focusAreas]      — e.g. ['backend', 'auth']
+ * @param {string}   [plan.commitSha]       — commit the plan was authored against
+ * @param {string}   [plan.checksum]        — sha256 of plan markdown (drift detection)
+ * @returns {Promise<string|null>} plan UUID
+ */
+export async function upsertPlan(repoId, plan) {
+  if (!_supabase) return null;
+  if (!plan?.path || !plan?.skill) return null;
+
+  const { data, error } = await _supabase
+    .from('plans')
+    .upsert({
+      repo_id: repoId || null,
+      path: plan.path,
+      skill: plan.skill,
+      status: plan.status || 'draft',
+      principles_cited: plan.principlesCited || [],
+      focus_areas: plan.focusAreas || [],
+      commit_sha: plan.commitSha || null,
+      checksum: plan.checksum || null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'repo_id,path' })
+    .select('id')
+    .single();
+
+  if (error) {
+    process.stderr.write(`  [learning] upsertPlan failed: ${error.message}\n`);
+    return null;
+  }
+  return data?.id;
+}
+
+/**
+ * Update a plan's status (draft → in_progress → complete → abandoned).
+ */
+export async function updatePlanStatus(planId, status) {
+  if (!_supabase || !planId) return;
+  const { error } = await _supabase
+    .from('plans')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', planId);
+  if (error) process.stderr.write(`  [learning] updatePlanStatus failed: ${error.message}\n`);
+}
+
+// ── Regression Specs (/ux-lock) ────────────────────────────────────────────
+
+/**
+ * Record a regression spec authored by /ux-lock.
+ *
+ * @param {string|null} repoId
+ * @param {object} spec
+ * @param {string}   spec.specPath             — e.g. tests/e2e/fix-modal-close.spec.js
+ * @param {string}   spec.description
+ * @param {string}   [spec.commitSha]
+ * @param {number}   [spec.assertionCount]
+ * @param {string[]} [spec.domContractTypes]   — ['role','aria-*','data-testid','axe',...]
+ * @param {'audit-loop-fix'|'persona-test-p0'|'persona-test-p1'|'manual'|'other'} spec.sourceKind
+ * @param {string}   [spec.sourceFindingId]    — audit_findings.id OR persona finding hash
+ * @param {'audit'|'persona'} [spec.sourceFindingType]
+ * @returns {Promise<string|null>} spec UUID
+ */
+export async function recordRegressionSpec(repoId, spec) {
+  if (!_supabase) return null;
+  if (!spec?.specPath || !spec?.description || !spec?.sourceKind) return null;
+
+  const { data, error } = await _supabase
+    .from('regression_specs')
+    .upsert({
+      repo_id: repoId || null,
+      spec_path: spec.specPath,
+      description: spec.description,
+      commit_sha: spec.commitSha || null,
+      assertion_count: spec.assertionCount || 0,
+      dom_contract_types: spec.domContractTypes || [],
+      source_kind: spec.sourceKind,
+      source_finding_id: spec.sourceFindingId || null,
+      source_finding_type: spec.sourceFindingType || null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'repo_id,spec_path' })
+    .select('id')
+    .single();
+
+  if (error) {
+    process.stderr.write(`  [learning] recordRegressionSpec failed: ${error.message}\n`);
+    return null;
+  }
+  return data?.id;
+}
+
+/**
+ * Append a run outcome for a regression spec (pass/fail, whether it caught a regression).
+ *
+ * @param {string} specId — from recordRegressionSpec
+ * @param {object} run
+ * @param {boolean} run.passed
+ * @param {string}  [run.commitSha]
+ * @param {boolean} [run.capturedRegression] — true if the spec failed on code that *should* have preserved the contract
+ * @param {number}  [run.durationMs]
+ * @param {string}  [run.errorMessage]
+ * @param {'ship-gate'|'ci'|'manual'|'ux-lock-verify'} [run.runContext]
+ */
+export async function recordRegressionSpecRun(specId, run) {
+  if (!_supabase || !specId) return;
+
+  const { error } = await _supabase
+    .from('regression_spec_runs')
+    .insert({
+      spec_id: specId,
+      commit_sha: run.commitSha || null,
+      passed: !!run.passed,
+      captured_regression: !!run.capturedRegression,
+      duration_ms: run.durationMs || null,
+      error_message: run.errorMessage || null,
+      run_context: run.runContext || null,
+    });
+
+  if (error) process.stderr.write(`  [learning] recordRegressionSpecRun failed: ${error.message}\n`);
+}
+
+/**
+ * Query recent fixes that lack a regression spec (feeds /ship's warning gate).
+ * @param {string|null} repoId
+ * @returns {Promise<object[]>} rows from unlocked_fixes view (limit 20)
+ */
+export async function getUnlockedFixes(repoId) {
+  if (!_supabase) return [];
+  const q = _supabase
+    .from('unlocked_fixes')
+    .select('*')
+    .limit(20);
+  const { data, error } = repoId ? await q.eq('repo_id', repoId) : await q;
+  if (error) {
+    process.stderr.write(`  [learning] getUnlockedFixes failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
+}
+
+// ── Persona-Audit Correlations (the ground-truth labelling feed) ───────────
+
+/**
+ * Record a correlation between a persona finding and an audit finding.
+ * This is the highest-leverage table: every row here is a ground-truth label
+ * for audit-loop's bandit reward.
+ *
+ * @param {string} personaSessionId
+ * @param {object} correlation
+ * @param {string} correlation.personaFindingHash
+ * @param {'P0'|'P1'|'P2'|'P3'} correlation.personaSeverity
+ * @param {string|null} [correlation.auditFindingId]  — null if audit missed it
+ * @param {string|null} [correlation.auditRunId]
+ * @param {'confirmed_hit'|'audit_missed'|'audit_false_positive'|'severity_understated'|'severity_overstated'} correlation.correlationType
+ * @param {number} [correlation.matchScore]
+ * @param {string} [correlation.matchRationale]
+ */
+export async function recordPersonaAuditCorrelation(personaSessionId, correlation) {
+  if (!_supabase || !personaSessionId) return;
+  if (!correlation?.personaFindingHash || !correlation?.correlationType || !correlation?.personaSeverity) return;
+
+  const { error } = await _supabase
+    .from('persona_audit_correlations')
+    .upsert({
+      persona_session_id: personaSessionId,
+      persona_finding_hash: correlation.personaFindingHash,
+      persona_severity: correlation.personaSeverity,
+      audit_finding_id: correlation.auditFindingId || null,
+      audit_run_id: correlation.auditRunId || null,
+      correlation_type: correlation.correlationType,
+      match_score: correlation.matchScore ?? null,
+      match_rationale: correlation.matchRationale || null,
+    }, { onConflict: 'persona_session_id,persona_finding_hash,audit_finding_id' });
+
+  if (error) process.stderr.write(`  [learning] recordPersonaAuditCorrelation failed: ${error.message}\n`);
+}
+
+/**
+ * Read correlations for a specific audit_run — used by the bandit to compute
+ * user-visible-impact rewards post-hoc.
+ * @param {string} auditRunId
+ * @returns {Promise<object[]>}
+ */
+export async function readCorrelationsForRun(auditRunId) {
+  if (!_supabase || !auditRunId) return [];
+  const { data, error } = await _supabase
+    .from('persona_audit_correlations')
+    .select('*')
+    .eq('audit_run_id', auditRunId);
+  if (error) {
+    process.stderr.write(`  [learning] readCorrelationsForRun failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
+}
+
+/**
+ * Read correlations for a specific finding (by ID) — used by the bandit
+ * per-finding reward augmentation.
+ * @param {string} auditFindingId
+ * @returns {Promise<object[]>}
+ */
+export async function readCorrelationsForFinding(auditFindingId) {
+  if (!_supabase || !auditFindingId) return [];
+  const { data, error } = await _supabase
+    .from('persona_audit_correlations')
+    .select('*')
+    .eq('audit_finding_id', auditFindingId);
+  if (error) {
+    process.stderr.write(`  [learning] readCorrelationsForFinding failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
+}
+
+/**
+ * Read the audit_effectiveness rollup — user-visible precision & recall.
+ * Used by meta-assess to drive prompt evolution.
+ */
+export async function readAuditEffectiveness(repoId) {
+  if (!_supabase) return null;
+  const { data, error } = await _supabase
+    .from('audit_effectiveness')
+    .select('*')
+    .eq('repo_id', repoId)
+    .maybeSingle();
+  if (error) {
+    process.stderr.write(`  [learning] readAuditEffectiveness failed: ${error.message}\n`);
+    return null;
+  }
+  return data;
+}
+
+// ── Ship Events ────────────────────────────────────────────────────────────
+
+// ── Plan Verification (/ux-lock verify) ───────────────────────────────────
+
+/**
+ * Record a plan verification run — one invocation of /ux-lock verify on a plan.
+ * Returns the run UUID so the caller can attach per-item rows.
+ *
+ * @param {object} run
+ * @param {string} run.planId
+ * @param {string} [run.specId]     — UUID of the generated regression_spec file
+ * @param {string} [run.commitSha]
+ * @param {string} [run.url]
+ * @param {number} run.totalCriteria
+ * @param {number} run.passedCount
+ * @param {number} run.failedCount
+ * @param {number} [run.skippedCount]
+ * @param {number} [run.durationMs]
+ * @param {'ux-lock-verify'|'ci'|'manual'} [run.runContext]
+ * @returns {Promise<string|null>} run UUID
+ */
+export async function recordPlanVerificationRun(run) {
+  if (!_supabase || !run?.planId) return null;
+
+  const { data, error } = await _supabase
+    .from('plan_verification_runs')
+    .insert({
+      plan_id: run.planId,
+      spec_id: run.specId || null,
+      commit_sha: run.commitSha || null,
+      url: run.url || null,
+      total_criteria: run.totalCriteria || 0,
+      passed_count: run.passedCount || 0,
+      failed_count: run.failedCount || 0,
+      skipped_count: run.skippedCount || 0,
+      duration_ms: run.durationMs || null,
+      run_context: run.runContext || 'ux-lock-verify',
+    })
+    .select('id')
+    .single();
+
+  if (error) {
+    process.stderr.write(`  [learning] recordPlanVerificationRun failed: ${error.message}\n`);
+    return null;
+  }
+  return data?.id;
+}
+
+/**
+ * Record a batch of per-criterion outcomes for a plan verification run.
+ * @param {string} runId   — from recordPlanVerificationRun
+ * @param {string} planId
+ * @param {Array<{
+ *   criterionHash: string,
+ *   criterionIndex: number,
+ *   severity: 'P0'|'P1'|'P2'|'P3',
+ *   category: string,
+ *   description: string,
+ *   setupText?: string,
+ *   assertText?: string,
+ *   passed: boolean,
+ *   errorMessage?: string,
+ *   durationMs?: number,
+ * }>} items
+ */
+export async function recordPlanVerificationItems(runId, planId, items) {
+  if (!_supabase || !runId || !planId || !Array.isArray(items) || items.length === 0) return;
+
+  const rows = items.map(item => ({
+    run_id: runId,
+    plan_id: planId,
+    criterion_hash: item.criterionHash,
+    criterion_index: item.criterionIndex,
+    severity: item.severity,
+    category: item.category,
+    description: item.description,
+    setup_text: item.setupText || null,
+    assert_text: item.assertText || null,
+    passed: !!item.passed,
+    error_message: item.errorMessage || null,
+    duration_ms: item.durationMs || null,
+  }));
+
+  const { error } = await _supabase.from('plan_verification_items').insert(rows);
+  if (error) process.stderr.write(`  [learning] recordPlanVerificationItems failed: ${error.message}\n`);
+}
+
+/**
+ * Read the plan_satisfaction rollup for a given plan (latest run + failing P0/P1).
+ * @param {string} planId
+ */
+export async function readPlanSatisfaction(planId) {
+  if (!_supabase || !planId) return null;
+  const { data, error } = await _supabase
+    .from('plan_satisfaction')
+    .select('*')
+    .eq('plan_id', planId)
+    .maybeSingle();
+  if (error) {
+    process.stderr.write(`  [learning] readPlanSatisfaction failed: ${error.message}\n`);
+    return null;
+  }
+  return data;
+}
+
+/**
+ * Read criteria that have been failing across recent runs (persistent failures).
+ * @param {string} planId
+ */
+export async function readPersistentPlanFailures(planId) {
+  if (!_supabase || !planId) return [];
+  const { data, error } = await _supabase
+    .from('persistent_plan_failures')
+    .select('*')
+    .eq('plan_id', planId);
+  if (error) {
+    process.stderr.write(`  [learning] readPersistentPlanFailures failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
+}
+
+/**
+ * Record a /ship outcome: shipped, blocked, warned, overridden, or aborted.
+ *
+ * @param {string|null} repoId
+ * @param {object} event
+ * @param {string}   [event.commitSha]
+ * @param {string}   [event.branch]
+ * @param {'shipped'|'blocked'|'warned'|'overridden'|'aborted'} event.outcome
+ * @param {string[]} [event.blockReasons]       — ['test-failure','open-p0',...]
+ * @param {number}   [event.openP0Count]
+ * @param {number}   [event.openP1Count]
+ * @param {number}   [event.missingSpecCount]
+ * @param {boolean}  [event.overriddenByUser]
+ * @param {string}   [event.overrideFlag]       — e.g. '--no-tests'
+ * @param {string}   [event.stackDetected]      — 'js-ts'|'python'|'mixed'|'unknown'
+ * @param {string}   [event.framework]
+ * @param {number}   [event.durationMs]
+ */
+export async function recordShipEvent(repoId, event) {
+  if (!_supabase) return;
+  if (!event?.outcome) return;
+
+  const { error } = await _supabase
+    .from('ship_events')
+    .insert({
+      repo_id: repoId || null,
+      commit_sha: event.commitSha || null,
+      branch: event.branch || null,
+      outcome: event.outcome,
+      block_reasons: event.blockReasons || [],
+      open_p0_count: event.openP0Count || 0,
+      open_p1_count: event.openP1Count || 0,
+      missing_spec_count: event.missingSpecCount || 0,
+      overridden_by_user: !!event.overriddenByUser,
+      override_flag: event.overrideFlag || null,
+      stack_detected: event.stackDetected || null,
+      framework: event.framework || null,
+      duration_ms: event.durationMs || null,
+    });
+
+  if (error) process.stderr.write(`  [learning] recordShipEvent failed: ${error.message}\n`);
 }

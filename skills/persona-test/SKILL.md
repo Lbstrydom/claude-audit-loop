@@ -210,14 +210,19 @@ in Phase 2 as additional backstory context.
 
 Skip this phase entirely if `audit_link = false`.
 
-If `audit_link = true` and `repo_name` is set, fetch recent unresolved HIGH findings
-from the audit-loop database for this repo:
+If `audit_link = true` and `repo_name` is set, fetch recent unresolved HIGH + MEDIUM
+findings from the audit-loop database for this repo. **Include `id` and `run_id`**
+so you can record correlations back in Phase 6b:
 
 ```bash
-curl -s "$SUPABASE_AUDIT_URL/rest/v1/audit_findings?severity=eq.HIGH&order=created_at.desc&limit=10&select=category,primary_file,detail_snapshot,created_at" \
+curl -s "$SUPABASE_AUDIT_URL/rest/v1/audit_findings?severity=in.(HIGH,MEDIUM)&order=created_at.desc&limit=20&select=id,run_id,category,primary_file,detail_snapshot,severity,created_at" \
   -H "apikey: $SUPABASE_AUDIT_ANON_KEY" \
   -H "Authorization: Bearer $SUPABASE_AUDIT_ANON_KEY"
 ```
+
+**Remember the full JSON** (not just the summary) — you need the `id` field to
+build correlation rows after the test runs. Call this the **audit candidates**
+set from here on.
 
 If any findings are returned, add a **Known Code Fragilities** section to the persona mental
 model in Phase 2 (after the main profile):
@@ -242,7 +247,14 @@ that. Instead, let the fragility knowledge sharpen your Reflect judgement silent
 
 ## Phase 1 — Detect Browser Tool
 
-Try tools in this order. Use the FIRST one that responds.
+**First: check the URL hostname.**
+
+- If `localhost`, `127.0.0.1`, `0.0.0.0`, ends in `.local`/`.internal`, or matches a
+  known own-app domain (`*.railway.app`, `*.vercel.app`, `*.netlify.app`, `*.up.railway.app`) →
+  skip BrightData entirely and go directly to Playwright MCP (Tier 1 below).
+  Log: `[OWN APP] Using Playwright — BrightData skipped for own-app hostname`.
+
+- Otherwise (external/third-party URL) → try tools in order below.
 
 **Tier 1: Playwright MCP** (free, direct — preferred for own apps)
 - Attempt `browser_navigate` from Playwright MCP (`@playwright/mcp`)
@@ -266,9 +278,18 @@ Try tools in this order. Use the FIRST one that responds.
 **Tier 4: None available — STOP**
 ```
 [ERROR] No browser tool available.
-Install Playwright MCP or BrightData MCP to run persona tests.
-  Playwright:  npx playwright install chromium && npx @playwright/mcp@latest
-  BrightData: Configure in Claude Code settings (MCP servers)
+Install BrightData MCP or Playwright MCP to run persona tests.
+
+  Playwright MCP (free — works for own apps, no anti-bot):
+    Claude Code: add to ~/.claude/settings.json
+      "mcpServers": { "playwright": { "command": "npx", "args": ["@playwright/mcp@latest", "--headless"] } }
+    VSCode Copilot Chat: add to .vscode/mcp.json in your repo
+      { "servers": { "playwright": { "type": "stdio", "command": "npx", "args": ["@playwright/mcp@latest", "--headless"] } } }
+    Then restart your editor / reload the MCP server list.
+
+  BrightData MCP (handles anti-bot & CAPTCHA — for external sites):
+    Configure in Claude Code settings (MCP servers) per BrightData docs.
+
 Note: If running in a sub-agent context, MCP tools may not be exposed.
 Run /persona-test directly in your main Claude Code session.
 ```
@@ -333,7 +354,7 @@ If the action is ambiguous but context implies mutation → treat as blocked. Ne
 3. Add to findings as: `P3 OBSERVATION — Mutation flow not tested (safe mode). Use --unsafe-mutations to enable.`
 4. Continue exploration — do not abort
 
-**Localhost/internal URL check (G1)**: Before selecting a provider, check the URL hostname. If it is `localhost`, `127.0.0.1`, `0.0.0.0`, or ends in `.local` or `.internal` — skip BrightData (cloud proxy cannot reach internal servers) and go directly to Playwright MCP. Log: `[LOCAL URL] Using Playwright — BrightData skipped for internal hostname`.
+**Own-app/local URL check (G1)**: Handled in Phase 1 — Playwright is used directly for `localhost`, `127.0.0.1`, `0.0.0.0`, `.local`/`.internal`, and known own-app domains (`*.railway.app`, `*.vercel.app`, `*.netlify.app`). BrightData is only attempted for external third-party URLs where anti-bot protection may be present.
 
 **Origin boundary**: Stay within the starting URL's origin by default. If navigation leads to a third-party domain (external auth, payment, CDN), screenshot the boundary, log `[BOUNDARY] External domain — not testing third-party services`, navigate back to primary origin, and continue. Do not follow cross-origin redirects into external services.
 
@@ -364,14 +385,14 @@ Execute exactly one action using the browser tool. Then take a screenshot immedi
 
 **Tool commands**:
 
-| Action | BrightData Scraping Browser | Playwright MCP |
-|--------|-----------------------------|----------------|
-| Navigate | `mcp__brightdata__scraping_browser_navigate` | `browser_navigate` |
-| Screenshot | `mcp__brightdata__scraping_browser_screenshot` | `browser_screenshot` |
-| Click | `mcp__brightdata__scraping_browser_click` | `browser_click` |
-| Type | `mcp__brightdata__scraping_browser_type` | `browser_type` |
-| Scroll | `mcp__brightdata__scraping_browser_scroll` | `browser_scroll` |
-| Get DOM text | `mcp__brightdata__scraping_browser_get_text` | `browser_get_text` |
+| Action | Playwright MCP | BrightData Scraping Browser |
+|--------|----------------|------------------------------|
+| Navigate | `browser_navigate` | `mcp__brightdata__scraping_browser_navigate` |
+| Screenshot | `browser_screenshot` | `mcp__brightdata__scraping_browser_screenshot` |
+| Click | `browser_click` | `mcp__brightdata__scraping_browser_click` |
+| Type | `browser_type` | `mcp__brightdata__scraping_browser_type` |
+| Scroll | `browser_scroll` | `mcp__brightdata__scraping_browser_scroll` |
+| Get DOM text | `browser_get_text` | `mcp__brightdata__scraping_browser_get_text` |
 
 **No sleep/wait tool exists** — to observe page settle, take a second screenshot immediately after the action. If still loading in screenshot 2, note "still loading" and proceed.
 
@@ -603,14 +624,25 @@ not a generic user opinion. Every point should trace back to something observed 
 Skip this phase entirely if `memory_enabled = false` (already determined in Phase 0b pre-flight).
 When skipped, output: `[Session not saved — memory disabled]` and stop.
 
-If `memory_enabled = true`, POST the session to Supabase using a `curl` call:
+If `memory_enabled = true`, first capture the current `commit_sha` and
+`deployment_id` (best-effort) so the session is tied to a concrete code version.
+These are later used by audit-loop's bandit and by `/ship`'s gate.
+
+```bash
+commit_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+# deployment_id is optional — e.g. Railway deployment slug; leave blank if unknown
+deployment_id=""
+```
+
+Now POST the session. Use `Prefer: return=representation` so you get back the
+row ID (you need it in Phase 6b for correlations):
 
 ```bash
 curl -s -X POST "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions" \
   -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
   -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY" \
   -H "Content-Type: application/json" \
-  -H "Prefer: return=minimal" \
+  -H "Prefer: return=representation" \
   -d '{
     "session_id": "<SID>",
     "persona": "<persona>",
@@ -626,9 +658,15 @@ curl -s -X POST "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions" \
     "avg_confidence": <avg>,
     "findings": <findings JSON array>,
     "report_md": "<escaped full report markdown>",
-    "debrief_md": "<escaped persona debrief narrative>"
+    "debrief_md": "<escaped persona debrief narrative>",
+    "commit_sha": "<commit_sha or null>",
+    "deployment_id": "<deployment_id or null>",
+    "repo_name": "<repo_name or null>"
   }'
 ```
+
+The response is a one-element JSON array — extract `.0.id` into `persona_session_id`.
+Keep this value handy for **Phase 6b**.
 
 Where `<SID>` = `persona-test-<unix timestamp>` (e.g. `persona-test-1744123456`).
 Include `"persona_id": "<persona_id>"` in the POST body if a registered persona was used (from Phase 0c); omit or set to `null` for ad-hoc personas.
@@ -648,6 +686,63 @@ curl -s -X PATCH "$PERSONA_TEST_SUPABASE_URL/rest/v1/personas?id=eq.<persona_id>
     "test_count": <previous_count + 1>
   }'
 ```
+
+---
+
+## Phase 6b — Emit Audit-Loop Correlations (ground-truth labels)
+
+Skip this phase if `audit_link = false` or the **audit candidates** set from
+Phase 0d is empty. Skip if no P0/P1 findings were produced in this session.
+
+For every P0 or P1 persona finding, classify its relationship to the audit
+candidates and emit a correlation row. This is what makes `/audit-loop`'s
+bandit train on **user-visible impact** instead of Claude-triage acceptance.
+
+**Classification rules** — per persona finding, pick one:
+
+| Persona finding | Audit candidate exists? | Severity relation | correlation_type |
+|---|---|---|---|
+| Matches file or keywords in a candidate | Yes | Audit severity matches persona severity | `confirmed_hit` |
+| Matches a candidate | Yes | Audit was LOW/MEDIUM, persona is P0/P1 | `severity_understated` |
+| Matches a candidate | Yes | Audit was HIGH, persona is P2/P3 | `severity_overstated` |
+| No file or keyword match to any candidate | No | — | `audit_missed` |
+
+(If an earlier audit explicitly dismissed a finding that the persona is now
+hitting, emit `audit_missed` — the dismissal was premature.)
+
+**Finding hash**: compute a stable hash of the persona finding so the same
+observation dedupes across sessions. Use `sha256(element + '|' + observed.slice(0,120) + '|' + code).slice(0,16)`.
+
+For each P0/P1 finding, emit **one row** using the CLI (graceful no-op when
+cloud is off):
+
+```bash
+node scripts/cross-skill.mjs record-correlation --json '{
+  "personaSessionId": "<persona_session_id from Phase 6>",
+  "personaFindingHash": "<hash>",
+  "personaSeverity": "P0" | "P1" | "P2" | "P3",
+  "auditFindingId": "<uuid from audit candidates, or null for audit_missed>",
+  "auditRunId": "<uuid from audit candidate, or null>",
+  "correlationType": "confirmed_hit" | "audit_missed" | "audit_false_positive" | "severity_understated" | "severity_overstated",
+  "matchScore": <0.0-1.0 similarity>,
+  "matchRationale": "<one-line reason: \"shared file src/routes/wines.js + keyword overlap 3/5\">"
+}'
+```
+
+**Also — reverse direction**: for any audit candidate that was **not** matched
+by any persona finding but covered a user-facing code path the persona
+*should* have encountered (based on its focus area), emit `audit_false_positive`
+with `auditFindingId` set and `personaFindingHash` set to a synthetic
+`"noop-<audit_id>"` hash. Be conservative here — only emit when the persona
+clearly walked the code path (you saw the element/flow, but nothing went wrong).
+
+The rows immediately feed the `audit_effectiveness` view. No further work needed
+in this skill — `/audit-loop` will pick up the signal on its next run via the
+bandit reward function.
+
+---
+
+## Phase 6c — Session History Readback
 
 After saving, check for prior sessions on the same URL:
 
