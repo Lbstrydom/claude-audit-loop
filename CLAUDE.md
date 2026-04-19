@@ -14,7 +14,7 @@
         ↓
 /audit-loop                      → code quality gate (GPT-5.4 + Gemini arbiter)
         ↓
-/verify-regression               → Playwright e2e spec for each fix (locks in DOM contract)
+/ux-lock                         → Playwright e2e spec for each fix (locks in DOM contract)
         ↓
 deploy to Railway / live URL
         ↓
@@ -26,7 +26,7 @@ deploy to Railway / live URL
 Each skill is a sibling — they share env vars and Supabase stores but have distinct scopes:
 - **plan-***: code that doesn't exist yet
 - **audit-loop**: code that was just written (static analysis + LLM audit)
-- **verify-regression**: code that was just fixed (Playwright e2e regression lock)
+- **ux-lock**: code that was just fixed (Playwright e2e regression lock)
 - **persona-test**: deployed app (live browser, user flows, UX findings)
 - **ship**: packaging and delivery
 

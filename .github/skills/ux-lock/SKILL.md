@@ -1,19 +1,19 @@
 ---
-name: verify-regression
+name: ux-lock
 description: |
   Generate Playwright e2e regression specs that lock in a fix's DOM contract.
   Use after shipping a bug fix or feature to ensure it doesn't regress.
-  Triggers on: "verify regression", "lock in the fix", "write regression spec",
-  "generate e2e test for", "regression test for commit".
-  Usage: /verify-regression <commit-or-description> [--url <base-url>]
+  Triggers on: "ux lock", "lock ux", "lock in the fix", "write regression spec",
+  "generate e2e test for", "regression test for commit", "lock this fix".
+  Usage: /ux-lock <commit-or-description> [--url <base-url>]
   Examples:
-    /verify-regression "modal closes before retry"
-    /verify-regression abc1234
-    /verify-regression "role=list on wine grid" --url https://myapp.railway.app
+    /ux-lock "modal closes before retry"
+    /ux-lock abc1234
+    /ux-lock "role=list on wine grid" --url https://myapp.railway.app
 disable-model-invocation: true
 ---
 
-# Verify Regression — Playwright Spec Generator
+# UX Lock — Playwright Spec Generator
 
 Generate a Playwright e2e spec that locks in a bug fix or feature's public DOM contract.
 
@@ -161,8 +161,21 @@ If the spec fails, debug and fix. Common issues:
 - **After any production bug fix**: before closing the issue
 - **Before a major refactor**: baseline the current behavior
 
+## Scope & Limitations
+
+**Works for**: Web apps served via URL (Express, Railway, Vercel, Netlify, etc.)
+Playwright navigates to `baseURL`, drives the DOM, asserts on elements.
+
+**Limited for**: Obsidian plugins (Electron apps). Playwright can't attach to
+Obsidian's Electron process. For Obsidian plugins:
+- Unit test the plugin's logic with vitest (not e2e)
+- Test extracted UI components in a mock HTML harness
+- Use `/persona-test` with Playwright MCP against Obsidian's dev tools if available
+- Full Electron e2e (`_electron.launch()`) is possible but heavy — use only for
+  critical user flows
+
 ## Integration with Other Skills
 
-- **/audit-loop** → converges → **/verify-regression** locks in fixes
-- **/persona-test** → finds P0 → fix → **/verify-regression** prevents recurrence
+- **/audit-loop** → converges → **/ux-lock** locks in fixes
+- **/persona-test** → finds P0 → fix → **/ux-lock** prevents recurrence
 - **/ship** → warns if recent fixes lack regression specs
