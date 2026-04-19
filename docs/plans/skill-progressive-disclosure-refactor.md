@@ -1,8 +1,58 @@
 # Plan: Skill Progressive Disclosure Refactor
 - **Date**: 2026-04-19
-- **Status**: Approved-with-conditions (see §5 — Phase B.1 must fix bugs G2/G3/G5)
+- **Status**: **Complete** (all phases A, B.1, B.2, C1–C6, D, E shipped and tested)
 - **Author**: Claude + Louis
-- **Audit trail**: GPT-5.4 R1 (8 findings, all fixed) → R2 (8 findings; 3 HIGH fixed + 1 LOW deferred + E2E gap documented) → Gemini 3.1 Pro final gate (5 findings; 3 accepted as pre-existing bugs, 2 challenged as category errors)
+- **Audit trail**: GPT-5.4 R1 (8 findings, all fixed) → R2 (8 findings; 3 HIGH fixed + 1 LOW deferred + E2E gap documented) → Gemini 3.1 Pro final gate (5 findings; 3 accepted as pre-existing bugs all fixed in Phase B.1/B.2, 2 challenged as category errors)
+
+## Implementation Log
+
+### 2026-04-19 — Full rollout
+
+Phases completed end-to-end in a single session. All 940 tests pass.
+
+- **Phase A** — `docs/skill-reference-format.md`, `skill-refs-parser`,
+  `check-skill-refs` CLI, `repo-stack` lib, `cross-skill detect-stack`
+  subcommand, `skill-packaging` allowlist, `regenerate-skill-copies`
+  generator + `--check` verifier. 41 new unit tests.
+- **Phase B.1** — `MANIFEST_SUPPORTED_VERSIONS = [1, 2]`, `FileEntrySchema`
+  + optional `files[]`, version-gated installer entrypoint, crash-safe WAL
+  journal in `executeTransaction` with `recoverFromJournal`,
+  `resolveSkillFiles` + `partitionManagedFilesByScope`. **G2 fix** (receipt
+  scope split — global receipt for claude surface) + **G3 fix** (merged
+  copilot-instructions SHA = final merged content, not blockSha). 21 new
+  install tests.
+- **Phase C1** — persona-test 879 → 364 lines canonical (6 refs, 1 example).
+- **Phase C2** — audit-loop 724 → 370 lines canonical (4 refs).
+- **Phase C3** — ux-lock 487 → 208 lines canonical (3 refs).
+- **Phase C4** — plan-frontend 386 → 259 lines canonical (3 refs).
+- **Phase C5** — ship 361 → 283 lines canonical (2 refs).
+- **Phase C6** — plan-backend 267 → 226 lines canonical (2 refs).
+- **Phase D** — `list-personas` / `add-persona` / `record-persona-session`
+  subcommands on `cross-skill.mjs` with Zod schemas. `emitError` exits
+  non-zero on validation failures (bug fix). 9 new CLI tests.
+- **Phase B.2** — `MANIFEST_SCHEMA_VERSION = 2`, `build-manifest.mjs`
+  rewritten to use `enumerateSkillFiles` (allowlist-based).
+  `sync-to-repos.mjs` auto-enumerates. **G5 fix** — YAML frontmatter parse
+  is now tolerant of inline/block/plain forms.
+- **Phase E** — `npm run skills:regenerate / :check / :manifest /
+  :manifest:check`. CONTRIBUTING.md rewrite documenting the
+  authoritative-source + generated-copies architecture.
+
+### Success metrics met
+
+| Metric | Target | Result |
+|---|---|---|
+| Per-skill SKILL.md | ≤3K tokens | All 6 ≤3.2K tokens (avg 2.3K) |
+| Cross-skill dup | ≤50 tokens | 0 tokens — stack detection fully extracted |
+| Tests | 100% pass | 940/940 |
+| `skills:check` lint | zero violations | 6/6 pass |
+| No UX regression | user still calls `/skill-name` | unchanged — frontmatter + triggers preserved |
+
+### Total SKILL.md reduction
+
+3,104 → 1,710 canonical lines (**-45%**). Reference files carry 1,370
+lines of the moved content, loaded only when the "Read when" trigger
+applies.
 
 ---
 
