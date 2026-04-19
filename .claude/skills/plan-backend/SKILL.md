@@ -11,83 +11,42 @@ description: |
 
 # Backend Architecture Planner
 
-You are entering backend planning mode. Before proposing ANY solution, you MUST follow
-this structured process. Do not skip steps — shortcuts lead to brittle architecture.
-
-## Phase 0 — Repo Stack Detection
-
-Before Phase 1, detect the repo's primary language(s):
-
-- **JS/TS**: `package.json` present with `dependencies` or `devDependencies`
-- **Python**: `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py`, or `uv.lock` present
-- **Mixed**: both present (e.g. Python backend + TS frontend)
-- **Unknown**: neither -- proceed with universal principles only, skip stack-specific sections
-
-**Mixed-stack handling**: when mixed, apply the profile matching the **files involved in the current task**. If no files cited yet, fall back to **primary-language heuristic**:
-
-File-based routing (preferred when files are identified):
-- Task's cited files are `.py` -- apply Python profile
-- Task's cited files are `.ts`/`.js`/`.tsx`/`.jsx` -- apply JS/TS profile
-- Task's cited files span both languages -- apply BOTH, each principle scoped to its language
-
-Primary-language fallback (when no files cited yet):
-- Count source files of each language in the repo
-- Apply the profile of the MAJORITY language
-- Log the detection: "Mixed repo, majority Python -- applying Python profile."
-
-When Python is detected, also identify the **framework**:
-
-- **FastAPI**: `fastapi` in deps, or `FastAPI()` import in source
-- **Django**: `django` in deps, or `DJANGO_SETTINGS_MODULE` in config, or `manage.py` present
-- **Flask**: `flask` in deps, or `Flask()` import in source
-- **None/custom**: no framework detected -- apply only universal Python principles
-
-Based on detection, reference the appropriate stack profile below.
+Structured backend planning — every design grounded in 20 engineering
+principles across core design, robustness, performance, and sustainability.
 
 ---
 
-### Python Backend Profile
+## Phase 0 — Repo Stack Detection
 
-Apply these principles when Python is detected. Each bullet carries an explicit framework tag.
+```bash
+node scripts/cross-skill.mjs detect-stack
+```
 
-**File-layout expectations**: `src/<pkg>/` or `<pkg>/`, `routes/api/views/`, `services/domain/`, `models/schemas/`, `migrations/`, `tests/`
+Returns `{ stack, pythonFramework, detectedFrom }`.
 
-**Python-specific principle checks**:
+| `stack` | Profile to apply |
+|---|---|
+| `js-ts` | Universal principles (Phase 2) |
+| `python` | Universal principles + Python backend profile — see `references/python-backend-profile.md` |
+| `mixed` | File-based routing: task cites `.py` files → Python; `.ts`/`.js` → JS/TS; spans both → apply BOTH scoped to their language |
+| `unknown` | Universal principles only |
 
-- `[generic]` Type hints on function signatures + returns (`mypy --strict` clean)
-- `[generic]` Exception hierarchy (custom `AppException` base, no bare `except:`)
-- `[generic]` Pytest for testing, ruff for lint + format
-- `[generic]` Virtual environment discipline (venv/poetry/uv)
-- `[generic]` ORM N+1 prevention — Django: `select_related`/`prefetch_related`; SQLAlchemy: `joinedload`/`selectinload`
-- `[generic]` No mutable default arguments in function signatures
-- `[fastapi]` Async consistency -- whole request path async, no sync DB calls in async handlers
-- `[fastapi]` `Depends()` for dependency injection, not module-level singletons
-- `[fastapi,flask]` `pydantic-settings` BaseSettings for config (Django uses `settings.py`)
-- `[fastapi,flask]` Pydantic validation at API boundaries, not dict-bashing
-- `[django]` Fat-view anti-pattern -- move business logic to services
-- `[django]` Django forms for validation before DB writes
-- `[django,flask]` HTMX progressive enhancement (Django/Flask templates)
-
-**Stack commands**: `pytest`, `ruff check`, `ruff format`, `mypy`/`pyright`, `uv sync`/`poetry install`
-
-**Python-specific anti-patterns**:
-- Global DB session (must be per-request)
-- Sync-in-async (sync DB calls inside async handlers)
-- `Any`-typed returns (use explicit return types)
-- Dict-passing across boundaries (use Pydantic models or dataclasses)
-- Django fat views (business logic in views instead of services)
+**Primary-language fallback** (when no files cited yet): count source files
+of each language in the repo, apply the profile of the majority. Log
+`Mixed repo, majority Python — applying Python profile.`
 
 ---
 
 ## Phase 1 — Understand Before You Design
 
-**Explore the codebase FIRST.** The biggest planning failure is proposing solutions
-without understanding what already exists.
+**Explore the codebase FIRST.** The biggest planning failure is proposing
+solutions without understanding what already exists.
 
-### Phase 1 Pre-Step — Persona Test History (if available)
+### Pre-step — Persona test history
 
-Before reading the code, check if persona testing has already surfaced pain points in
-the area being planned. If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set:
+If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set,
+check whether persona testing has already surfaced pain points in the
+area being planned:
 
 ```bash
 curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,p0_count,p1_count" \
@@ -95,8 +54,8 @@ curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$
   -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
 ```
 
-Filter sessions whose `focus` overlaps with the feature being planned. If matches found,
-include in the **Context Summary** (Phase 4, Section 1) as **Known user-visible issues**:
+Filter sessions whose `focus` overlaps with the feature. If matches
+found, include in the Context Summary as **Known user-visible issues**:
 
 ```
 Known user-visible issues (from persona testing):
@@ -104,109 +63,97 @@ Known user-visible issues (from persona testing):
   • [P1] No loading state on search — 3 sessions, recurring
 ```
 
-This prevents the plan from ignoring already-discovered UX failures, and flags code paths
-that persona testing has confirmed are broken — treat these as HIGH priority in the design.
+This prevents the plan from ignoring already-discovered UX failures.
+Treat P0/P1 matches as HIGH priority in the design.
 
-1. **Map the landscape**: Read relevant existing files — routes, services, models, utilities
-2. **Identify existing patterns**: How does the codebase already solve similar problems?
-3. **Find reusable components**: What services, utilities, or abstractions already exist that could be leveraged?
-4. **Check for prior art**: Has something similar been partially built or attempted?
-5. **Understand the data flow**: Trace the request lifecycle from route → service → DB and back
+### Exploration checklist
 
-Do NOT propose a plan until you have completed this exploration.
+1. **Map the landscape**: routes, services, models, utilities
+2. **Identify existing patterns**: how does the codebase already solve similar problems?
+3. **Find reusable components**: existing services, utilities, abstractions
+4. **Check for prior art**: something similar partially built or attempted?
+5. **Understand the data flow**: request lifecycle from route → service → DB and back
+
+Do NOT propose a plan until exploration is complete.
+
+---
+
+## Phase 1.5 — Execution Model (Operations with Dependencies)
+
+Forced question: **Are any of the planned operations dependent on others?**
+If yes, identify chains, prerequisites, and per-chain atomicity.
+
+This phase catches sequencing bugs that surface as HIGH findings in
+audit round 3+.
+
+### When this phase matters
+
+- **Batch operations**: moves, imports, migrations — order matters, partial failure needs rollback
+- **Multi-step workflows**: wizard flows, onboarding sequences — step N depends on step N-1
+- **State transitions**: status changes, approval chains — invalid intermediate states must be prevented
+- **Cross-entity operations**: swaps, cycles, rebalancing — A↔B swap is not two independent moves
+
+### What to produce
+
+1. **Dependency graph**: which operations must complete before others can start?
+2. **Chain identification**: group dependent operations into atomic chains
+3. **Failure semantics**: for each chain — rollback, retry, skip?
+4. **Concurrency model**: can chains run in parallel, or must they be serial?
+
+If all operations are independent — document that explicitly and move on.
+If ANY dependency exists — the plan MUST define execution order,
+atomicity boundary, and partial-failure recovery before proceeding.
+
+---
 
 ## Phase 2 — Apply Engineering Principles
 
-Every design decision in your plan must be evaluated against ALL of these principles.
-Explicitly call out which principles influenced each decision.
+Every design decision evaluated against 20 principles:
+- **Core Design** (1–10): DRY, SOLID, Modularity, No Hardcoding, Single Source of Truth
+- **Robustness** (11–16): Testability, Validation, Idempotency, Transaction Safety, Error Handling, Graceful Degradation
+- **Performance & Sustainability** (17–20): N+1 prevention, Backward Compat, Observability, Long-Term Flexibility
 
-### Core Design Principles
+Cite principle numbers in the plan's "Proposed Architecture" section.
 
-| # | Principle | Planning Question |
-|---|-----------|-------------------|
-| 1 | **DRY** (Don't Repeat Yourself) | Does this duplicate logic that exists elsewhere? Can we extract shared functions? |
-| 2 | **SOLID** — Single Responsibility | Does each module/function do exactly one thing? |
-| 3 | **SOLID** — Open/Closed | Can this be extended without modifying existing code? |
-| 4 | **SOLID** — Liskov Substitution | Are abstractions interchangeable without breaking consumers? |
-| 5 | **SOLID** — Interface Segregation | Are we forcing dependencies on things not needed? |
-| 6 | **SOLID** — Dependency Inversion | Do high-level modules depend on abstractions, not implementations? |
-| 7 | **Modularity** | Is the design broken into composable, independently testable units? |
-| 8 | **No Hardcoding** | Are values configurable — env vars, constants files, config objects? |
-| 9 | **No Dead Code** | Does the plan remove or avoid unused paths, stale branches, orphan functions? |
-| 10 | **Single Source of Truth** | Is every config, constant, and mapping defined in exactly one place? |
+Full tables + anti-patterns: `references/engineering-principles.md`.
 
-### Robustness Principles
+---
 
-| # | Principle | Planning Question |
-|---|-----------|-------------------|
-| 11 | **Testability** | Can each unit be tested in isolation? Are dependencies injectable? |
-| 12 | **Defensive Validation** | Is input validated at boundaries? Are edge cases handled? |
-| 13 | **Idempotency** | Are write operations safe to retry? No double-creates or double-charges? |
-| 14 | **Transaction Safety** | Are multi-step mutations wrapped in transactions with rollback on failure? |
-| 15 | **Consistent Error Handling** | Do errors follow a uniform format? No swallowed exceptions? Proper status codes? |
-| 16 | **Graceful Degradation** | What happens when an external service fails? Does the system degrade, not crash? |
+## Phase 3 — Long-Term Sustainability
 
-### Performance & Sustainability Principles
+Resist the urge to solve only the immediate problem. Every plan answers:
 
-| # | Principle | Planning Question |
-|---|-----------|-------------------|
-| 17 | **N+1 Query Prevention** | Are DB access patterns batched? No loops with individual queries? |
-| 18 | **Backward Compatibility** | Do API changes break existing consumers? Is migration needed? |
-| 19 | **Observability** | Are errors meaningful? Can issues be diagnosed from logs alone? |
-| 20 | **Long-Term Flexibility** | See Phase 3 below — this gets its own section. |
+### System-level thinking
 
-## Phase 3 — Long-Term Sustainability Assessment
+- **What assumptions does this design encode?** Which might change?
+- **If requirements change in 6 months, what breaks?** Design seams now so changes are localised.
+- **Does this tighten or loosen coupling?** Prefer loose coupling — components communicate through well-defined interfaces.
+- **Patterns or exceptions?** If this is the first of its kind, design as a pattern others can follow. If it deviates, justify why.
 
-**This is critical.** Resist the urge to solve only the immediate problem. Every plan must
-answer these questions:
+### Architecture flexibility checklist
 
-### System-Level Thinking
+- [ ] **Data-driven over logic-driven**: can behaviour change by modifying data/config rather than rewriting code?
+- [ ] **Strategy pattern over switch**: would a new variant require a new file (good) or modifying existing function (bad)?
+- [ ] **Composable pipeline**: can processing steps be added, removed, reordered without rewriting?
+- [ ] **Abstraction boundaries**: if we swap DB, AI provider, or external API, how many files change? Target: 1–2 adapter files.
+- [ ] **Migration path**: if this outgrows its design, is there a clear upgrade path without rewrite?
 
-- **What assumptions does this design encode?** Which of those assumptions might change?
-- **If requirements change in 6 months, what breaks?** Design the seams now so changes
-  are localised, not cascading.
-- **Does this tighten or loosen coupling?** Prefer loosely coupled designs where components
-  communicate through well-defined interfaces.
-- **Are we creating patterns or exceptions?** If this is the first of its kind, design it
-  as a pattern other features can follow. If it deviates from existing patterns, justify why.
-
-### Architecture Flexibility Checklist
-
-- [ ] **Data-driven over logic-driven**: Can behavior be changed by modifying data/config
-      rather than rewriting code?
-- [ ] **Strategy pattern over switch statements**: Would a new variant require a new file
-      (good) or modifying an existing function (bad)?
-- [ ] **Composable pipeline**: Can processing steps be added, removed, or reordered without
-      rewriting the pipeline?
-- [ ] **Abstraction boundaries**: If we swap the database, AI provider, or external API,
-      how many files change? (Target: 1-2 adapter files, not 20 consumers)
-- [ ] **Migration path**: If this outgrows its current design, is there a clear upgrade
-      path that doesn't require a rewrite?
-
-### Anti-Patterns to Flag
-
-When you spot these in your plan, stop and redesign:
-
-- **God function**: One function doing orchestration, validation, transformation, and persistence
-- **Shotgun surgery**: A single change requiring edits across 5+ files
-- **Feature envy**: A service that mostly accesses another service's data
-- **Premature optimisation**: Complexity added for hypothetical scale that isn't needed
-- **Leaky abstraction**: Implementation details (DB column names, API response shapes)
-  leaking through service boundaries
+---
 
 ## Phase 4 — Present the Plan
 
-Structure your plan output as follows:
+Structure output as:
 
 ### 1. Context Summary
-- What exists today (from Phase 1 exploration)
+- What exists today (Phase 1)
 - What patterns the codebase already uses
 - What we can reuse vs. what is new
+- Known user-visible issues (if persona data available)
 
 ### 2. Proposed Architecture
 - Component diagram (which files/modules, how they interact)
 - Data flow (request → response path)
-- Key design decisions and **which principles drove them**
+- Key design decisions and **which principles drove them** (cite #N)
 
 ### 3. Sustainability Notes
 - Assumptions that could change
@@ -215,13 +162,13 @@ Structure your plan output as follows:
 
 ### 4. File-Level Plan
 For each file to be created or modified:
-- **File path** and purpose
+- **File path** + purpose
 - **Key functions/exports** with brief descriptions
-- **Dependencies** (what it imports, what imports it)
-- **Why this file** (which principle justifies its existence)
+- **Dependencies** (imports + what imports it)
+- **Why this file** (which principle justifies it)
 
 ### 5. Risk & Trade-off Register
-- What trade-offs were made and why
+- Trade-offs made + why
 - What could go wrong
 - What was deliberately deferred (and why that is OK)
 
@@ -234,13 +181,8 @@ For each file to be created or modified:
 
 ## Phase 5 — Persist the Plan
 
-**Save the plan to the repository's `docs/` folder.** Every plan must be written to a file
-so it serves as a living reference during implementation.
-
-- **File path**: `docs/plans/<descriptive-name>.md` (e.g., `docs/plans/wine-recommendation-engine.md`)
-- **Create the `docs/plans/` directory** if it does not exist
-- **Include all sections** from Phase 4 in the saved document
-- **Add a metadata header** at the top:
+Save to `docs/plans/<descriptive-name>.md`. Create `docs/plans/` if
+needed. Metadata header:
 
 ```markdown
 # Plan: <Feature Name>
@@ -249,15 +191,36 @@ so it serves as a living reference during implementation.
 - **Author**: Claude + <user>
 ```
 
-- **Update status** as implementation progresses
-- The saved plan becomes the source of truth — refer back to it during implementation
+Register in the cross-skill store so audit-loop can link:
+
+```bash
+node scripts/cross-skill.mjs upsert-plan --json '{
+  "path": "docs/plans/<name>.md",
+  "skill": "plan-backend",
+  "status": "draft"
+}'
+```
+
+Update status as implementation progresses.
 
 ---
 
 ## Reminders
 
-- **Explore before proposing** — The codebase is the ground truth, not assumptions
-- **Name the principles** — Every design choice should cite which principle(s) it serves
-- **Challenge yourself** — Ask "what if this requirement changes?" for every major decision
-- **Prefer boring solutions** — Simple, proven patterns beat clever novel approaches
-- **Show your reasoning** — The user wants to understand WHY, not just WHAT
+- **Explore before proposing** — the codebase is ground truth, not assumptions
+- **Name the principles** — every design choice cites which principle(s) it serves
+- **Challenge yourself** — ask "what if this requirement changes?" for every major decision
+- **Prefer boring solutions** — simple, proven patterns beat clever novel approaches
+- **Show your reasoning** — the user wants to understand WHY, not just WHAT
+
+---
+
+## Reference files
+
+This skill's canonical flow is above. The files below cover specialised
+situations — read them only when the trigger applies.
+
+| File | Summary | Read when |
+|---|---|---|
+| `references/engineering-principles.md` | 20 engineering principles — core design, robustness, performance, sustainability. | Phase 2 — writing Proposed Architecture section and need to cite specific principles, OR spotting an anti-pattern. |
+| `references/python-backend-profile.md` | Python backend profile — framework-tagged principle checks + stack commands + anti-patterns. | Phase 0 detect-stack returned `python` or `mixed` with Python-facing files in the task. |

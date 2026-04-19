@@ -43,13 +43,21 @@ describe('skills content', () => {
     });
 
     it(`${skill} has Python-specific content`, () => {
-      const content = fs.readFileSync(skillPath, 'utf-8');
-      // plan-backend, plan-frontend, audit use framework tags; ship uses Python command discovery
+      // Progressive-disclosure refactor: Python content moved from SKILL.md
+      // to references/*.md for plan-backend, plan-frontend, ship. Still part
+      // of the skill — just loaded on demand. Check SKILL.md + references/.
+      let content = fs.readFileSync(skillPath, 'utf-8');
+      const refsDir = path.join(path.dirname(skillPath), 'references');
+      if (fs.existsSync(refsDir)) {
+        for (const f of fs.readdirSync(refsDir)) {
+          if (f.endsWith('.md')) content += '\n' + fs.readFileSync(path.join(refsDir, f), 'utf-8');
+        }
+      }
       const hasTags = (content.match(/\[(generic|fastapi|django|flask)[,\]]/g) || []).length >= 5;
       const hasPythonSection = content.includes('Python') && content.includes('pytest');
       assert.ok(
         hasTags || hasPythonSection,
-        `must have >= 5 framework tags OR Python-specific sections`
+        `must have >= 5 framework tags OR Python-specific sections (checked SKILL.md + references/)`,
       );
     });
   }

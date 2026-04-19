@@ -11,239 +11,110 @@ description: |
 
 # Frontend UX & Implementation Planner
 
-You are entering frontend planning mode. This process ensures every UI decision is grounded
-in UX principles AND technically sound. Do not skip phases — good UI requires both design
-thinking and implementation rigour.
-
-## Phase 0 — Repo Stack Detection
-
-Before Phase 1, detect the repo's primary language(s):
-
-- **JS/TS**: `package.json` present with `dependencies` or `devDependencies`
-- **Python**: `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py`, or `uv.lock` present
-- **Mixed**: both present (e.g. Python backend + TS frontend)
-- **Unknown**: neither -- proceed with universal principles only, skip stack-specific sections
-
-**Mixed-stack handling**: when mixed, apply the profile matching the **files involved in the current task**:
-
-- Task's cited files are `.py` / `.html` (Jinja/Django templates) -- apply Python FE profile
-- Task's cited files are `.ts`/`.js`/`.tsx`/`.jsx`/`.vue`/`.svelte` -- apply JS/TS profile
-- Task's cited files span both -- apply BOTH, each principle scoped to its language
-
-When Python is detected, also identify the **framework**:
-
-- **Django**: `django` in deps, or `DJANGO_SETTINGS_MODULE`, or `manage.py` present
-- **Flask**: `flask` in deps, or `Flask()` import
-- **FastAPI**: `fastapi` in deps (typically API-only, but may have Jinja templates)
-- **None/custom**: no framework detected -- apply only universal Python FE principles
-
-Based on detection, reference the appropriate stack profile below.
+Structured frontend planning — every UI decision grounded in UX principles
+AND technically sound. Do not skip phases — good UI requires both.
 
 ---
 
-### Python Frontend Profile
+## Phase 0 — Repo Stack Detection
 
-Focus on server-rendered frontends (Jinja, Django templates, HTMX) -- the dominant Python "frontend" pattern.
+Invoke the shared CLI:
 
-**File-layout expectations**: `templates/`, `static/`, optional `frontend/` for separate JS build
+```bash
+node scripts/cross-skill.mjs detect-stack
+```
 
-**Python FE principle checks**:
+Response JSON includes `stack`, `pythonFramework`, `detectedFrom`.
 
-- `[generic]` Template inheritance -- base template with blocks, child templates extend
-- `[generic]` Static asset versioning -- cache-busting via hashed filenames or query params
-- `[generic]` Server-side form validation -- never trust client-only validation
-- `[generic]` Context data discipline -- explicit context dicts, no global state leaking into templates
-- `[django]` CSRF on all mutation forms (`{% csrf_token %}`)
-- `[django]` Use Django template tags and filters instead of logic in templates
-- `[django]` `{% static %}` tag for all asset references (not hardcoded paths)
-- `[django,flask]` HTMX progressive enhancement -- server returns HTML fragments, not JSON
-- `[django,flask]` No direct ORM access from templates (pass pre-computed data from views)
-- `[flask]` Jinja2 autoescaping enabled by default; `|safe` filter requires explicit justification
-
-**Python FE anti-patterns**:
-- Logic in templates (conditionals/loops that should be in views/services)
-- `|safe` filter without justification (XSS risk)
-- Direct ORM access from templates (N+1 queries, separation of concerns)
-- Hardcoded asset paths instead of `{% static %}` or `url_for('static', ...)`
-- Missing CSRF tokens on POST/PUT/DELETE forms
+| `stack` | Profile to apply |
+|---|---|
+| `js-ts` | Universal UX principles + JS/TS technical principles |
+| `python` | Universal UX principles + Python frontend profile — see `references/python-frontend-profile.md` |
+| `mixed` | File-based routing: if the task cites `.py` / `.html`/Jinja files → Python; if `.ts`/`.js`/`.tsx`/`.jsx`/`.vue`/`.svelte` → JS/TS; spans both → apply BOTH scoped to their language |
+| `unknown` | Universal principles only, skip stack-specific sections |
 
 ---
 
 ## Phase 1 — Explore the Existing UI
 
-**Understand what exists BEFORE designing anything new.** Study the current frontend
-to ensure consistency and reuse.
+**Understand what exists BEFORE designing anything new.** Study the current
+frontend to ensure consistency and reuse.
 
-1. **Audit the current UI**: Read relevant HTML, CSS, and JS files for the area being changed
-2. **Map the component landscape**: What UI patterns already exist? (modals, cards, grids, forms, toasts)
-3. **Identify the design language**: Current colour palette, typography, spacing, button styles
-4. **Trace user flows**: How does the user currently navigate to and through related features?
-5. **Find reusable elements**: Existing CSS classes, JS utilities, shared components
-6. **Check responsive behaviour**: How does the existing UI handle different screen sizes?
-7. **Note pain points**: What feels clunky, inconsistent, or confusing in the current UX?
+1. **Audit the current UI**: Read relevant HTML, CSS, and JS files
+2. **Map the component landscape**: existing patterns (modals, cards, grids, forms, toasts)
+3. **Identify the design language**: colour palette, typography, spacing, button styles
+4. **Trace user flows**: how the user currently navigates to and through related features
+5. **Find reusable elements**: existing CSS classes, JS utilities, shared components
+6. **Check responsive behaviour**: how the UI handles different screen sizes
+7. **Note pain points**: what feels clunky, inconsistent, or confusing
 
-Do NOT propose designs until you have completed this exploration.
+Do NOT propose designs until this exploration is complete.
+
+---
 
 ## Phase 2 — Apply UX & Design Principles
 
-Every design decision must be evaluated against these principles. Explicitly cite which
-principles drive each choice.
+Every design decision is evaluated against 26 principles across four
+groups: Gestalt, Interaction/Usability, Cognitive Load, Accessibility.
+Plus Nielsen's 10 heuristics as a final cross-check pass.
 
-### Gestalt Principles
+Cite principle numbers in the plan's "UX Design Decisions" section when
+justifying each choice.
 
-| # | Principle | Design Question |
-|---|-----------|-----------------|
-| 1 | **Proximity** | Are related items grouped together? Is whitespace creating clear clusters? |
-| 2 | **Similarity** | Do elements that function alike look alike? (Same colour, size, shape) |
-| 3 | **Continuity** | Does the eye follow a natural path through the layout? Are alignments clean? |
-| 4 | **Closure** | Can the user brain complete implied shapes/groups? Are containers clear? |
-| 5 | **Figure-Ground** | Is the focal content clearly distinguishable from the background? |
-| 6 | **Common Region** | Are grouped items enclosed in a shared visual boundary? |
-| 7 | **Common Fate** | Do elements that change together move/animate together? |
+Full tables: `references/ux-principles.md`.
 
-### Interaction & Usability Principles
-
-| # | Principle | Design Question |
-|---|-----------|-----------------|
-| 8 | **Clear Affordances** | Does each interactive element look clickable/draggable/editable? Can the user tell what to do without instructions? |
-| 9 | **User Logic & Flow** | Does the sequence of steps match how the user thinks about the task, not how the code is structured? |
-| 10 | **Consistency** | Do similar actions behave the same way everywhere? Same terms, same patterns, same positions? |
-| 11 | **Feedback & System Status** | Does the user always know what is happening? Loading indicators, success confirmations, error messages? |
-| 12 | **Error Prevention & Recovery** | Can users undo mistakes? Are destructive actions confirmed? Is inline validation present? |
-| 13 | **Progressive Disclosure** | Is complexity hidden until needed? Does the UI start simple and reveal depth on demand? |
-| 14 | **Recognition Over Recall** | Can users see their options rather than having to remember them? Are hints and labels visible? |
-
-### Cognitive Load & Decision Science
-
-| # | Principle | Design Question |
-|---|-----------|-----------------|
-| 15 | **Hick's Law** | Are choices kept minimal? Can options be chunked or categorised to reduce overwhelm? |
-| 16 | **Fitts's Law** | Are primary actions large and easy to reach? Are destructive actions small and distant from primary paths? |
-| 17 | **Visual Hierarchy** | Does typography scale, colour weight, and spacing guide the eye to what matters most first? |
-| 18 | **Whitespace & Breathing Room** | Does the layout feel spacious or cramped? Is there enough negative space to reduce cognitive load? |
-
-### Accessibility & Inclusion
-
-| # | Principle | Design Question |
-|---|-----------|-----------------|
-| 19 | **Keyboard Navigation** | Can every interactive element be reached and operated via keyboard alone? |
-| 20 | **Screen Reader Support** | Are ARIA labels, roles, and live regions properly set? Do dynamic updates announce themselves? |
-| 21 | **Colour Contrast** | Does text meet WCAG AA contrast ratios (4.5:1 body, 3:1 large)? Is colour never the only indicator? |
-| 22 | **Focus Management** | When modals open, does focus move in? When they close, does focus return? Are focus traps correct? |
-
-### State & Resilience
-
-| # | Principle | Design Question |
-|---|-----------|-----------------|
-| 23 | **State Coverage** | Does every component handle: empty, loading, error, success, and partial states? |
-| 24 | **Performance Perception** | Are skeleton screens, optimistic updates, or transitions used to make waits feel shorter? |
-| 25 | **Responsive Design** | Does the layout adapt gracefully from mobile to desktop? Are touch targets 44px minimum? |
-| 26 | **Dark Pattern Avoidance** | Is the UI honest? No tricks, hidden costs, forced actions, or misleading defaults? |
-
-### Nielsen's 10 Usability Heuristics (Cross-Check)
-
-Use these as a final validation pass on your design:
-
-1. Visibility of system status
-2. Match between system and real world
-3. User control and freedom
-4. Consistency and standards
-5. Error prevention
-6. Recognition rather than recall
-7. Flexibility and efficiency of use
-8. Aesthetic and minimalist design
-9. Help users recognise, diagnose, and recover from errors
-10. Help and documentation
-
-If your design fails any of these, revisit before proceeding.
+---
 
 ## Phase 3 — Technical Implementation Principles
 
-UX only works if the implementation is solid. Evaluate the technical approach against
-these principles.
+UX only works if the implementation is solid. 17 principles across
+Component Architecture (27–31), State Management (32–35), Event Handling
+(36–39), CSS & Styling (40–43).
 
-### Component Architecture
+Cite numbers in the plan's "Technical Architecture" section.
 
-| # | Principle | Technical Question |
-|---|-----------|-------------------|
-| 27 | **Single Responsibility** | Does each JS module/function handle one concern? (rendering, state, events, API calls) |
-| 28 | **Modularity** | Are components self-contained? Can they be tested and reasoned about independently? |
-| 29 | **DRY** | Are shared patterns extracted into utilities? (formatters, validators, DOM helpers) |
-| 30 | **No Dead Code** | Are unused event handlers, CSS classes, or DOM builders removed? |
-| 31 | **No Hardcoding** | Are strings, selectors, magic numbers, and breakpoints in constants or CSS variables? |
+Full tables + anti-patterns: `references/technical-principles.md`.
 
-### State Management
-
-| # | Principle | Technical Question |
-|---|-----------|-------------------|
-| 32 | **State Locality** | Is state owned by the narrowest scope possible? Not everything belongs in global state. |
-| 33 | **State Synchronisation** | When data changes, do all views reflecting that data update? No stale displays? |
-| 34 | **Optimistic Updates** | Can the UI update immediately and reconcile with the server response? |
-| 35 | **URL State** | Should filters, views, or selections be reflected in the URL for shareability and back-button support? |
-
-### Event Handling & DOM
-
-| # | Principle | Technical Question |
-|---|-----------|-------------------|
-| 36 | **Event Delegation** | Are events on dynamic content delegated to stable parent elements? |
-| 37 | **CSP Compliance** | Zero inline handlers (onclick, onchange). All events wired in JS. |
-| 38 | **Memory Hygiene** | Are event listeners cleaned up when components are destroyed or replaced? |
-| 39 | **Debounce & Throttle** | Are high-frequency events (scroll, resize, input) rate-limited? |
-
-### CSS & Styling
-
-| # | Principle | Technical Question |
-|---|-----------|-------------------|
-| 40 | **CSS Variables** | Are colours, spacing, and typography in CSS custom properties for consistency? |
-| 41 | **BEM or Consistent Naming** | Do class names follow a predictable, collision-free convention? |
-| 42 | **No Inline Styles** | Are all styles in CSS files, not element.style or style attributes? |
-| 43 | **Specificity Control** | Are selectors flat and predictable? No !important arms races? |
+---
 
 ## Phase 4 — Long-Term Sustainability
 
-### UI-Specific Sustainability Questions
+### UI-specific sustainability questions
 
-- **What if the design system changes?** Are we using CSS variables and reusable classes that
-  can be themed or swapped, or are colours/sizes hardcoded throughout?
-- **What if we add more items/views?** Does the layout scale gracefully from 5 items to 500?
+- **What if the design system changes?** Are CSS variables + reusable
+  classes ready for theming, or are colours/sizes hardcoded?
+- **What if we add more items/views?** Does the layout scale from 5 to 500?
   From 3 tabs to 12?
-- **What if we need to support mobile properly?** Is the component architecture responsive-ready
-  or would it require a rewrite?
-- **What if accessibility requirements tighten?** Are ARIA attributes, keyboard flows, and
-  focus management already in place?
-- **Are we creating a reusable pattern?** If this is the first of its kind (e.g., first
-  filterable list, first wizard flow), design it as a template other features can follow.
+- **What if we need proper mobile support?** Is the component architecture
+  responsive-ready or would it require a rewrite?
+- **What if accessibility requirements tighten?** Are ARIA attributes,
+  keyboard flows, and focus management already in place?
+- **Are we creating a reusable pattern?** If this is the first of its
+  kind, design it as a template other features can follow.
 
-### Anti-Patterns to Flag
+Anti-patterns to flag: CSS soup, DOM spaghetti, event listener leaks,
+god components, invisible state, stacked modals. Full list:
+`references/technical-principles.md`.
 
-- **CSS soup**: Hundreds of one-off classes with no naming convention
-- **DOM spaghetti**: innerHTML rebuilding entire sections when one element changed
-- **Event listener leaks**: Listeners attached on every render without cleanup
-- **God component**: One JS file handling rendering, state, events, API, and validation
-- **Design inconsistency**: Same action looks different in different places
-- **Invisible state**: Component behaves differently but gives no visual cue about its state
-- **Stacked modals / LIFO cascade**: If a modal's action handler opens another modal
-  without closing itself first, the user gets trapped in a growing modal stack. Rule:
-  **always close the current modal before opening the next one** — `closeModal()` then
-  `openModal()`, never nested. Check every modal action handler in the plan.
+---
 
 ## Phase 5 — Present the Plan
 
-Structure your plan output as follows:
+Structure output as:
 
 ### 1. Current UI Audit
-- What exists today (from Phase 1 exploration)
-- Existing patterns and design language
-- Pain points and inconsistencies identified
-- Components and CSS that can be reused
+- What exists today (from Phase 1)
+- Existing patterns + design language
+- Pain points + inconsistencies
+- Components + CSS that can be reused
 
 ### 2. User Flow & Wireframe
-- Step-by-step user journey through the feature
+- Step-by-step user journey
 - ASCII wireframe or layout description for key screens/states
-- Transitions between states (what triggers the change, what the user sees)
+- Transitions between states
 
 ### 3. UX Design Decisions
-- Key design choices and **which UX principles drove them**
+- Key design choices and **which UX principles drove them** (cite #N)
 - How Gestalt principles shaped the layout
 - How cognitive load was managed
 - Accessibility approach
@@ -255,36 +126,31 @@ Structure your plan output as follows:
 - CSS architecture (new classes, variables, responsive approach)
 
 ### 5. State Map
-For every component, document these states:
-- **Empty**: What the user sees with no data
-- **Loading**: What the user sees while waiting
-- **Error**: What the user sees when something fails
-- **Success**: The normal populated view
-- **Edge cases**: Overflow, single item, maximum items, long text
+For every component, document: Empty / Loading / Error / Success / Edge cases.
 
 ### 6. File-Level Plan
 For each file to be created or modified:
-- **File path** and purpose
+- **File path** + purpose
 - **Key functions/exports** with brief descriptions
-- **Dependencies** (what it imports, what imports it)
-- **Why this file** (which principle justifies its existence)
+- **Dependencies** (imports + what imports it)
+- **Why this file** (which principle justifies it)
 
 ### 7. Risk & Trade-off Register
-- What trade-offs were made and why
-- What could go wrong (browser compat, performance, accessibility gaps)
+- Trade-offs made + why
+- What could go wrong (browser compat, performance, a11y)
 - What was deliberately deferred
 
 ### 8. Testing Strategy
 - Visual/manual testing checklist
-- Accessibility testing approach (keyboard walkthrough, screen reader, contrast)
+- Accessibility testing (keyboard walkthrough, screen reader, contrast)
 - Responsive breakpoints to verify
-- Edge case scenarios
+- Edge-case scenarios
 
 ### 9. Acceptance Criteria (Playwright-verifiable)
 
-This section is **machine-parseable** and drives `/ux-lock verify` — which
-runs a real browser against the live implementation and grades each criterion.
-Stick to the format exactly so the parser and spec generator can do their work.
+This section is **machine-parseable** and drives `/ux-lock verify` —
+which runs a real browser against the live implementation and grades
+each criterion. Stick to the format exactly.
 
 **Format**:
 
@@ -300,68 +166,54 @@ Stick to the format exactly so the parser and spec generator can do their work.
 - `P2` — cosmetic or secondary
 - `P3` — observation only; nice to pass
 
-**Category** (closed set — must be one of):
-- `visibility`    — an element is / isn't on screen
-- `interaction`   — click / type / submit → expected result
-- `a11y`          — WCAG AA / axe-core / keyboard / ARIA contract
-- `state`         — empty / loading / error / success state renders correctly
-- `responsive`    — layout at a specific viewport
-- `text`          — literal or regex content check
-- `navigation`    — URL / route change on action
-- `other`         — escape hatch; avoid if possible
+**Category** (closed set — one of):
+- `visibility` — element on/off screen
+- `interaction` — click/type/submit → expected result
+- `a11y` — WCAG AA / axe-core / keyboard / ARIA
+- `state` — empty/loading/error/success state renders correctly
+- `responsive` — layout at a specific viewport
+- `text` — literal or regex content check
+- `navigation` — URL/route change on action
+- `other` — escape hatch; avoid
 
 **Assertion rules** (critical — verify mode cannot work if you break these):
 - Assert on **semantic DOM contracts only**: `getByRole(...)`, `getByLabel(...)`,
   `getByTestId(...)`, `aria-*` attributes, ARIA roles, axe-core violations
 - **Never** reference CSS class names, internal state, or implementation details
-- **Never** describe "it should feel fast" or other aesthetic qualities —
-  those are `/persona-test` territory, not `/ux-lock verify`
-- If a criterion can only be expressed via a brittle selector, either
-  (a) propose adding a `data-testid` during implementation so the criterion
-  becomes verifiable, or (b) move it to Section 8 as a manual test
+- **Never** describe "it should feel fast" — that's `/persona-test` territory
+- If a criterion can only be expressed via a class selector, either
+  (a) propose adding a `data-testid` during implementation, or (b) move it
+  to Section 8 as a manual test
 
 **Example**:
 
 ```markdown
-### 9. Acceptance Criteria (Playwright-verifiable)
-
 - [P0] [visibility] Cellar grid is visible after login
   - Setup: login → navigate to /cellar
   - Assert: getByRole('grid', { name: /cellar/i }) is visible
 - [P0] [interaction] Wine card opens detail modal on click
   - Setup: login → navigate to /cellar
   - Assert: click getByRole('article').first() → getByRole('dialog') is visible
-- [P0] [state] Empty state shows when no wines exist
-  - Setup: login as empty-user → navigate to /cellar
-  - Assert: getByText(/no wines yet/i) is visible AND getByRole('grid') has toHaveCount(0) for articles
 - [P1] [a11y] Grid has no WCAG AA violations
   - Setup: login → navigate to /cellar
   - Assert: axe-core violations on [role="grid"] == 0
-- [P1] [responsive] At 390px viewport, grid collapses to 1 column
-  - Setup: setViewportSize 390×844 → login → navigate to /cellar
-  - Assert: grid has 1 column (flex-direction: column OR grid-template-columns: 1fr)
-- [P2] [navigation] Back button from detail modal returns to grid
-  - Setup: login → open detail modal → press Escape
-  - Assert: URL is /cellar AND getByRole('dialog') is hidden
 ```
 
 **Coverage guidance**:
 - At least **one P0 per primary user flow** the plan introduces
 - At least **one a11y criterion** per new component
-- At least **one state criterion** for any component with a loading / error / empty state
+- At least **one state criterion** for components with loading/error/empty states
 - At least **one responsive criterion** if mobile is a supported target
 
-If you can't write ≥5 criteria for a non-trivial plan, the plan may be
+If you can't write ≥5 criteria for a non-trivial plan, it may be
 under-specified — revisit Phase 5 §2 (User Flow) and §5 (State Map).
+
+---
 
 ## Phase 6 — Persist the Plan
 
-**Save the plan to the repository's `docs/` folder.**
-
-- **File path**: `docs/plans/<descriptive-name>.md` (e.g., `docs/plans/cellar-grid-redesign.md`)
-- **Create the `docs/plans/` directory** if it does not exist
-- **Include all sections** from Phase 5 in the saved document
-- **Add a metadata header** at the top:
+Save to `docs/plans/<descriptive-name>.md`. Create `docs/plans/` if
+needed. Metadata header:
 
 ```markdown
 # Plan: <Feature Name>
@@ -370,17 +222,38 @@ under-specified — revisit Phase 5 §2 (User Flow) and §5 (State Map).
 - **Author**: Claude + <user>
 ```
 
-- The saved plan becomes the source of truth — refer back to it during implementation
+Register in the cross-skill store so audit-loop + ux-lock can link:
+
+```bash
+node scripts/cross-skill.mjs upsert-plan --json '{
+  "path": "docs/plans/<name>.md",
+  "skill": "plan-frontend",
+  "status": "draft"
+}'
+```
 
 ---
 
 ## Reminders
 
-- **Explore before designing** — The existing UI is the ground truth
-- **Name the principles** — Every design choice should cite which principle(s) it serves
-- **Think like the user** — Not like the developer. User mental models differ from code structure
-- **Show every state** — Empty, loading, error, success. If you cannot describe all four, the design is incomplete
-- **Wireframe before code** — ASCII layouts in the plan prevent expensive rework
-- **Consistency beats novelty** — Match existing patterns unless there is a strong UX reason not to
-- **Accessibility is not optional** — It is a baseline, not a nice-to-have
-- **Section 9 is the ship gate** — `/ux-lock verify <plan.md>` will grade the live implementation against these criteria. Brittle or aesthetic criteria make the grade meaningless — stick to semantic DOM contracts
+- **Explore before designing** — the existing UI is the ground truth
+- **Name the principles** — every choice cites which principle(s) it serves
+- **Think like the user** — not like the developer
+- **Show every state** — Empty, Loading, Error, Success; if you can't describe all four, the design is incomplete
+- **Wireframe before code** — ASCII layouts prevent expensive rework
+- **Consistency beats novelty** — match existing patterns unless there's a strong reason not to
+- **Accessibility is not optional** — it's a baseline
+- **Section 9 is the ship gate** — `/ux-lock verify <plan.md>` grades the live implementation against these criteria. Brittle or aesthetic criteria make the grade meaningless — stick to semantic DOM contracts
+
+---
+
+## Reference files
+
+This skill's canonical flow is above. The files below cover specialised
+situations — read them only when the trigger applies.
+
+| File | Summary | Read when |
+|---|---|---|
+| `references/ux-principles.md` | 26 UX + design principles — Gestalt, interaction, cognitive load, accessibility, state/resilience. | Phase 2 — evaluating a design decision and need to cite specific principles (especially first pass on a new component). |
+| `references/technical-principles.md` | 17 technical implementation principles — component architecture, state, events, CSS/styling. | Phase 3 — writing the technical architecture section, OR flagging an anti-pattern. |
+| `references/python-frontend-profile.md` | Python frontend profile — Jinja/Django/Flask template patterns + HTMX + anti-patterns. | Phase 0 detect-stack returned `python` or `mixed` with Python-facing files in the task. |

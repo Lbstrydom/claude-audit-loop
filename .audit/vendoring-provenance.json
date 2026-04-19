@@ -1,8 +1,9 @@
 {
   "audit-loop": {
-    "sha": "41e5e342a8e0d5398cff0d53a33de34e39060d2c2f25ba7b642e1509ba08f9e8",
-    "vendoredAt": "2026-04-06T10:13:11.768Z",
-    "sourcePath": ".claude/skills/audit-loop/SKILL.md"
+    "sha": "bbbf91bd49f16a327995c98cccfd3f99d13df0c374eaac986544bd3ab4715f0b",
+    "vendoredAt": "2026-04-19T12:00:00.000Z",
+    "sourcePath": ".claude/skills/audit-loop/SKILL.md",
+    "note": "Re-vendored 2026-04-19 during progressive-disclosure refactor — 724 → 370 lines; edge content moved to references/."
   },
   "plan-backend": {
     "sha": "d98ecd3b024da511566e10ceabaffd3ceb72f3fdb1109574153d1cf13c1fe388",

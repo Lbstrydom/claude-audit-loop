@@ -14,73 +14,38 @@ disable-model-invocation: true
 
 # Ship: Sync Docs → Commit → Push
 
-You are running the ship workflow. This is a single command that ensures all project
-documentation is current, then commits and pushes. Follow every step in order.
+A single command that ensures all project documentation is current, then
+commits and pushes. Follow every step in order.
 
-**Arguments**: `$ARGUMENTS` — optional path to a plan file to update (e.g., `docs/plans/feature.md`)
+**Arguments**: `$ARGUMENTS` — optional path to a plan file to update
+(e.g., `docs/plans/feature.md`).
 
 ---
 
 ## Phase 0 — Repo Stack Detection
 
-Before Step 1, detect the repo's primary language(s) to determine which pre-push checks to run:
+```bash
+node scripts/cross-skill.mjs detect-stack --include-env-manager
+```
 
-- **JS/TS**: `package.json` present with `dependencies` or `devDependencies`
-- **Python**: `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py`, or `uv.lock` present
-- **Mixed**: both present -- run checks for BOTH stacks
-- **Unknown**: neither -- skip stack-specific checks, proceed with universal git workflow
+Returns `{ stack, pythonFramework, environmentManager, detectedFrom }`.
 
-When Python is detected, also identify the **framework** (affects status.md section naming):
-
-- **FastAPI**: `fastapi` in deps
-- **Django**: `django` in deps, or `manage.py` present
-- **Flask**: `flask` in deps
-- **None/custom**: generic Python
-
-### Python Pre-Push Command Discovery
-
-Detection ORDER: detect the environment manager FIRST, then probe commands through that wrapper:
-
-1. **Environment wrapper** (detected first):
-   - `poetry.lock` present -- all subsequent probes use `poetry run <cmd> --version`
-   - `uv.lock` or `uv.toml` present -- use `uv run <cmd> --version`
-   - `Pipfile.lock` present -- use `pipenv run <cmd> --version`
-   - `.venv/` or `venv/` present -- use `./<venv>/bin/<cmd> --version`
-   - None detected -- fall back to global PATH (`<cmd> --version`)
-
-2. **Then** discover tools IN the detected environment:
-   - **Test runner**: probe for `pytest` through the env wrapper, else `python -m pytest`, else MISSING
-   - **Linter**: `ruff check --version` if `[tool.ruff]` in pyproject or `ruff` in locked deps; else `flake8 --version`; else MISSING
-   - **Type checker**: `mypy --version` if `[tool.mypy]` or `mypy.ini` present; else `pyright --version`; else MISSING
-   - **Format check**: `ruff format` if ruff detected; else `black --version` if `[tool.black]` or `black` in locked deps; else MISSING
-
-### Python Pre-Push Contract
-
-| Category | If MISSING |
+| `stack` | Behaviour |
 |---|---|
-| Test runner | **BLOCK push**, log: "no test runner detected (pytest). Add `pytest` to dev deps or override with `ship --no-tests`." |
-| Linter | Warn, do NOT block |
-| Type checker | Warn, do NOT block |
-| Format check | Warn, do NOT block |
+| `js-ts` | Pre-push: `npm test`, linter + type-check + format if configured |
+| `python` | Pre-push: see `references/python-environment-discovery.md` — env wrapper + tool probe |
+| `mixed` | Run BOTH stacks' checks — required-tool absence in either blocks |
+| `unknown` | Skip stack-specific checks; proceed with universal git workflow |
 
-For each DISCOVERED tool: any non-zero exit BLOCKS the push.
-
-**Override flag**: `ship --no-tests` acknowledges the absence explicitly. Logged prominently.
-
-### Python status.md Sections
-
-When generating/updating status.md for Python repos:
-- "Python Package Structure" (vs "Backend Structure")
-- "Dependencies" from `pyproject.toml` `[project.dependencies]` or `requirements.txt`
-- "Database Migrations" (Alembic/Django migrations)
-- "API Endpoints" (FastAPI/Django REST Framework/Flask routes)
+Python framework (if detected) shapes status.md section titles — see
+`references/status-md-format.md`.
 
 ---
 
 ## Step 0.5 — Pre-Ship Gate Queries (non-blocking by default)
 
-Collect signals before proceeding so the ship_event emitted at the end is
-accurate. All queries are best-effort; if any fails, log it and proceed.
+Collect signals before proceeding so the ship_event emitted at the end
+is accurate. Best-effort — if a query fails, log and proceed.
 
 ### 0.5a — Recent persona-test P0s for this repo
 
@@ -92,7 +57,7 @@ curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$
   -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
 ```
 
-Capture `open_p0_count` and `open_p1_count` from the latest session (within
+Capture `open_p0_count` + `open_p1_count` from the latest session (within
 the last 14 days). These feed the ship_event record. If a session has P0s:
 
 ```
@@ -104,15 +69,12 @@ the last 14 days). These feed the ship_event record. If a session has P0s:
 
 ### 0.5b — Fixes that lack a /ux-lock regression spec
 
-Query the `unlocked_fixes` view for recent HIGH-severity fixes without a
-regression spec (these are the refactor-fragile spots):
-
 ```bash
 node scripts/cross-skill.mjs list-unlocked-fixes
 ```
 
-The command prints `{"ok":true,"cloud":true,"rows":[...]}`. Count the rows
-as `missing_spec_count`. If > 0:
+Returns `{ok, cloud, rows: [...]}`. Count the rows as `missing_spec_count`.
+If > 0:
 
 ```
 ⚠ REGRESSION LOCK GATE (non-blocking)
@@ -125,122 +87,78 @@ as `missing_spec_count`. If > 0:
 ### 0.5c — Override flags
 
 If `$ARGUMENTS` contains `--no-tests`, `--ignore-p0`, or `--skip-ux-lock`,
-note which override was used — it's recorded with the ship_event.
+record which override is active — it goes into the ship_event.
+
+---
 
 ## Step 1 — Assess What Changed
 
-Before updating any docs, understand the current state:
+Before updating docs, understand the current state:
 
-1. **Run `git status`** to see all modified, added, and untracked files
-2. **Run `git diff --stat`** to see a summary of changes
-3. **Run `git diff` on key changed files** to understand what was actually done
-4. **Run `git log -5 --oneline`** to see recent commit style and context
+1. `git status` — modified, added, untracked files
+2. `git diff --stat` — change summary
+3. `git diff` on key changed files — what was actually done
+4. `git log -5 --oneline` — recent commit style and context
 
-Build a mental model of:
-- What features/fixes were implemented
-- Which files were created vs modified
-- What area of the codebase was affected (backend, frontend, both)
-- Whether new patterns or conventions were established
+Build a mental model of: what features/fixes were implemented, which
+files were created vs modified, which area was affected, whether new
+patterns were established.
 
 ---
 
 ## Step 2 — Update status.md
 
-Append a new session log entry to `status.md` in the project root.
+Append a new session log entry to `status.md`. If file doesn't exist,
+create with the standard header. Always append at the TOP (below the
+header) so the most recent session is first.
 
-**If `status.md` does not exist**, create it with a header:
-
-```markdown
-# Project Status Log
-
-## <Today's Date> — <Brief Summary of Work>
-
-### Changes
-- <Bullet list of what was done, grouped logically>
-
-### Files Affected
-- <List of key files created or modified, with one-line purpose>
-
-### Decisions Made
-- <Any architectural or design decisions taken during this session>
-
-### Next Steps
-- <What remains to be done, if anything>
-
----
-```
-
-**If `status.md` already exists**, append the new entry at the TOP (below the header),
-so the most recent session is always first.
-
-**Rules for the log entry**:
-- Be specific — name actual files, functions, and endpoints
-- Be concise — this is a log, not documentation
-- Include decisions — these are valuable context for future sessions
-- Include blockers or open questions if any remain
-- Date format: YYYY-MM-DD
+Full template + rules + optional sections (UX Status, Persona Test Status,
+Regression Lock Status, Plan Verify Status): `references/status-md-format.md`.
 
 ---
 
-## Step 3 — Update CLAUDE.md (If Needed)
+## Step 3 — Update CLAUDE.md (if needed)
 
-Review whether the current session introduced anything that should be captured in CLAUDE.md:
+Review whether the current session introduced anything that should be
+captured:
 
-### Check for new patterns:
-- [ ] New route files or API endpoints added? → Update Backend Structure section
-- [ ] New frontend modules added? → Update Frontend Structure section
-- [ ] New service patterns established? → Document the pattern
-- [ ] New environment variables introduced? → Update Environment Variables table
-- [ ] New conventions or rules discovered? → Add to Do/Do NOT sections
-- [ ] New test files or testing patterns? → Update Testing section
+- [ ] New route files or API endpoints? → Backend Structure
+- [ ] New frontend modules? → Frontend Structure
+- [ ] New service patterns? → document the pattern
+- [ ] New env vars? → Environment Variables table
+- [ ] New conventions or rules? → Do / Do NOT sections
+- [ ] New test files or patterns? → Testing section
 
-### Check for outdated information:
-- [ ] File structure descriptions still accurate?
-- [ ] Code examples still reflect current patterns?
-- [ ] Configuration values still correct?
+Also check for outdated info — file structure descriptions, code
+examples, config values.
 
-**If changes are needed**: Make the edits to CLAUDE.md, keeping the existing style and structure.
-
-**If no changes needed**: Skip this step — do not make unnecessary edits.
+**If changes needed**: edit CLAUDE.md, keeping existing style.
+**If no changes needed**: skip — do not make cosmetic edits.
 
 ---
 
 ## Step 4 — Sync AGENTS.md
 
-AGENTS.md must mirror CLAUDE.md exactly. After any CLAUDE.md changes:
+AGENTS.md mirrors CLAUDE.md exactly. After any CLAUDE.md changes:
 
-1. **Read CLAUDE.md** content
-2. **Write to AGENTS.md** with identical content
-3. **Verify** the files are in sync
+1. Read CLAUDE.md
+2. Write identical content to AGENTS.md
+3. Verify in sync
 
-If CLAUDE.md was not modified in Step 3, check whether AGENTS.md is already in sync.
-If it is already identical, skip this step. If it has drifted, re-sync it.
-
-**Important**: AGENTS.md should live in the same directory as CLAUDE.md (project root).
+If CLAUDE.md wasn't modified in Step 3, check if AGENTS.md is already
+identical. If so, skip. If drifted, re-sync.
 
 ---
 
-## Step 5 — Update Plan (If Plan Path Provided)
+## Step 5 — Update Plan (if plan path in arguments)
 
-Only execute this step if `$ARGUMENTS` contains a plan file path.
+Only when `$ARGUMENTS` contains a plan file path:
 
-1. **Read the plan file** at the provided path
-2. **Compare against git diff** — which planned items were implemented in this session?
-3. **Update the plan metadata**:
-   - Change `Status: Draft` → `Status: In Progress` (if first implementation session)
-   - Change `Status: In Progress` → `Status: Complete` (if all items done)
-4. **Update the file-level plan** — mark completed items:
-
-```markdown
-| Planned Item | Status | Notes |
-|-------------|--------|-------|
-| `src/routes/feature.js` | ✅ Done | Implemented as planned |
-| `src/services/feature.js` | ✅ Done | Added extra helper function |
-| `public/js/feature.js` | ⏳ In Progress | Basic structure, needs event wiring |
-| `tests/unit/feature.test.js` | ❌ Not Started | — |
-```
-
-5. **Add an implementation log entry** at the bottom of the plan:
+1. **Read the plan**
+2. **Compare against git diff** — which planned items were implemented?
+3. **Update plan metadata**: `Status: Draft` → `In Progress` → `Complete`
+4. **Mark completed items** in the file-level table
+5. **Add implementation log entry** at the bottom:
 
 ```markdown
 ## Implementation Log
@@ -251,68 +169,60 @@ Only execute this step if `$ARGUMENTS` contains a plan file path.
 - Deviations: <any changes from the original plan and why>
 ```
 
-6. **Flag any deviations** — if the implementation diverged from the plan,
-   note what changed and why so the next session has context.
+6. **Flag deviations** — if implementation diverged, note what changed and why.
 
 ---
 
-## Step 6 — Stage, Commit, and Push
+## Step 6 — Stage, Commit, Push
 
-### 6.1 Stage files
+### 6.1 Stage
 
-Stage all relevant files. Be specific — add files by name:
+Stage relevant files by name (be specific):
 
 ```bash
 git add <list of changed source files>
 git add status.md
-git add CLAUDE.md AGENTS.md    # Only if they were modified
-git add docs/plans/<plan>.md   # Only if plan was updated
+git add CLAUDE.md AGENTS.md    # only if modified
+git add docs/plans/<plan>.md   # only if plan was updated
 ```
 
-**Do NOT stage**:
-- `.env` or any file containing secrets
-- `node_modules/`
-- Temporary or generated files
+**Do NOT stage**: `.env`, credentials, `node_modules/`, temp/generated files.
 
-If there are untracked files that look unintentional (random temp files, OS files),
-skip them silently. Include all source code, docs, tests, and config files.
+If untracked files look unintentional (temp, OS files), skip silently.
+Include all source, docs, tests, and config.
 
-### 6.2 Generate commit message
+### 6.2 Commit message
 
-Analyse the staged changes and create a commit message following the project convention:
+Follow project convention:
 
 ```
-<type>: <concise description of what changed>
+<type>: <concise description>
 
-<optional body with details if the change is significant>
+<optional body with WHY if significant>
 ```
 
-**Types**: `feat`, `fix`, `refactor`, `docs`, `style`, `test`, `chore`
+Types: `feat`, `fix`, `refactor`, `docs`, `style`, `test`, `chore`.
 
-- If changes span multiple types, use the primary type and mention others in the body
-- Keep the first line under 72 characters
-- The body should explain WHY, not WHAT (the diff shows what)
+Keep first line under 72 chars. Body explains WHY, not WHAT.
 
 ### 6.3 Commit and push
 
-**The `/ship` command IS the user's approval.** Do NOT ask for confirmation.
-Proceed directly — stage, commit, and push in one flow.
+**The `/ship` command IS the user's approval.** Proceed directly — no
+confirmation prompts:
 
 ```bash
 git commit -m "<message>"
 git push origin <current-branch>
 ```
 
-If push fails (e.g., behind remote), inform the user and suggest the fix.
-Do NOT force push.
+If push fails (behind remote, etc.), inform the user and suggest the
+fix. Do NOT force push.
 
 ---
 
 ## Step 7 — Emit Ship Event (always)
 
-After the commit + push completes (or is blocked), record the outcome so the
-cross-skill store has a full history of what was gated, overridden, or let
-through. This runs even on block/abort so gate effectiveness can be measured.
+After commit + push completes (or is blocked), record the outcome:
 
 ```bash
 node scripts/cross-skill.mjs record-ship-event --json '{
@@ -331,22 +241,22 @@ node scripts/cross-skill.mjs record-ship-event --json '{
 
 **Outcome semantics**:
 - `shipped` — everything passed, commit pushed
-- `warned` — shipped despite non-blocking warnings (UX gate triggered but still pushed)
-- `overridden` — user passed `--no-tests` or similar to bypass a block
-- `blocked` — a blocking check failed and the push did not occur
-- `aborted` — Claude aborted before pushing (e.g. secrets detected, nothing to commit)
+- `warned` — shipped despite non-blocking warnings
+- `overridden` — user passed `--no-tests` or similar
+- `blocked` — blocking check failed, push did not occur
+- `aborted` — Claude aborted (secrets detected, nothing to commit, etc.)
 
 `blockReasons` is always an array — empty on `shipped`, populated otherwise.
 
-The command is fire-and-forget; do not block on its output. If cloud mode is
-off, the CLI prints `{"ok":true,"cloud":false}` and returns 0.
+Fire-and-forget — do not block on output. If cloud mode is off, CLI
+prints `{"ok":true,"cloud":false}` and returns 0.
 
 ---
 
 ## Quick Reference
 
-| Syntax | What Happens |
-|--------|-------------|
+| Syntax | What happens |
+|---|---|
 | `/ship` | Update status.md → sync CLAUDE.md/AGENTS.md → commit → push |
 | `/ship docs/plans/feature.md` | All of the above + update the plan file |
 
@@ -354,8 +264,20 @@ off, the CLI prints `{"ok":true,"cloud":false}` and returns 0.
 
 - **Always check git diff first** — understand what changed before documenting
 - **status.md is a log** — append, never rewrite history
-- **CLAUDE.md only changes when needed** — do not make cosmetic edits
+- **CLAUDE.md only changes when needed** — no cosmetic edits
 - **AGENTS.md is a mirror** — always identical to CLAUDE.md
-- **No confirmation needed** — `/ship` is the approval. Execute the full flow autonomously
-- **Be specific in the log** — name files, functions, endpoints. Vague entries are useless
-- **The commit message matters** — it is the permanent record in git history
+- **No confirmation needed** — `/ship` is the approval. Execute autonomously
+- **Be specific in the log** — name files, functions, endpoints
+- **The commit message matters** — it's the permanent record in git history
+
+---
+
+## Reference files
+
+This skill's canonical flow is above. The files below cover specialised
+situations — read them only when the trigger applies.
+
+| File | Summary | Read when |
+|---|---|---|
+| `references/python-environment-discovery.md` | Python pre-push command discovery — env wrapper detection + per-tool probe order. | detect-stack returned `python` or `mixed` with Python files in the diff. |
+| `references/status-md-format.md` | status.md session-log template + update rules + persona / UX status sections. | Step 2 — creating status.md for the first time, OR appending UX / Persona / Regression-Lock / Plan-Verify sections. |
