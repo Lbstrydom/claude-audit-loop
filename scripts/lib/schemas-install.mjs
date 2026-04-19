@@ -6,11 +6,32 @@ import { z } from 'zod';
 
 // ── Manifest Schema ─────────────────────────────────────────────────────────
 
-export const SkillEntrySchema = z.object({
-  path: z.string(),
+/**
+ * Manifest schema versions the installer currently understands.
+ * - 1: one-file-per-skill (path/sha/size/summary only). Legacy.
+ * - 2: multi-file skills — adds `files: FileEntry[]` with each file's SHA.
+ *      Supports references/** and examples/** inside a skill directory.
+ *
+ * A new installer can read v1 manifests (back-compat). An old installer
+ * reading a v2 manifest must REJECT with UNSUPPORTED_MANIFEST_VERSION —
+ * silently stripping `files` would cause consumer repos to get broken
+ * progressive-disclosure skills.
+ */
+export const MANIFEST_SUPPORTED_VERSIONS = Object.freeze([1, 2]);
+
+export const FileEntrySchema = z.object({
+  relPath: z.string(),   // 'SKILL.md' or 'references/interop.md' — relative to skill dir
   sha: z.string(),
   size: z.number(),
+});
+
+export const SkillEntrySchema = z.object({
+  path: z.string(),        // always 'skills/<name>/SKILL.md' — back-compat pointer
+  sha: z.string(),         // SHA of SKILL.md specifically
+  size: z.number(),
   summary: z.string(),
+  // Added in v2. Absent on v1 manifests — v2 installer backfills to single-SKILL.md.
+  files: z.array(FileEntrySchema).optional(),
 });
 
 export const ManifestSchema = z.object({
