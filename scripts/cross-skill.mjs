@@ -47,6 +47,8 @@ import {
   getUnlockedFixes,
   readAuditEffectiveness,
 } from './learning-store.mjs';
+import { detectRepoStack, detectPythonEnvironmentManager } from './lib/repo-stack.mjs';
+import { StackProfileSchema } from './lib/schemas.mjs';
 
 // ── Arg parsing ─────────────────────────────────────────────────────────────
 
@@ -287,6 +289,24 @@ async function cmdAuditEffectiveness() {
   emit({ ok: true, cloud: true, row });
 }
 
+async function cmdDetectStack() {
+  const cwd = argOption('cwd') || process.cwd();
+  const includeEnvManager = rest.includes('--include-env-manager');
+  const { stack, pythonFramework, detectedFrom } = detectRepoStack(cwd);
+  const profile = {
+    ok: true,
+    stack,
+    pythonFramework,
+    environmentManager: includeEnvManager ? detectPythonEnvironmentManager(cwd) : null,
+    detectedFrom,
+  };
+  const parsed = StackProfileSchema.safeParse(profile);
+  if (!parsed.success) {
+    return emitError('SCHEMA_VIOLATION', 'detect-stack produced invalid profile', { issues: parsed.error.issues });
+  }
+  emit(parsed.data);
+}
+
 async function cmdWhoami() {
   await initLearningStore();
   emit({
@@ -312,6 +332,7 @@ const commands = {
   'plan-satisfaction': cmdPlanSatisfaction,
   'list-unlocked-fixes': cmdListUnlockedFixes,
   'audit-effectiveness': cmdAuditEffectiveness,
+  'detect-stack': cmdDetectStack,
   'whoami': cmdWhoami,
 };
 

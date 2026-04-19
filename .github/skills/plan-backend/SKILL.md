@@ -84,6 +84,29 @@ Apply these principles when Python is detected. Each bullet carries an explicit 
 **Explore the codebase FIRST.** The biggest planning failure is proposing solutions
 without understanding what already exists.
 
+### Phase 1 Pre-Step — Persona Test History (if available)
+
+Before reading the code, check if persona testing has already surfaced pain points in
+the area being planned. If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set:
+
+```bash
+curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,p0_count,p1_count" \
+  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+```
+
+Filter sessions whose `focus` overlaps with the feature being planned. If matches found,
+include in the **Context Summary** (Phase 4, Section 1) as **Known user-visible issues**:
+
+```
+Known user-visible issues (from persona testing):
+  • [P0] Form submit unresponsive — "Pieter" session, Apr 14 (focus: adding a bottle)
+  • [P1] No loading state on search — 3 sessions, recurring
+```
+
+This prevents the plan from ignoring already-discovered UX failures, and flags code paths
+that persona testing has confirmed are broken — treat these as HIGH priority in the design.
+
 1. **Map the landscape**: Read relevant existing files — routes, services, models, utilities
 2. **Identify existing patterns**: How does the codebase already solve similar problems?
 3. **Find reusable components**: What services, utilities, or abstractions already exist that could be leveraged?
@@ -91,33 +114,6 @@ without understanding what already exists.
 5. **Understand the data flow**: Trace the request lifecycle from route → service → DB and back
 
 Do NOT propose a plan until you have completed this exploration.
-
-## Phase 1.5 — Execution Model (Operations with Dependencies)
-
-**Before designing the architecture, answer this forced question:**
-
-> Are any of the planned operations dependent on others? If yes, identify chains,
-> prerequisites, and per-chain atomicity requirements.
-
-This phase catches sequencing bugs that surface as HIGH findings in audit round 3+.
-
-### When This Phase Matters
-
-- **Batch operations**: moves, imports, migrations — order matters, partial failure needs rollback
-- **Multi-step workflows**: wizard flows, onboarding sequences — step N depends on step N-1
-- **State transitions**: status changes, approval chains — invalid intermediate states must be prevented
-- **Cross-entity operations**: swaps, cycles, rebalancing — A↔B swap is not two independent moves
-
-### What to Produce
-
-1. **Dependency graph**: Which operations must complete before others can start?
-2. **Chain identification**: Group dependent operations into atomic chains
-3. **Failure semantics**: For each chain, what happens on partial failure? (rollback, retry, skip)
-4. **Concurrency model**: Can chains run in parallel, or must they be serial?
-
-If the answer is "all operations are independent" — document that explicitly and move on.
-If ANY dependency exists — the plan MUST define the execution order, atomicity boundary,
-and partial-failure recovery before proceeding to architecture.
 
 ## Phase 2 — Apply Engineering Principles
 

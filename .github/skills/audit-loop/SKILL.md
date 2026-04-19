@@ -33,11 +33,8 @@ Orchestrate an automated plan-audit-fix quality loop with adaptive learning.
 | `full <description>` | FULL_CYCLE — plan → audit → implement → audit code |
 | `<description>` | PLAN_CYCLE — plan → audit → fix → repeat |
 
-Validate: plan file exists (if applicable).
-**Do NOT pre-check API keys** — the scripts load `.env` automatically via `dotenv/config`.
-Checking `process.env.OPENAI_API_KEY` before running will always return empty because
-the key lives in the repo's `.env`, not the shell environment. Let the script fail with
-its own error if the key is truly missing.
+Validate: plan file exists (if applicable), `OPENAI_API_KEY` is set.
+Optional: `GEMINI_API_KEY` for final review (Step 7). `SUPABASE_AUDIT_URL` for cloud learning.
 
 Initialize session ID: `SID=audit-$(date +%s)`
 
@@ -59,16 +56,6 @@ Generate plan with `/plan-backend` or `/plan-frontend`, save to `docs/plans/<nam
 
 ## Step 2 — Run GPT-5.4 Audit
 
-### Working Directory — Verify First
-
-**CRITICAL**: Always confirm you are in the target repository before running any audit command. Running from the wrong directory causes the diff scope to resolve against the wrong codebase — producing phantom findings about files you never touched and missing the files you did.
-
-```bash
-pwd  # Must be the repo being audited, not claude-audit-loop or any other repo
-```
-
-If the plan file is in a different repo, `cd` to that repo first. The audit scripts use the cwd to resolve `git diff`, file paths, and the CLAUDE.md context.
-
 ### Audit Scope — Choose Deliberately
 
 **CRITICAL**: Code audits see whatever files you give them. GPT-5.4 doesn't know what's "new" vs pre-existing — it flags everything. To get signal, scope deliberately:
@@ -86,11 +73,8 @@ Only switch to `--scope plan` or `--scope full` when the user EXPLICITLY asks fo
 
 ### Round 1 — Audit (scope-aware)
 
-**Run R1 in the foreground.** The first ~10 seconds of stderr reveal whether the diff scope resolved correctly (file count, changed lines). Catching a wrong-directory or empty-diff problem early saves 5+ minutes versus discovering it after the run completes.
-
 ```bash
 # Default: audit only recent changes (preferred)
-# Run FOREGROUND — do not use run_in_background for R1
 node scripts/openai-audit.mjs code <plan-file> \
   --out /tmp/$SID-r1-result.json \
   2>/tmp/$SID-r1-stderr.log
@@ -152,23 +136,6 @@ node scripts/openai-audit.mjs code <plan-file> \
   2>/tmp/$SID-r2-stderr.log
 ```
 
-### Session Context Cache (Round 2+)
-
-Pass `--session-cache /tmp/$SID-ctx.json` on every round to skip ~10s of LLM brief-generation. The first round writes it; subsequent rounds read it. Cache self-invalidates if `package.json` or `CLAUDE.md` changes.
-
-```bash
-# R1 — writes the cache
-node scripts/openai-audit.mjs code <plan-file> \
-  --session-cache /tmp/$SID-ctx.json \
-  --out /tmp/$SID-r1-result.json
-
-# R2 — reads the cache (brief generation skipped)
-node scripts/openai-audit.mjs code <plan-file> \
-  --round 2 --ledger /tmp/$SID-ledger.json \
-  --session-cache /tmp/$SID-ctx.json \
-  --out /tmp/$SID-r2-result.json
-```
-
 ### CLI Flag Contract
 
 | Flag | Source | Purpose |
@@ -179,7 +146,6 @@ node scripts/openai-audit.mjs code <plan-file> \
 | `--changed <list>` | Step 4 fix list | **Authoritative** source for what was modified (reopen detection) |
 | `--files <list>` | changed + dependents | Audit scope — what GPT sees in context |
 | `--passes <list>` | Smart selection | Which passes to run |
-| `--session-cache <path>` | SID-derived temp path | Cross-round brief + profile cache (skip LLM on R2+) |
 
 ### Smart Pass Selection (Round 2+)
 
@@ -287,28 +253,6 @@ Stability uses `_hash` for exact cross-round matching:
 
 Max 6 rounds for CODE audits.
 
-### Auto-Skip R2 for Small Code Diffs
-
-Before running R2, check the diff size:
-
-```bash
-git diff HEAD~1 --stat | tail -1  # e.g. "6 files changed, 134 insertions(+), 28 deletions(-)"
-```
-
-**If the diff is small (< 150 lines changed AND ≤ 3 files touched), skip R2 entirely and go straight to Step 6 → Step 7.** Gemini catches the same class of issues as R2 verification for this scope, in less time with no timeout risk.
-
-R2 earns its keep for substantial fix rounds (> 150 lines or > 3 files changed, or when R1 found multiple HIGH issues requiring architectural changes). Use judgment when near the threshold.
-
-### PLAN audits: GPT R1 only — R2 is opt-in
-
-**Default for plan audits: GPT R1 → fix → Step 7 (Gemini).** GPT R2 on plan audits almost always times out (the `plan` pass is a single wall of tokens with no map-reduce split) and adds rigor pressure rather than finding new correctness gaps.
-
-**Only run GPT R2 on a plan audit when**:
-- R1 HIGH count was ≥ 5 AND you expect multiple fixes changed the plan structure significantly
-- The user explicitly asks for another GPT round
-
-Otherwise proceed directly to Step 7 after fixing R1 findings.
-
 ### PLAN audits: Early-Stop on Rigor Pressure
 
 **Plan audits have infinite refinement surface.** Unlike code (which has objective correctness), a plan can always be made "more rigorous". GPT-5.4 is trained to keep finding issues — after round 2-3, findings shift from "real design bugs" to "push for more rigor" (parser-based analysis instead of regex, full v2 features now, cross-source dedup, etc.).
@@ -379,42 +323,14 @@ writeLedgerEntry('/tmp/$SID-ledger.json', {
 
 ## Step 3.6 — Debt Capture (Phase D)
 
-**BLOCKING GATE — do not proceed to Step 4 until this step is complete.**
-
-Count your `defer` triage decisions. If count > 0, you MUST run debt capture
-before fixing. Skipping this step means GPT will re-raise the same findings
-in every future round, wasting tokens and diluting signal.
+**Purpose**: Persist out-of-scope valid findings to `.audit/tech-debt.json` so
+future audits suppress them automatically. Without this step, the same
+pre-existing concerns get re-raised every audit, burning tokens and diluting
+signal.
 
 **Eligible candidates** (from Step 3 triage): findings with `action = defer`.
 That means `validity = valid` AND either `scope = out-of-scope` OR
 `validity = valid, scope = in-scope` with a non-`out-of-scope` reason.
-
-### Fast path — single command (preferred)
-
-After Step 3.5, run the auto-capture script. It reads every `ruling: defer`
-entry from the adjudication ledger and writes them all in one pass:
-
-```bash
-node scripts/debt-auto-capture.mjs --ledger /tmp/$SID-ledger.json
-```
-
-For non-default deferral reasons, add the appropriate flag:
-
-```bash
-# blocked by an upstream issue
-node scripts/debt-auto-capture.mjs --ledger /tmp/$SID-ledger.json \
-  --reason blocked-by --blocked-by "owner/repo#123"
-
-# planned for a follow-up PR
-node scripts/debt-auto-capture.mjs --ledger /tmp/$SID-ledger.json \
-  --reason deferred-followup --followup-pr "owner/repo#456"
-
-# see what would be captured without writing
-node scripts/debt-auto-capture.mjs --ledger /tmp/$SID-ledger.json --dry-run
-```
-
-The script uses `rulingRationale` from the adjudication ledger as the
-`deferredRationale` — no manual field construction needed.
 
 ### Required fields per deferredReason
 
@@ -426,9 +342,9 @@ The script uses `rulingRationale` from the adjudication ledger as the
 | `accepted-permanent` | any | `approver` + `approvedAt` |
 | `policy-exception` | any | `policyRef` + `approver` |
 
-### Manual capture (when per-entry control is needed)
+### Capture flow
 
-For cases where entries need different reasons or metadata:
+For each deferral candidate, write one entry to the debt ledger:
 
 ```bash
 node -e "
@@ -456,20 +372,16 @@ console.log(JSON.stringify({ inserted: result.inserted, updated: result.updated,
 - Same topicId across runs → updates existing entry, NOT duplicate
 - Event written to `.audit/local/debt-events.jsonl` (or Supabase if cloud active)
 
-### Status card (auto-capture output)
+### Status card
 
 ```
 ═══════════════════════════════════════
-  DEBT CAPTURE — Auto (Step 3.6)
-  Deferred: 7 entries (reason: out-of-scope)
-  Inserted: 5 | Updated: 2
+  DEBT CAPTURE — Round 1
+  Deferred: 7 entries (5 out-of-scope, 2 blocked-by)
   Sensitive (redacted): 1
   Total ledger: 23 entries
-  Cloud sync: ok
 ═══════════════════════════════════════
 ```
-
-**Pre-Step-4 assertion**: Confirm the status card shows at least `Inserted + Updated == defer count`. If the card shows rejections equal to defer count, stop and investigate before fixing.
 
 ---
 
@@ -480,8 +392,7 @@ console.log(JSON.stringify({ inserted: result.inserted, updated: result.updated,
 1. Send rebuttal (if rebut HIGH/MEDIUM findings from triage)
 2. Wait for rebuttal response
 3. **Write adjudication ledger** (Step 3.5)
-4. **Capture deferrable debt** (Step 3.6) — **BLOCKING**: count `defer` decisions,
-   run `debt-auto-capture.mjs`, confirm status card before proceeding
+4. **Capture deferrable debt** (Step 3.6) — persist out-of-scope debt
 5. Fix ALL findings together (Step 4)
 6. Run tests
 7. Verification audit (Step 5) — debt suppression runs automatically
@@ -618,28 +529,15 @@ When Step 7 is skipped, output `FINAL_GATE_SKIPPED` and do not claim full final-
 ### Build Transcript
 
 Assemble `/tmp/$SID-transcript.json` with the full audit trail:
-- Plan content, **code files list** (critical — see below)
+- Plan content, code files list
 - All rounds: GPT findings, Claude positions, GPT rulings, fixes applied
 - Final state: remaining findings, dismissed findings
 - Suppression data: kept/suppressed/reopened counts per round
-
-**CRITICAL — include `code_files` in the transcript envelope**. The gemini-review script reads `transcript.code_files` to load actual source for independent review. Without it, Gemini only sees the plan + GPT findings and cannot independently verify anything.
-
-```json
-{
-  "code_files": ["src/foo.ts", "src/bar.ts"],
-  "rounds": [...],
-  ...
-}
-```
-
-Use the same file list you passed to `--files` on your last GPT round (changed files + their direct importers). For plan audits this can be omitted or empty.
 
 ### Run Review
 
 ```bash
 node scripts/gemini-review.mjs review <plan-file> /tmp/$SID-transcript.json \
-  --mode plan \
   --out /tmp/$SID-gemini-result.json 2>/tmp/$SID-gemini-stderr.log
 ```
 
@@ -653,14 +551,13 @@ The script auto-selects provider in this order:
 |---------|--------|
 | `APPROVE` | Done → final report |
 | `CONCERNS` | Step 7.1: Deliberate → Fix → Gemini re-verify |
-| `CONCERNS_REMAINING` | Step 7.1: Deliberate on unresolved items → author decides disputed ones → Gemini re-verify |
-| `REJECT` | Present to user — needs human judgment (unambiguous missed bugs or bias, not just disputed findings) |
+| `REJECT` | Present to user — needs human judgment |
 
 Max 2 final-review rounds.
 
-### Step 7.1 — Deliberate on Gemini Findings (CONCERNS / CONCERNS_REMAINING)
+### Step 7.1 — Deliberate on Gemini Findings (CONCERNS only)
 
-When Gemini returns `CONCERNS` or `CONCERNS_REMAINING`, Claude deliberates on each `new_findings` and `wrongly_dismissed` item — same peer relationship as GPT deliberation:
+When Gemini returns `CONCERNS`, Claude deliberates on each `new_findings` and `wrongly_dismissed` item — same peer relationship as GPT deliberation:
 
 1. **For each Gemini finding**, decide: ACCEPT, PARTIAL, or CHALLENGE
    - CHALLENGE must cite evidence (file paths, code, conventions)
@@ -671,13 +568,10 @@ When Gemini returns `CONCERNS` or `CONCERNS_REMAINING`, Claude deliberates on ea
 
 ```bash
 node scripts/gemini-review.mjs review <plan-file> /tmp/$SID-transcript-v2.json \
-  --mode plan \
   --out /tmp/$SID-gemini-result-v2.json 2>/tmp/$SID-gemini-stderr-v2.log
 ```
 
 **CRITICAL**: Do NOT use GPT to verify Gemini's findings — GPT already missed them. Gemini must verify its own concerns were addressed. This closes the loop properly.
-
-**Wrongly-dismissed escalation cap**: If you challenged a `wrongly_dismissed` item with cited evidence in the prior round, Gemini must provide new counter-evidence in `evidence_basis` to re-raise it — not just re-assert. If Gemini re-raises without new evidence (empty `evidence_basis`), treat it as a reassertion and dismiss it. The loop cannot resolve by repetition; it resolves by evidence.
 
 If Gemini returns `APPROVE` on re-review → done. If `CONCERNS` again after 2 rounds → present to user.
 
@@ -697,7 +591,6 @@ After plan converges: implement, then run Steps 2-6 with CODE_AUDIT mode.
 4. Cost tracking: `cost ≈ (input × 2.5 + output × 10) / 1M`
 5. Batch all user decisions into one prompt
 6. Progress: show pass timings from stderr
-7. **Background runs**: R1 is ALWAYS foreground (scope check in first 10s). Later rounds MAY use `run_in_background: true`. When a background notification arrives late, check if the output file already has content before re-processing: `test -s /tmp/$SID-rN-result.json` — if it does, the result was already consumed and the notification can be dismissed.
 
 ## Key Principles
 

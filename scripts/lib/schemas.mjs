@@ -434,3 +434,17 @@ export const ExecutionMetaSchema = z.object({
   passesSkipped: z.array(z.string()).optional(),
   predictionUsed: z.boolean().optional(),
 }).optional();
+
+// ── Repo Stack Detection (Phase A) ──────────────────────────────────────────
+
+/**
+ * Canonical output shape for `cross-skill.mjs detect-stack`.
+ * Shared by plan-backend, plan-frontend, ship — see scripts/lib/repo-stack.mjs.
+ */
+export const StackProfileSchema = z.object({
+  ok: z.literal(true),
+  stack: z.enum(['js-ts', 'python', 'mixed', 'unknown']),
+  pythonFramework: z.enum(['fastapi', 'django', 'flask', 'none']).nullable(),
+  environmentManager: z.enum(['poetry', 'uv', 'pipenv', 'venv', 'none']).nullable(),
+  detectedFrom: z.array(z.string()),
+});
