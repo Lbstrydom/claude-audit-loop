@@ -20,7 +20,11 @@
     "audit:check-deps": "node scripts/check-deps.mjs",
     "sync": "node scripts/sync-to-repos.mjs",
     "sync:dry": "node scripts/sync-to-repos.mjs --dry-run",
-    "sync:check": "node scripts/check-sync.mjs"
+    "sync:check": "node scripts/check-sync.mjs",
+    "skills:regenerate": "node scripts/regenerate-skill-copies.mjs",
+    "skills:check": "node scripts/check-skill-refs.mjs && node scripts/regenerate-skill-copies.mjs --check",
+    "skills:manifest": "node scripts/build-manifest.mjs",
+    "skills:manifest:check": "node scripts/build-manifest.mjs --check"
   },
   "keywords": [
     "claude",

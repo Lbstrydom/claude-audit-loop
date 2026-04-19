@@ -23,6 +23,22 @@ deploy to Railway / live URL
 /ship                            → commit + push (with UX P0 warning from persona-test)
 ```
 
+**Skill file structure** (Phase B.1+ — progressive disclosure):
+
+```
+skills/<name>/                   ← authoritative; edit ONLY here
+├── SKILL.md                     ← canonical flow; ≤3K tokens target
+├── references/<topic>.md        ← rare/edge content, loaded on demand
+└── examples/<sample>.md         ← optional output templates
+
+.claude/skills/<name>/            ← generated copy — run `npm run skills:regenerate`
+.github/skills/<name>/            ← generated copy
+```
+
+Every reference file has `summary:` YAML frontmatter that must byte-match
+the parent SKILL.md's reference-index row. `npm run skills:check` enforces
+this — see `docs/skill-reference-format.md`.
+
 Each skill is a sibling — they share env vars and Supabase stores but have distinct scopes:
 - **plan-***: code that doesn't exist yet. `/plan-frontend` produces a machine-parseable "Section 9 — Acceptance Criteria" that `/ux-lock verify` consumes.
 - **audit-loop**: code that was just written (static analysis + LLM audit)
