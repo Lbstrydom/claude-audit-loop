@@ -9,9 +9,21 @@ import path from 'node:path';
 
 /**
  * Patterns that MUST be in .gitignore for any repo using the audit loop.
- * Order matters for readability — grouped by purpose.
+ *
+ * Two categories:
+ *
+ * OPERATIONAL — output state produced by running the audit loop locally.
+ * Never shared between repos; always gitignored.
+ *
+ * BUNDLE — files synced into the consumer from claude-engineering-skills.
+ * These are NOT the consumer's code — they're versioned in the source repo
+ * and replayed on each sync. Committing them in the consumer would cause
+ * history pollution + drift. Shared state is the Supabase DB only.
+ *
+ * Kept in sync with scripts/sync-to-repos.mjs CORE_SCRIPTS / SKILL_FILES
+ * / EDITOR_FILES — source of truth for what ships to consumers.
  */
-const REQUIRED_PATTERNS = [
+const OPERATIONAL_PATTERNS = [
   '.env',
   '.audit/local/',
   '.audit/staging/',
@@ -27,12 +39,56 @@ const REQUIRED_PATTERNS = [
   '.audit/pipeline-state.json',
   '.audit/session-ledger.json',
   '.audit/meta-assessments.jsonl',
+  '.audit-loop-install-receipt.json',
+  '.audit-loop-install-txn.json',
 ];
+
+const BUNDLE_PATTERNS = [
+  // Skill surfaces — all three; consumers read but never author these
+  '.claude/skills/',
+  '.github/skills/',
+  '.agents/skills/',
+  // MCP wiring shipped alongside skills
+  '.vscode/mcp.json',
+  // Top-level audit-loop scripts (CORE_SCRIPTS in sync-to-repos.mjs)
+  'scripts/openai-audit.mjs',
+  'scripts/gemini-review.mjs',
+  'scripts/bandit.mjs',
+  'scripts/learning-store.mjs',
+  'scripts/cross-skill.mjs',
+  'scripts/phase7-check.mjs',
+  'scripts/shared.mjs',
+  'scripts/check-sync.mjs',
+  'scripts/check-setup.mjs',
+  'scripts/install-skills.mjs',
+  'scripts/build-manifest.mjs',
+  'scripts/regenerate-skill-copies.mjs',
+  'scripts/check-skill-refs.mjs',
+  'scripts/refine-prompts.mjs',
+  'scripts/evolve-prompts.mjs',
+  'scripts/meta-assess.mjs',
+  'scripts/audit-loop.mjs',
+  'scripts/debt-auto-capture.mjs',
+  'scripts/debt-backfill.mjs',
+  'scripts/debt-budget-check.mjs',
+  'scripts/debt-pr-comment.mjs',
+  'scripts/debt-resolve.mjs',
+  'scripts/debt-review.mjs',
+  'scripts/write-ledger-r1.mjs',
+  'scripts/write-plan-outcomes.mjs',
+  'scripts/setup-permissions.mjs',
+  // Shared lib — entire directory; consumers read it, never edit
+  'scripts/lib/',
+  // Generated manifest
+  'skills.manifest.json',
+];
+
+const REQUIRED_PATTERNS = [...OPERATIONAL_PATTERNS, ...BUNDLE_PATTERNS];
 
 /**
  * Header comment prepended when adding the audit-loop block.
  */
-const BLOCK_HEADER = '\n# Audit-loop operational state (auto-managed)\n';
+const BLOCK_HEADER = '\n# Audit-loop — operational state + synced bundle (auto-managed, do not edit by hand)\n';
 
 /**
  * Ensure all required audit-loop patterns are in the target repo's .gitignore.
