@@ -503,16 +503,76 @@ export async function initAuditBrief() {
 export function readProjectContextForPass(passName) {
   const brief = _auditBriefCache;
   if (!brief) {
-    // initAuditBrief() wasn't called — fall back to old behavior
     const content = _getClaudeMd();
     return content ? content.slice(0, 2000) : '(No project instruction file found — checked CLAUDE.md, Agents.md, .github/copilot-instructions.md)';
   }
   if (brief.startsWith('(No CLAUDE.md')) return brief;
 
+  let result = brief;
+
   const addendum = _getPassAddendum(passName);
-  return addendum
-    ? `${brief}\n\n### Pass-Specific Context\n${addendum}`
-    : brief;
+  if (addendum) result += `\n\n### Pass-Specific Context\n${addendum}`;
+
+  // Inject known false-positive allowlist so auditors don't re-raise them
+  const fpBlock = loadKnownFpContext(passName);
+  if (fpBlock) result += `\n\n${fpBlock}`;
+
+  return result;
+}
+
+// ── Known False Positives ─────────────────────────────────────────────────
+
+const KNOWN_FP_PATH = '.audit/known-fp.json';
+let _knownFpCache = null;
+
+/**
+ * Load per-repo known false-positive allowlist from .audit/known-fp.json.
+ * Returns a context block for injection into audit prompts.
+ *
+ * File format:
+ * ```json
+ * [
+ *   { "pattern": "No Zod/schema validation", "refutation": "package.json has zod@^4", "pass": "any" },
+ *   { "pattern": "Missing type annotations", "refutation": "Project uses JSDoc, not TS", "pass": "backend" }
+ * ]
+ * ```
+ *
+ * @param {string} [passName] - Filter by pass (entries with pass="any" always included)
+ * @returns {string|null} Formatted context block, or null if no entries
+ */
+export function loadKnownFpContext(passName = null) {
+  if (_knownFpCache === null) {
+    try {
+      if (fs.existsSync(KNOWN_FP_PATH)) {
+        _knownFpCache = JSON.parse(fs.readFileSync(KNOWN_FP_PATH, 'utf-8'));
+        if (!Array.isArray(_knownFpCache)) _knownFpCache = [];
+      } else {
+        _knownFpCache = [];
+      }
+    } catch {
+      _knownFpCache = [];
+    }
+  }
+
+  if (_knownFpCache.length === 0) return null;
+
+  const relevant = _knownFpCache.filter(e =>
+    !e.pass || e.pass === 'any' || e.pass === passName
+  );
+  if (relevant.length === 0) return null;
+
+  const lines = [
+    '### Known False Positives (DO NOT re-raise)',
+    '',
+    'The following patterns have been verified as false positives in this repo.',
+    'Do NOT raise findings matching these patterns:',
+    '',
+  ];
+  for (const e of relevant) {
+    lines.push(`- **${e.pattern}**: ${e.refutation}`);
+  }
+
+  return lines.join('\n');
 }
 
 /** Full project context for single-call modes (plan, rebuttal, review). */
