@@ -8,7 +8,13 @@ const PROVENANCE_PATH = path.resolve('.audit', 'vendoring-provenance.json');
 const SKILLS_DIR = path.resolve('skills');
 const ALL_SKILLS = ['audit-loop', 'plan-backend', 'plan-frontend', 'ship'];
 
-describe('vendoring provenance', () => {
+// Provenance is a local, author-private artefact — gitignored since
+// 2026-04-19. Skip the whole suite when the file is absent (fresh clone or
+// CI without local author state). When present (authoring environment),
+// enforce the invariants below.
+const PROVENANCE_AVAILABLE = fs.existsSync(PROVENANCE_PATH);
+
+describe('vendoring provenance', { skip: !PROVENANCE_AVAILABLE }, () => {
   it('provenance file exists', () => {
     assert.ok(fs.existsSync(PROVENANCE_PATH), `${PROVENANCE_PATH} must exist`);
   });

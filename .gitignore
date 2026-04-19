@@ -37,8 +37,13 @@ node_modules/
 .audit/*-ledger.json
 .audit/gemini-result.json
 
-# Install receipt (per-machine state)
+# Install receipt + transaction journal (per-machine state)
 .audit-loop-install-receipt.json
+.audit-loop-install-txn.json
+
+# Author-private self-audit artefacts (this repo auditing itself)
+.audit/tech-debt.json
+.audit/vendoring-provenance.json
 
 # Stale artifact from early development
 --db-path
