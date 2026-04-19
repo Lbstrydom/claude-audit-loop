@@ -118,6 +118,12 @@ const SKILL_FILES = [
   '.github/skills/audit-loop/SKILL.md',
   '.claude/skills/persona-test/SKILL.md',
   '.github/skills/persona-test/SKILL.md',
+  '.claude/skills/plan-backend/SKILL.md',
+  '.github/skills/plan-backend/SKILL.md',
+  '.claude/skills/plan-frontend/SKILL.md',
+  '.github/skills/plan-frontend/SKILL.md',
+  '.claude/skills/ship/SKILL.md',
+  '.github/skills/ship/SKILL.md',
 ];
 
 /** Editor config files — MCP server wiring for VSCode Copilot Chat */
