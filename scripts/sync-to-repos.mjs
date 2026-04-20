@@ -19,6 +19,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { enumerateSkillFiles, listSkillNames } from './lib/skill-packaging.mjs';
+import { ensureAuditDeps } from './lib/install/deps.mjs';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const targetFilter = (() => {
@@ -306,6 +307,18 @@ for (const repo of targetRepos) {
   if (repoUnchanged > 0) parts.push(`${D}${repoUnchanged} unchanged${X}`);
   if (repoErrors > 0) parts.push(`${R}${repoErrors} errors${X}`);
   console.log(`  ${parts.join('  ')}`);
+
+  // Post-sync: ensure audit-loop npm deps are installed. Idempotent — no-op
+  // when the target already has everything. Without this step, sync can keep
+  // skill + script files current forever while the scripts silently fail to
+  // import at runtime because devDeps were never installed.
+  if (!DRY_RUN) {
+    try {
+      ensureAuditDeps(repo.path, { dryRun: false, quiet: false });
+    } catch (err) {
+      console.log(`  ${R}deps check failed${X}: ${err.message?.slice(0, 120)}`);
+    }
+  }
 
   // Post-sync setup check — skip in dry-run (nothing was written)
   if (!DRY_RUN) {

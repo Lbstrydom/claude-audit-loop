@@ -37,7 +37,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { ManifestSchema, MANIFEST_SUPPORTED_VERSIONS } from './lib/schemas-install.mjs';
 import {
   findRepoRoot, resolveSkillFiles,
@@ -48,6 +47,7 @@ import { detectConflicts } from './lib/install/conflict-detector.mjs';
 import { mergeBlock, COPILOT_BLOCK } from './lib/install/merge.mjs';
 import { executeTransaction, recoverFromJournal } from './lib/install/transaction.mjs';
 import { ensureAuditGitignore } from './lib/install/gitignore.mjs';
+import { ensureAuditDeps } from './lib/install/deps.mjs';
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1m', X = '\x1b[0m';
 
@@ -314,51 +314,8 @@ function main() {
 
   ensureAuditGitignore(repoRoot, { dryRun: args.dryRun });
 
-  // ── npm deps (unchanged) ─────────────────────────────────────────────────
-  const hasPkg = fs.existsSync(path.join(repoRoot, 'package.json'));
-  if (hasPkg) {
-    const REQUIRED_DEPS = ['openai', 'zod', 'dotenv', 'micromatch', '@google/genai', '@anthropic-ai/sdk'];
-    const OPTIONAL_DEPS = ['proper-lockfile'];
-    const nodeModules = path.join(repoRoot, 'node_modules');
-    const missing = REQUIRED_DEPS.filter(d => !fs.existsSync(path.join(nodeModules, d)));
-    const missingOptional = OPTIONAL_DEPS.filter(d => !fs.existsSync(path.join(nodeModules, d)));
-
-    if (missing.length > 0 || missingOptional.length > 0) {
-      console.log(`\n${D}Installing audit-loop dependencies in target repo...${X}`);
-      try {
-        if (missing.length > 0) {
-          console.log(`  Required: ${missing.join(', ')}`);
-          execFileSync('npm', ['install', '--save-dev', ...missing], {
-            cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000,
-          });
-          console.log(`  ${G}✓${X} Required deps installed`);
-        }
-        if (missingOptional.length > 0) {
-          console.log(`  Optional: ${missingOptional.join(', ')}`);
-          try {
-            execFileSync('npm', ['install', '--save-dev', '--legacy-peer-deps', ...missingOptional], {
-              cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000,
-            });
-            console.log(`  ${G}✓${X} Optional deps installed`);
-          } catch {
-            console.log(`  ${Y}○${X} Some optional deps failed — audit will degrade gracefully`);
-          }
-        }
-      } catch (err) {
-        console.error(`  ${Y}⚠${X} npm install failed: ${err.message?.slice(0, 150)}`);
-        console.error(`  Run manually: cd ${repoRoot} && npm install --save-dev ${missing.join(' ')}`);
-      }
-    } else {
-      console.log(`\n  ${G}✓${X} All audit-loop dependencies already installed`);
-    }
-    if (process.env.SUPABASE_AUDIT_URL && !fs.existsSync(path.join(nodeModules, '@supabase', 'supabase-js'))) {
-      console.log(`  ${Y}○${X} SUPABASE_AUDIT_URL is set but @supabase/supabase-js is not installed`);
-      console.log(`    Run: cd ${repoRoot} && npm install --save-dev @supabase/supabase-js`);
-    }
-  } else {
-    console.log(`\n  ${Y}○${X} No package.json in target — skipping dependency install`);
-    console.log(`  To install manually: npm install openai zod dotenv micromatch @google/genai @anthropic-ai/sdk`);
-  }
+  // ── npm deps (shared logic — also used by sync-to-repos.mjs) ────────────
+  ensureAuditDeps(repoRoot, { dryRun: args.dryRun });
 
   console.log(`\n${G}Installed ${result.written} files${X}${result.deleted ? `, deleted ${result.deleted}` : ''}`);
   console.log(`  Bundle version: ${manifest.bundleVersion}`);
