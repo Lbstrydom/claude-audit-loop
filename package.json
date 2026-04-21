@@ -18,6 +18,8 @@
     "audit:bandit": "node scripts/bandit.mjs stats",
     "audit:phase7": "node scripts/phase7-check.mjs",
     "audit:check-deps": "node scripts/check-deps.mjs",
+    "memory:health": "node scripts/memory-health.mjs",
+    "memory:health:json": "node scripts/memory-health.mjs --json",
     "sync": "node scripts/sync-to-repos.mjs",
     "sync:dry": "node scripts/sync-to-repos.mjs --dry-run",
     "sync:check": "node scripts/check-sync.mjs",

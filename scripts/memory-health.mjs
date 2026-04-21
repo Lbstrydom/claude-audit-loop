@@ -1,0 +1,240 @@
+#!/usr/bin/env node
+/**
+ * @fileoverview memory-health — weekly decision gate for adopting graph-shaped
+ * findings memory (pgvector clustering) vs staying on semantic_id + Jaccard.
+ *
+ * Calls the `memory_health_metrics` Postgres RPC, evaluates trigger thresholds,
+ * writes a markdown report. Exits 0 when all green, 1 when any trigger fires.
+ * The GH Actions workflow uses the exit code to decide whether to open/update
+ * the sticky "memory-health" issue — silent when healthy.
+ *
+ * Thresholds (tune here, not in the migration):
+ *   fuzzy_reraise.rate        > 0.15   → fingerprint-only dedup is leaking
+ *   cluster_density.median    >= 5     → open findings have latent cluster structure
+ *   recurrence.rate           > 0.10   → fixes are not sticking under new IDs
+ *
+ * Decision rule (from the discussion with the user):
+ *   - 0 triggers for 4 consecutive weeks → shape has academic merit only
+ *   - 1 trigger fires for 2 consecutive weeks → prototype pgvector similarity
+ *   - 2+ triggers fire → build the full clustering pipeline
+ *
+ * @module scripts/memory-health
+ */
+
+import 'dotenv/config';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const WINDOW_DAYS = Number(process.env.MEMORY_HEALTH_WINDOW_DAYS ?? 30);
+
+const THRESHOLDS = {
+  fuzzyReraiseRate: Number(process.env.MEMORY_HEALTH_FUZZY_RATE ?? 0.15),
+  clusterMedianPairs: Number(process.env.MEMORY_HEALTH_CLUSTER_MEDIAN ?? 5),
+  recurrenceRate: Number(process.env.MEMORY_HEALTH_RECURRENCE_RATE ?? 0.10),
+  minFindingsForSignal: Number(process.env.MEMORY_HEALTH_MIN_FINDINGS ?? 50)
+};
+
+function parseArgs(argv) {
+  const args = { out: null, json: false };
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === '--out') args.out = argv[++i];
+    else if (argv[i] === '--json') args.json = true;
+    else if (argv[i] === '--help' || argv[i] === '-h') {
+      process.stdout.write(
+        'Usage: node scripts/memory-health.mjs [--out <path.md>] [--json]\n' +
+        '\n' +
+        'Exit codes:\n' +
+        '  0 — all metrics within thresholds (or insufficient data)\n' +
+        '  1 — at least one trigger fired — graphify-shape adoption worth reconsidering\n' +
+        '  2 — Supabase connection / RPC failed (treated as infra error, not a health signal)\n'
+      );
+      process.exit(0);
+    }
+  }
+  return args;
+}
+
+async function callRpc() {
+  if (!process.env.SUPABASE_AUDIT_URL || !process.env.SUPABASE_AUDIT_ANON_KEY) {
+    throw new Error('SUPABASE_AUDIT_URL / SUPABASE_AUDIT_ANON_KEY not set — cannot run health check');
+  }
+  const { createClient } = await import('@supabase/supabase-js');
+  const supabase = createClient(
+    process.env.SUPABASE_AUDIT_URL,
+    process.env.SUPABASE_AUDIT_ANON_KEY
+  );
+  const { data, error } = await supabase.rpc('memory_health_metrics', {
+    window_days: WINDOW_DAYS
+  });
+  if (error) throw new Error(`RPC failed: ${error.message}`);
+  return data;
+}
+
+function evaluateTriggers(metrics) {
+  const { total_findings_in_window, fuzzy_reraise, cluster_density, recurrence } = metrics;
+
+  const insufficient = total_findings_in_window < THRESHOLDS.minFindingsForSignal;
+
+  const triggers = {
+    fuzzy_reraise: {
+      fired: !insufficient && Number(fuzzy_reraise.rate) > THRESHOLDS.fuzzyReraiseRate,
+      actual: Number(fuzzy_reraise.rate),
+      threshold: THRESHOLDS.fuzzyReraiseRate,
+      reading: `${fuzzy_reraise.fuzzy_matched}/${fuzzy_reraise.new_fingerprints} new-fingerprint findings matched a prior finding by text similarity`
+    },
+    cluster_density: {
+      fired: !insufficient && Number(cluster_density.median_similar_pairs) >= THRESHOLDS.clusterMedianPairs,
+      actual: Number(cluster_density.median_similar_pairs),
+      threshold: THRESHOLDS.clusterMedianPairs,
+      reading: `median similar-pair count across repos`
+    },
+    recurrence: {
+      fired: !insufficient && Number(recurrence.rate) > THRESHOLDS.recurrenceRate,
+      actual: Number(recurrence.rate),
+      threshold: THRESHOLDS.recurrenceRate,
+      reading: `${recurrence.recurred}/${recurrence.fixed_findings} fixed findings recurred with a different fingerprint`
+    }
+  };
+
+  const firedCount = Object.values(triggers).filter(t => t.fired).length;
+
+  let status;
+  if (insufficient) status = 'INSUFFICIENT_DATA';
+  else if (firedCount === 0) status = 'GREEN';
+  else if (firedCount === 1) status = 'AMBER';
+  else status = 'RED';
+
+  return { status, firedCount, insufficient, triggers };
+}
+
+function pct(n) {
+  return `${(Number(n) * 100).toFixed(1)}%`;
+}
+
+function renderMarkdown(metrics, evaluation) {
+  const { status, firedCount, insufficient, triggers } = evaluation;
+  const lines = [];
+
+  lines.push('<!-- audit-loop:memory-health -->');
+  lines.push('# Memory-health report');
+  lines.push('');
+  lines.push(`- **Status:** \`${status}\``);
+  lines.push(`- **Generated:** ${metrics.generated_at}`);
+  lines.push(`- **Window:** last ${metrics.window_days} days`);
+  lines.push(`- **Findings in window:** ${metrics.total_findings_in_window}`);
+  lines.push(`- **Triggers fired:** ${firedCount} of 3`);
+  lines.push('');
+
+  if (insufficient) {
+    lines.push(`> Data volume below \`${THRESHOLDS.minFindingsForSignal}\` findings — metrics reported for visibility, but no trigger will fire this run.`);
+    lines.push('');
+  }
+
+  lines.push('## What this measures');
+  lines.push('');
+  lines.push('Are we losing signal by storing findings as a flat table with fingerprint-only dedup? If any of the three triggers below fires consistently, a graph-shaped memory (pgvector similarity + community clusters) would likely pay off. All green for 4 weeks → current design is fine.');
+  lines.push('');
+
+  lines.push('## Metrics');
+  lines.push('');
+  lines.push('| Metric | Value | Threshold | Trigger |');
+  lines.push('|---|---|---|---|');
+  lines.push(`| Fuzzy re-raise rate | ${pct(triggers.fuzzy_reraise.actual)} | \`> ${pct(triggers.fuzzy_reraise.threshold)}\` | ${triggers.fuzzy_reraise.fired ? 'FIRED' : 'green'} |`);
+  lines.push(`| Cluster density (median similar pairs/repo) | ${triggers.cluster_density.actual} | \`>= ${triggers.cluster_density.threshold}\` | ${triggers.cluster_density.fired ? 'FIRED' : 'green'} |`);
+  lines.push(`| Fixed-finding recurrence rate | ${pct(triggers.recurrence.actual)} | \`> ${pct(triggers.recurrence.threshold)}\` | ${triggers.recurrence.fired ? 'FIRED' : 'green'} |`);
+  lines.push('');
+
+  lines.push('### Fuzzy re-raise');
+  lines.push(`${triggers.fuzzy_reraise.reading}.`);
+  if (metrics.fuzzy_reraise.samples?.length) {
+    lines.push('');
+    lines.push('Top sample matches (trigram similarity):');
+    for (const s of metrics.fuzzy_reraise.samples) {
+      lines.push(`- \`${s.finding_id}\` ↔ \`${s.matched_finding_id}\` — similarity ${s.similarity}`);
+    }
+  }
+  lines.push('');
+
+  lines.push('### Cluster density');
+  lines.push(`${triggers.cluster_density.reading}: **${triggers.cluster_density.actual}**.`);
+  if (metrics.cluster_density.per_repo?.length) {
+    lines.push('');
+    lines.push('Top repos by similar-pair count:');
+    const top = [...metrics.cluster_density.per_repo].slice(0, 10);
+    for (const r of top) {
+      const name = r.repo_name || r.repo_id || '(unknown)';
+      lines.push(`- ${name} — ${r.similar_pairs} pairs across ${r.open_findings} open findings`);
+    }
+  }
+  lines.push('');
+
+  lines.push('### Recurrence');
+  lines.push(`${triggers.recurrence.reading}.`);
+  if (metrics.recurrence.samples?.length) {
+    lines.push('');
+    lines.push('Top sample recurrences:');
+    for (const s of metrics.recurrence.samples) {
+      lines.push(`- fixed \`${s.fixed_id}\` → recurred \`${s.recurred_id}\` — similarity ${s.similarity}`);
+    }
+  }
+  lines.push('');
+
+  lines.push('## Decision rule');
+  lines.push('');
+  lines.push('- All green for 4 consecutive weeks → shape has academic merit only, no action.');
+  lines.push('- Any single trigger fires consistently for 2 weeks → prototype pgvector similarity first (cheapest win), re-measure.');
+  lines.push('- Two or more triggers fire → build the full clustering pipeline.');
+  lines.push('');
+  lines.push('Thresholds live in `scripts/memory-health.mjs` and can be overridden via env vars (`MEMORY_HEALTH_FUZZY_RATE`, `MEMORY_HEALTH_CLUSTER_MEDIAN`, `MEMORY_HEALTH_RECURRENCE_RATE`).');
+
+  return lines.join('\n') + '\n';
+}
+
+function atomicWrite(filePath, contents) {
+  const dir = path.dirname(path.resolve(filePath));
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, contents);
+  fs.renameSync(tmp, filePath);
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  let metrics;
+  try {
+    metrics = await callRpc();
+  } catch (err) {
+    process.stderr.write(`memory-health: ${err.message}\n`);
+    process.exit(2);
+  }
+
+  const evaluation = evaluateTriggers(metrics);
+
+  if (args.json) {
+    process.stdout.write(JSON.stringify({ metrics, evaluation }, null, 2) + '\n');
+  }
+
+  const md = renderMarkdown(metrics, evaluation);
+  if (args.out) {
+    atomicWrite(args.out, md);
+    process.stderr.write(`memory-health: wrote ${args.out}\n`);
+  } else if (!args.json) {
+    process.stdout.write(md);
+  }
+
+  // One-line summary on stderr regardless — useful for CI log scanning
+  process.stderr.write(
+    `memory-health: status=${evaluation.status} triggers=${evaluation.firedCount}/3 ` +
+    `fuzzy=${(evaluation.triggers.fuzzy_reraise.actual * 100).toFixed(1)}% ` +
+    `cluster=${evaluation.triggers.cluster_density.actual} ` +
+    `recurrence=${(evaluation.triggers.recurrence.actual * 100).toFixed(1)}%\n`
+  );
+
+  // Exit code: 0 green or insufficient data; 1 if any trigger fired
+  process.exit(evaluation.firedCount > 0 ? 1 : 0);
+}
+
+main().catch(err => {
+  process.stderr.write(`memory-health: fatal: ${err.stack || err.message}\n`);
+  process.exit(2);
+});

@@ -148,6 +148,31 @@ tests/                      # Node.js built-in test runner (node --test)
 Run: `npm test` (uses Node.js built-in test runner, 47 tests)
 Covers: atomic writes, schema derivation, ledger operations, finding identity, FP tracker, bandit posterior, reward computation.
 
+## Memory-Health Gate
+
+`scripts/memory-health.mjs` runs three trigger metrics against Supabase to decide
+whether our flat `audit_findings` + fingerprint-dedup design is starting to leak
+signal that a graph-shaped memory (pgvector + community clustering) would
+recover. Three triggers:
+
+| Metric | What it measures | Default trigger |
+|---|---|---|
+| Fuzzy re-raise rate | New-fingerprint findings whose text matches a prior finding (trigram sim > 0.6) | `> 15%` |
+| Cluster density | Median per-repo count of open finding pairs with sim > 0.5 but different fingerprints | `>= 5` |
+| Recurrence rate | Fixed findings that reappear in same repo within 30 days under a new fingerprint | `> 10%` |
+
+Runtime is the `memory_health_metrics(window_days)` Postgres RPC added by
+`supabase/migrations/20260421120000_memory_health.sql` (uses `pg_trgm`).
+
+**Auto-scheduled** via `.github/workflows/memory-health.yml` — runs every Monday
+09:00 UTC, silent when all metrics green, opens/updates a sticky GH issue
+(label `memory-health`) when any trigger fires. Auto-closes when metrics
+return to green. Run locally: `npm run memory:health` or `npm run memory:health:json`.
+
+**Decision rule**: 0 triggers for 4 weeks → current design is fine. 1 trigger
+for 2 consecutive weeks → prototype pgvector similarity. 2+ triggers → build
+the full clustering pipeline.
+
 ## Environment Variables
 
 | Variable | Required | Default | Purpose |
@@ -171,6 +196,11 @@ Covers: atomic writes, schema derivation, ledger operations, finding identity, F
 | `PERSONA_TEST_SUPABASE_ANON_KEY` | No | — | Supabase anon key for persona-test |
 | `PERSONA_TEST_APP_URL` | No | — | Default app URL for persona-test list/add (per-project `.env`) |
 | `PERSONA_TEST_REPO_NAME` | No | — | Repo name for cross-referencing audit-loop findings (per-project `.env`) |
+| `MEMORY_HEALTH_WINDOW_DAYS` | No | `30` | Memory-health lookback window |
+| `MEMORY_HEALTH_FUZZY_RATE` | No | `0.15` | Fuzzy re-raise rate trigger threshold |
+| `MEMORY_HEALTH_CLUSTER_MEDIAN` | No | `5` | Cluster density trigger threshold (median similar pairs/repo) |
+| `MEMORY_HEALTH_RECURRENCE_RATE` | No | `0.10` | Fixed-finding recurrence rate trigger threshold |
+| `MEMORY_HEALTH_MIN_FINDINGS` | No | `50` | Minimum findings in window to report a trigger (below → INSUFFICIENT_DATA) |
 
 ## Cross-Skill Data Loop
 
