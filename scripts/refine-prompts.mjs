@@ -12,7 +12,7 @@ import path from 'path';
 import { loadOutcomes, computePassEffectiveness, computePassEWR } from './lib/findings.mjs';
 import { sanitizeOutcomes } from './lib/sanitizer.mjs';
 import { reservoirSample } from './lib/rng.mjs';
-import { PASS_NAMES, learningConfig } from './lib/config.mjs';
+import { PASS_NAMES, learningConfig, briefConfig } from './lib/config.mjs';
 
 const MIN_EXAMPLES_THRESHOLD = learningConfig.minExamplesThreshold;
 
@@ -151,7 +151,7 @@ async function suggestRefinements(passName, outcomesPath) {
       const { default: Anthropic } = await import('@anthropic-ai/sdk');
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: briefConfig.claudeModel,
         max_tokens: 2000,
         system: REFINEMENT_SYSTEM,
         messages: [{ role: 'user', content: `Outcome data:\n\n${statsBlock}${exampleBlock}\n\nSuggest prompt refinements to reduce false positives.` }]
@@ -167,7 +167,7 @@ async function suggestRefinements(passName, outcomesPath) {
       const { GoogleGenAI } = await import('@google/genai');
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: briefConfig.geminiModel,
         contents: `Outcome data:\n\n${statsBlock}${exampleBlock}\n\nSuggest prompt refinements to reduce false positives.`,
         config: { systemInstruction: REFINEMENT_SYSTEM, maxOutputTokens: 2000 }
       });

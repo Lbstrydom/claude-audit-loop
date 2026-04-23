@@ -12,6 +12,7 @@ import path from 'path';
 import { normalizePath, isSensitiveFile, readFileOrDie } from './file-io.mjs';
 import { estimateTokens } from './code-analysis.mjs';
 import { semanticId, setRepoProfileCache } from './findings.mjs';
+import { briefConfig } from './config.mjs';
 
 // ── Module-Level Caches ─────────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ async function _llmCondense(content) {
     try {
       const { default: Anthropic } = await import('@anthropic-ai/sdk');
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-      const model = process.env.BRIEF_MODEL_CLAUDE || 'claude-haiku-4-5-20251001';
+      const model = briefConfig.claudeModel;
       process.stderr.write(`  [brief] Generating via ${model}...\n`);
       const startMs = Date.now();
       const response = await anthropic.messages.create({
@@ -188,7 +189,7 @@ async function _llmCondense(content) {
     try {
       const { GoogleGenAI } = await import('@google/genai');
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const model = process.env.BRIEF_MODEL_GEMINI || 'gemini-2.5-flash';
+      const model = briefConfig.geminiModel;
       process.stderr.write(`  [brief] Generating via ${model}...\n`);
       const startMs = Date.now();
       const response = await ai.models.generateContent({

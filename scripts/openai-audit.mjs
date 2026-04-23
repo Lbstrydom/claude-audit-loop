@@ -60,6 +60,7 @@ import {
 import { initLearningStore, isCloudEnabled, upsertRepo, upsertPlan, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
+import { supportsReasoningEffort } from './lib/model-resolver.mjs';
 import {
   LlmError, classifyLlmError, buildReducePayload, normalizeFindingsForOutput as _normalizeFindingsForOutput,
   resolveLedgerPath, MAX_REDUCE_JSON_CHARS, MAP_FAILURE_THRESHOLD, RETRY_MAX_ATTEMPTS,
@@ -348,7 +349,7 @@ async function _callGPTOnce(openai, { systemPrompt, userPrompt, schema, schemaNa
       max_output_tokens: tokens
     };
 
-    if (MODEL.startsWith('gpt-5')) {
+    if (supportsReasoningEffort(MODEL)) {
       requestParams.reasoning = { effort };
     }
 

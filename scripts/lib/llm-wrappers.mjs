@@ -7,6 +7,7 @@
 
 import { z } from 'zod';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { openaiConfig, briefConfig } from './config.mjs';
 
 /**
  * Make a safe GPT call with structured output. Extracted from openai-audit.mjs.
@@ -19,7 +20,7 @@ import { zodTextFormat } from 'openai/helpers/zod';
  * @returns {Promise<{result: object, usage: object, latencyMs: number}|null>}
  */
 export async function safeCallGPT(openai, systemPrompt, userPrompt, schema, options = {}) {
-  const { model = 'gpt-5.4', maxOutputTokens = 8000, timeoutMs = 120000 } = options;
+  const { model = openaiConfig.model, maxOutputTokens = 8000, timeoutMs = 120000 } = options;
   const start = Date.now();
   try {
     const response = await openai.responses.parse({
@@ -50,7 +51,7 @@ export async function safeCallGPT(openai, systemPrompt, userPrompt, schema, opti
  * @returns {Promise<{result: object, usage: object, latencyMs: number}|null>}
  */
 export async function callGemini(ai, systemPrompt, userPrompt, jsonSchema, options = {}) {
-  const { model = 'gemini-2.5-flash', maxOutputTokens = 8000, timeoutMs = 120000, zodSchema = null } = options;
+  const { model = briefConfig.geminiModel, maxOutputTokens = 8000, timeoutMs = 120000, zodSchema = null } = options;
   const start = Date.now();
   try {
     const response = await ai.models.generateContent({
@@ -93,7 +94,7 @@ export async function callGemini(ai, systemPrompt, userPrompt, jsonSchema, optio
  * @returns {Promise<{result: object, usage: object, latencyMs: number}|null>}
  */
 export async function callClaude(anthropic, systemPrompt, userPrompt, schema, options = {}) {
-  const { model = 'claude-haiku-4-5-20251001', maxTokens = 4000 } = options;
+  const { model = briefConfig.claudeModel, maxTokens = 4000 } = options;
   const start = Date.now();
   try {
     const response = await anthropic.messages.create({

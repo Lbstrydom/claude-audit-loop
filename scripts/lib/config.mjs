@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { safeInt } from './file-io.mjs';
+import { resolveModel } from './model-resolver.mjs';
 
 // ── .env Discovery (worktree-safe) ──────────────────────────────────────────
 
@@ -71,10 +72,17 @@ function validatedEnum(envVar, validSet, fallback) {
   return val || fallback;
 }
 
-// ── OpenAI / GPT-5.4 Audit Config ──────────────────────────────────────────
+// ── Model resolution ────────────────────────────────────────────────────────
+// Defaults are sentinels (latest-gpt, latest-pro, …) so this config doesn't go
+// stale when new models ship. Users may override with concrete IDs via env.
+// resolveModel() applies DEPRECATED_REMAP first (warns on stale env values),
+// then picks the newest concrete ID from the merged live+static catalog.
+// Live catalog is opt-in via refreshModelCatalog() called at process startup.
+
+// ── OpenAI / GPT Audit Config ──────────────────────────────────────────────
 
 export const openaiConfig = Object.freeze({
-  model: process.env.OPENAI_AUDIT_MODEL || 'gpt-5.4',
+  model: resolveModel(process.env.OPENAI_AUDIT_MODEL || 'latest-gpt'),
   reasoning: validatedEnum('OPENAI_AUDIT_REASONING', VALID_REASONING, 'high'),
   maxOutputTokensCap: safeInt(process.env.OPENAI_AUDIT_MAX_TOKENS, 32000),
   timeoutMsCap: safeInt(process.env.OPENAI_AUDIT_TIMEOUT_MS, 300000),
@@ -96,7 +104,7 @@ export const openaiConfig = Object.freeze({
 // ── Gemini / Final Review Config ────────────────────────────────────────────
 
 export const geminiConfig = Object.freeze({
-  model: process.env.GEMINI_REVIEW_MODEL || 'gemini-3.1-pro-preview',
+  model: resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro'),
   timeoutMs: safeInt(process.env.GEMINI_REVIEW_TIMEOUT_MS, 120000),
   maxOutputTokens: safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 32000),
 });
@@ -104,14 +112,14 @@ export const geminiConfig = Object.freeze({
 // ── Claude Opus Fallback Config ─────────────────────────────────────────────
 
 export const claudeConfig = Object.freeze({
-  finalReviewModel: process.env.CLAUDE_FINAL_REVIEW_MODEL || 'claude-opus-4-1',
+  finalReviewModel: resolveModel(process.env.CLAUDE_FINAL_REVIEW_MODEL || 'latest-opus'),
 });
 
 // ── Brief Generation Config ─────────────────────────────────────────────────
 
 export const briefConfig = Object.freeze({
-  geminiModel: process.env.BRIEF_MODEL_GEMINI || 'gemini-2.5-flash',
-  claudeModel: process.env.BRIEF_MODEL_CLAUDE || 'claude-haiku-4-5-20251001',
+  geminiModel: resolveModel(process.env.BRIEF_MODEL_GEMINI || 'latest-flash'),
+  claudeModel: resolveModel(process.env.BRIEF_MODEL_CLAUDE || 'latest-haiku'),
 });
 
 // ── Suppression Config ──────────────────────────────────────────────────────
@@ -160,7 +168,8 @@ export const assessmentConfig = Object.freeze({
   interval: safeInt(process.env.META_ASSESS_INTERVAL, 4),
   minOutcomes: safeInt(process.env.META_ASSESS_MIN_OUTCOMES, 20),
   windowSize: safeInt(process.env.META_ASSESS_WINDOW, 50),
-  model: process.env.META_ASSESS_MODEL || 'gemini-2.5-flash',
+  model: resolveModel(process.env.META_ASSESS_MODEL || 'latest-flash'),
+  fallbackGptModel: resolveModel(process.env.META_ASSESS_GPT_FALLBACK || 'latest-gpt-mini'),
 });
 
 // ── Learning System v2 Config ─────────────────────────────────────────────
@@ -185,11 +194,30 @@ export const rewardWeights = Object.freeze({
 });
 
 // ── Model Pricing (per 1M tokens) ───────────────────────────────────────────
+// Keyed by family/tier so sentinel resolution never lands on an unpriced key.
+// Callers look up via pricingKey(modelId) from model-resolver.mjs, with a
+// coarse family-level fallback when the exact key is absent.
 
 export const modelPricing = Object.freeze({
-  'gpt-5.4':    { input: 2.5, output: 10 },
-  'gemini-3.1': { input: 1.25, output: 5 },
-  'claude':     { input: 3, output: 15 },
+  // OpenAI
+  'gpt-5':         { input: 2.5,  output: 10  },
+  'gpt-5-mini':    { input: 0.25, output: 2   },
+  'gpt-4':         { input: 2.5,  output: 10  },
+  'gpt-4-mini':    { input: 0.15, output: 0.6 },
+
+  // Anthropic (per-tier)
+  'claude-opus':   { input: 15,   output: 75  },
+  'claude-sonnet': { input: 3,    output: 15  },
+  'claude-haiku':  { input: 1,    output: 5   },
+  // Legacy key preserved for callers not yet migrated
+  'claude':        { input: 3,    output: 15  },
+
+  // Google (per-tier; covers aliases + versioned variants)
+  'gemini-pro':        { input: 1.25, output: 5   },
+  'gemini-flash':      { input: 0.15, output: 0.6 },
+  'gemini-flash-lite': { input: 0.075, output: 0.3 },
+  // Legacy key preserved for callers still reading `gemini-3.1`
+  'gemini-3.1':        { input: 1.25, output: 5   },
 });
 
 // ── Predictive Strategy Config ──────────────────────────────────────────────

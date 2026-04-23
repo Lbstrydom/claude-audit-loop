@@ -1,0 +1,499 @@
+/**
+ * @fileoverview Model ID resolution — sentinels, deprecated remap, live catalog.
+ *
+ * Replaces concrete pins like `gemini-3.1-pro-preview` with sentinel-based
+ * resolution (`latest-pro`) so the pipeline doesn't go stale when new models ship.
+ *
+ * Sentinels:
+ *   - OpenAI:    latest-gpt, latest-gpt-mini
+ *   - Anthropic: latest-opus, latest-sonnet, latest-haiku
+ *   - Google:    latest-pro, latest-flash, latest-flash-lite
+ *
+ * Flow:
+ *   1. deprecatedRemap() — stale concrete IDs → sentinel (warns user).
+ *   2. If result is a sentinel, resolveLatestModel() picks newest from pool.
+ *   3. Pool = live catalog (if refreshed) ∪ static fallback.
+ *   4. Gemini short-circuit: if `gemini-{tier}-latest` exists, return it
+ *      directly — Google's alias is authoritative over version heuristics.
+ *
+ * Call refreshModelCatalog({ openai, google, anthropic }) once at startup to
+ * populate the live pool; otherwise resolution uses STATIC_POOL.
+ *
+ * @module scripts/lib/model-resolver
+ */
+
+// ── Static fallback pool ────────────────────────────────────────────────────
+// IMPORTANT: only pin model IDs that exist in the provider's current catalog.
+// Do NOT pin IDs derived by stripping `-preview` suffix — Google returns 404
+// when a bare model name hasn't shipped yet (the -preview suffix is load-bearing).
+// Updated quarterly.
+
+export const STATIC_POOL = Object.freeze({
+  openai: Object.freeze([
+    'gpt-5.4', 'gpt-5.4-mini',
+    'gpt-4.1-mini', 'gpt-4o-mini',
+  ]),
+  anthropic: Object.freeze([
+    'claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-1',
+    'claude-sonnet-4-6', 'claude-sonnet-4-5',
+    'claude-haiku-4-5', 'claude-haiku-4-5-20251001',
+  ]),
+  google: Object.freeze([
+    'gemini-pro-latest', 'gemini-flash-latest', 'gemini-flash-lite-latest',
+    'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+  ]),
+});
+
+// ── Deprecated remap ────────────────────────────────────────────────────────
+// When a user's .env has a stale concrete ID, remap to a sentinel and warn.
+// Prevents 404s when providers retire models.
+
+export const DEPRECATED_REMAP = Object.freeze({
+  'gpt-5.0': 'latest-gpt',
+  'gpt-5.1': 'latest-gpt',
+  'gpt-5.2': 'latest-gpt',
+  'gpt-5.3': 'latest-gpt',
+  'gpt-4-turbo': 'latest-gpt',
+  'gpt-4-1106-preview': 'latest-gpt',
+  'gpt-4o': 'latest-gpt',
+
+  'claude-opus-3': 'latest-opus',
+  'claude-3-opus-20240229': 'latest-opus',
+  'claude-opus-4-0': 'latest-opus',
+  'claude-sonnet-3.5': 'latest-sonnet',
+  'claude-3-5-sonnet-20241022': 'latest-sonnet',
+  'claude-haiku-3': 'latest-haiku',
+  'claude-3-haiku-20240307': 'latest-haiku',
+
+  'gemini-3-flash': 'latest-flash',
+  'gemini-3.1-pro': 'latest-pro',
+  'gemini-3-pro': 'latest-pro',
+  'gemini-2.0-flash': 'latest-flash',
+  'gemini-2.0-flash-lite': 'latest-flash-lite',
+  'gemini-2.0-pro': 'latest-pro',
+  'gemini-1.5-pro': 'latest-pro',
+  'gemini-1.5-flash': 'latest-flash',
+  'gemini-1.5-flash-8b': 'latest-flash-lite',
+});
+
+// ── Sentinels ──────────────────────────────────────────────────────────────
+
+export const SENTINEL_TO_TIER = Object.freeze({
+  'latest-gpt':         { provider: 'openai',    variant: null   },
+  'latest-gpt-mini':    { provider: 'openai',    variant: 'mini' },
+  'latest-opus':        { provider: 'anthropic', tier: 'opus'    },
+  'latest-sonnet':      { provider: 'anthropic', tier: 'sonnet'  },
+  'latest-haiku':       { provider: 'anthropic', tier: 'haiku'   },
+  'latest-pro':         { provider: 'google',    tier: 'pro'     },
+  'latest-flash':       { provider: 'google',    tier: 'flash'   },
+  'latest-flash-lite':  { provider: 'google',    tier: 'flash-lite' },
+});
+
+export function isSentinel(modelId) {
+  return typeof modelId === 'string' && Object.hasOwn(SENTINEL_TO_TIER, modelId.toLowerCase());
+}
+
+// ── ID parsers ──────────────────────────────────────────────────────────────
+
+/** Parse a Claude model ID. `claude-{tier}-{major}-{minor}[-{YYYYMMDD}]` */
+export function parseClaudeModel(id) {
+  const m = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:-(\d{8}))?$/.exec(id);
+  if (!m) return null;
+  return {
+    provider: 'anthropic',
+    family: 'claude',
+    tier: m[1],
+    major: parseInt(m[2], 10),
+    minor: m[3] ? parseInt(m[3], 10) : 0,
+    date: m[4] || null,
+    isPreview: false,
+    original: id,
+  };
+}
+
+/** Parse a Gemini model ID. Handles both aliases and version-numbered forms. */
+export function parseGeminiModel(id) {
+  const aliasMatch = /^gemini-(pro|flash|flash-lite)-latest$/.exec(id);
+  if (aliasMatch) {
+    return {
+      provider: 'google',
+      family: 'gemini',
+      tier: aliasMatch[1],
+      major: Number.POSITIVE_INFINITY, // aliases win the version tiebreaker
+      minor: 0,
+      suffix: null,
+      isAlias: true,
+      isPreview: false,
+      original: id,
+    };
+  }
+
+  const m = /^gemini-(\d+)(?:\.(\d+))?-(pro|flash|flash-lite)(?:-(preview|lite|tts|image|exp|\d+))?$/.exec(id);
+  if (!m) return null;
+  return {
+    provider: 'google',
+    family: 'gemini',
+    tier: m[3],
+    major: parseInt(m[1], 10),
+    minor: m[2] ? parseInt(m[2], 10) : 0,
+    suffix: m[4] || null,
+    isAlias: false,
+    isPreview: m[4] === 'preview',
+    original: id,
+  };
+}
+
+/** Parse an OpenAI model ID. */
+export function parseOpenAIModel(id) {
+  const m = /^(gpt|o)-?(\d+)(?:\.(\d+))?(?:-(mini|nano|turbo|preview|[\d-]+))?$/.exec(id);
+  if (!m) return null;
+  const variant = m[4] || null;
+  return {
+    provider: 'openai',
+    family: m[1],
+    major: parseInt(m[2], 10),
+    minor: m[3] ? parseInt(m[3], 10) : 0,
+    variant,
+    isLite: /^(mini|nano)$/.test(variant || ''),
+    isPreview: /preview/.test(variant || ''),
+    original: id,
+  };
+}
+
+// ── Tier pickers ────────────────────────────────────────────────────────────
+
+function compareVersions(a, b) {
+  if (a.major !== b.major) return b.major - a.major;
+  if ((a.minor ?? 0) !== (b.minor ?? 0)) return (b.minor ?? 0) - (a.minor ?? 0);
+  // Prefer GA over preview at same version
+  if ((a.isPreview ?? false) !== (b.isPreview ?? false)) return a.isPreview ? 1 : -1;
+  // Prefer undated (rolling alias) over dated snapshot at same version
+  const aDated = !!a.date;
+  const bDated = !!b.date;
+  if (aDated !== bDated) return aDated ? 1 : -1;
+  return 0;
+}
+
+export function pickNewestGemini(pool, tier) {
+  if (!pool || pool.length === 0) return null;
+  // Short-circuit: Google's alias is authoritative when present
+  const aliasId = `gemini-${tier}-latest`;
+  if (pool.includes(aliasId)) return aliasId;
+  const parsed = pool.map(parseGeminiModel).filter(p => p && p.tier === tier);
+  if (parsed.length === 0) return null;
+  parsed.sort(compareVersions);
+  return parsed[0].original;
+}
+
+export function pickNewestClaude(pool, tier) {
+  if (!pool || pool.length === 0) return null;
+  const parsed = pool.map(parseClaudeModel).filter(p => p && p.tier === tier);
+  if (parsed.length === 0) return null;
+  parsed.sort(compareVersions);
+  return parsed[0].original;
+}
+
+/**
+ * @param {string[]} pool
+ * @param {null|'mini'|'nano'} variant - null excludes mini/nano; 'mini' selects mini only
+ */
+export function pickNewestOpenAI(pool, variant = null) {
+  if (!pool || pool.length === 0) return null;
+  const parsed = pool.map(parseOpenAIModel).filter(p => {
+    if (!p) return false;
+    if (variant === null) return !p.isLite;
+    return p.variant === variant;
+  });
+  if (parsed.length === 0) return null;
+  parsed.sort(compareVersions);
+  return parsed[0].original;
+}
+
+// ── Deprecated remap + warning ──────────────────────────────────────────────
+
+const _remapWarned = new Set();
+
+/**
+ * Check if an ID is in the deprecated remap table; return the sentinel if so,
+ * or the input unchanged. Warns once per unique stale ID per process.
+ */
+export function deprecatedRemap(modelId, { silent = false } = {}) {
+  if (!modelId || typeof modelId !== 'string') return modelId;
+  const remapped = DEPRECATED_REMAP[modelId];
+  if (!remapped) return modelId;
+  if (!silent && !_remapWarned.has(modelId)) {
+    _remapWarned.add(modelId);
+    process.stderr.write(
+      `  [model-resolver] WARNING: "${modelId}" is deprecated or retired — remapped to "${remapped}". ` +
+      `Update your .env to clear this warning.\n`
+    );
+  }
+  return remapped;
+}
+
+// ── Session catalog cache ───────────────────────────────────────────────────
+
+const CATALOG_CACHE = { openai: null, anthropic: null, google: null };
+const TTL_MS = 60 * 60 * 1000;
+
+/** Merge dynamic catalog with STATIC_POOL — dynamic takes precedence, duplicates deduped. */
+function mergedPool(provider) {
+  const entry = CATALOG_CACHE[provider];
+  const fresh = entry && (Date.now() - entry.fetchedAt) < TTL_MS;
+  const live = fresh ? entry.ids : [];
+  const combined = [...live, ...STATIC_POOL[provider]];
+  return Array.from(new Set(combined));
+}
+
+/**
+ * Populate the session cache for one provider. Silent failure — returns false,
+ * caller falls back to STATIC_POOL.
+ * @param {'openai'|'anthropic'|'google'} provider
+ * @param {string[]} ids - Model IDs from the provider's /models endpoint
+ */
+export function setCatalog(provider, ids) {
+  if (!['openai', 'anthropic', 'google'].includes(provider)) return false;
+  if (!Array.isArray(ids) || ids.length === 0) return false;
+  CATALOG_CACHE[provider] = { ids: ids.slice(), fetchedAt: Date.now() };
+  return true;
+}
+
+/** For tests — reset cached catalogs. */
+export function _resetCatalogCache() {
+  CATALOG_CACHE.openai = null;
+  CATALOG_CACHE.anthropic = null;
+  CATALOG_CACHE.google = null;
+  _remapWarned.clear();
+}
+
+// ── Live catalog fetcher ────────────────────────────────────────────────────
+// Each fetch has its own short timeout. Failures degrade gracefully to static.
+// Empty API key → silently return empty pool (never throw).
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+}
+
+async function fetchOpenAIModels(apiKey) {
+  const res = await fetchWithTimeout('https://api.openai.com/v1/models', {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) throw new Error(`OpenAI /v1/models: HTTP ${res.status}`);
+  const body = await res.json();
+  return (body?.data || []).map(m => m.id).filter(Boolean);
+}
+
+async function fetchGoogleModels(apiKey) {
+  const res = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+  );
+  if (!res.ok) throw new Error(`Google /v1beta/models: HTTP ${res.status}`);
+  const body = await res.json();
+  return (body?.models || [])
+    .map(m => m.name || m.baseModelId)
+    .filter(Boolean)
+    .map(n => n.replace(/^models\//, '')); // Strip `models/` prefix
+}
+
+async function fetchAnthropicModels(apiKey) {
+  const res = await fetchWithTimeout('https://api.anthropic.com/v1/models', {
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+  });
+  if (!res.ok) throw new Error(`Anthropic /v1/models: HTTP ${res.status}`);
+  const body = await res.json();
+  return (body?.data || []).map(m => m.id).filter(Boolean);
+}
+
+/**
+ * Refresh the live catalog for any provider whose API key is present. Silent
+ * failures; logs at debug level (stderr) on error, not warn.
+ * Call once at process startup — resolution thereafter uses cached results.
+ *
+ * @param {object} [keys] - { openai?, google?, anthropic? } API keys; defaults to env
+ * @returns {Promise<{openai: number, google: number, anthropic: number}>} counts loaded per provider
+ */
+export async function refreshModelCatalog(keys = {}) {
+  const openaiKey = keys.openai ?? process.env.OPENAI_API_KEY;
+  const googleKey = keys.google ?? process.env.GEMINI_API_KEY;
+  const anthropicKey = keys.anthropic ?? process.env.ANTHROPIC_API_KEY;
+
+  const results = { openai: 0, google: 0, anthropic: 0 };
+  const tasks = [];
+
+  if (openaiKey) tasks.push(
+    fetchOpenAIModels(openaiKey)
+      .then(ids => { if (setCatalog('openai', ids)) results.openai = ids.length; })
+      .catch(err => process.stderr.write(`  [model-resolver] OpenAI catalog fetch failed (falling back to static): ${err.message}\n`))
+  );
+  if (googleKey) tasks.push(
+    fetchGoogleModels(googleKey)
+      .then(ids => { if (setCatalog('google', ids)) results.google = ids.length; })
+      .catch(err => process.stderr.write(`  [model-resolver] Google catalog fetch failed (falling back to static): ${err.message}\n`))
+  );
+  if (anthropicKey) tasks.push(
+    fetchAnthropicModels(anthropicKey)
+      .then(ids => { if (setCatalog('anthropic', ids)) results.anthropic = ids.length; })
+      .catch(err => process.stderr.write(`  [model-resolver] Anthropic catalog fetch failed (falling back to static): ${err.message}\n`))
+  );
+
+  await Promise.all(tasks);
+  return results;
+}
+
+// ── Sentinel resolution ─────────────────────────────────────────────────────
+
+/**
+ * Resolve a possibly-sentinel model ID to a concrete provider ID.
+ * - Concrete IDs pass through (after deprecated remap).
+ * - Sentinels are resolved against merged pool (live ∪ static).
+ * - If a sentinel cannot be resolved, returns the first static-pool entry for
+ *   that provider as a last-resort fallback; throws only if pool is empty.
+ *
+ * @param {string} modelId
+ * @param {object} [opts] - { silent?: boolean } — suppress deprecation warning
+ */
+export function resolveModel(modelId, opts = {}) {
+  if (!modelId || typeof modelId !== 'string') {
+    throw new Error(`resolveModel: modelId must be a non-empty string, got ${typeof modelId}`);
+  }
+
+  const afterRemap = deprecatedRemap(modelId, opts);
+  if (!isSentinel(afterRemap)) return afterRemap;
+
+  const spec = SENTINEL_TO_TIER[afterRemap.toLowerCase()];
+  const pool = mergedPool(spec.provider);
+
+  let picked = null;
+  if (spec.provider === 'openai') picked = pickNewestOpenAI(pool, spec.variant);
+  else if (spec.provider === 'anthropic') picked = pickNewestClaude(pool, spec.tier);
+  else if (spec.provider === 'google') picked = pickNewestGemini(pool, spec.tier);
+
+  if (picked) return picked;
+
+  // Last-resort: first static entry matching tier. This guards against an empty
+  // live catalog returning fewer entries than expected on partial provider outage.
+  const fallbackPool = STATIC_POOL[spec.provider];
+  let fallback = null;
+  if (spec.provider === 'openai') fallback = pickNewestOpenAI(fallbackPool, spec.variant);
+  else if (spec.provider === 'anthropic') fallback = pickNewestClaude(fallbackPool, spec.tier);
+  else if (spec.provider === 'google') fallback = pickNewestGemini(fallbackPool, spec.tier);
+
+  if (fallback) {
+    process.stderr.write(`  [model-resolver] WARNING: "${afterRemap}" resolved via static fallback (${fallback}); live catalog had no match\n`);
+    return fallback;
+  }
+
+  throw new Error(`resolveModel: cannot resolve sentinel "${afterRemap}" — both live and static pools empty for ${spec.provider}`);
+}
+
+// ── Capability detection ────────────────────────────────────────────────────
+
+/**
+ * Does this OpenAI model support the `reasoning.effort` parameter?
+ * Covers gpt-5+, o-series (o1, o3, etc.). Future gpt-6 inherits support.
+ */
+export function supportsReasoningEffort(modelId) {
+  if (!modelId) return false;
+  const parsed = parseOpenAIModel(modelId);
+  if (!parsed) return false;
+  if (parsed.family === 'o') return true;                 // o1, o3, …
+  if (parsed.family === 'gpt' && parsed.major >= 5) return true; // gpt-5, gpt-6, …
+  return false;
+}
+
+/**
+ * Get a human-readable pricing tier key for a model.
+ * Used by the modelPricing table; maps any concrete ID to a stable family key.
+ */
+export function pricingKey(modelId) {
+  const claude = parseClaudeModel(modelId);
+  if (claude) return `claude-${claude.tier}`;
+  const gemini = parseGeminiModel(modelId);
+  if (gemini) return `gemini-${gemini.tier}`;
+  const openai = parseOpenAIModel(modelId);
+  if (openai) return openai.isLite ? `${openai.family}-${openai.major}-mini` : `${openai.family}-${openai.major}`;
+  return modelId;
+}
+
+// ── CLI self-check ──────────────────────────────────────────────────────────
+// Usage:
+//   node scripts/lib/model-resolver.mjs resolve [sentinel]   # show what a sentinel resolves to
+//   node scripts/lib/model-resolver.mjs catalog              # fetch live catalog + diff vs static
+
+async function _cli() {
+  const args = process.argv.slice(2);
+  const cmd = args[0];
+
+  if (cmd === 'resolve') {
+    const sentinels = args.length > 1
+      ? args.slice(1)
+      : Object.keys(SENTINEL_TO_TIER);
+    const lines = [];
+    for (const s of sentinels) {
+      try {
+        lines.push(`${s.padEnd(20)} → ${resolveModel(s, { silent: true })}`);
+      } catch (err) {
+        lines.push(`${s.padEnd(20)} → ERROR: ${err.message}`);
+      }
+    }
+    process.stdout.write(lines.join('\n') + '\n');
+    return 0;
+  }
+
+  if (cmd === 'catalog') {
+    process.stderr.write('Fetching live catalogs (or static-pool fallback on failure)...\n');
+    const results = await refreshModelCatalog();
+    const lines = [];
+    for (const provider of ['openai', 'anthropic', 'google']) {
+      const live = CATALOG_CACHE[provider]?.ids || [];
+      const statik = STATIC_POOL[provider];
+      const livenew = live.filter(id => !statik.includes(id));
+      lines.push(`\n─ ${provider} (live: ${results[provider]}) ─`);
+      if (live.length === 0) {
+        lines.push('  (no live catalog — using static pool)');
+      } else {
+        lines.push(`  live-only (not in static pool): ${livenew.length ? livenew.slice(0, 20).join(', ') : '(none)'}`);
+      }
+      lines.push(`  static pool: ${statik.join(', ')}`);
+    }
+    process.stdout.write(lines.join('\n') + '\n');
+    return 0;
+  }
+
+  process.stderr.write([
+    'Usage:',
+    '  node scripts/lib/model-resolver.mjs resolve [sentinel...]   # default: all sentinels',
+    '  node scripts/lib/model-resolver.mjs catalog                 # show live vs static pool',
+    '',
+    'Sentinels: ' + Object.keys(SENTINEL_TO_TIER).join(', '),
+  ].join('\n') + '\n');
+  return 1;
+}
+
+// Run CLI only when executed directly (Windows-safe check)
+const invokedDirectly = (() => {
+  try {
+    const metaPath = new URL(import.meta.url).pathname;
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname : '';
+    // Compare basenames to avoid path-separator mismatches
+    return metaPath.toLowerCase().endsWith('/model-resolver.mjs') &&
+      argvPath.toLowerCase().endsWith('/model-resolver.mjs');
+  } catch { return false; }
+})();
+
+if (invokedDirectly) {
+  _cli().then(code => process.exit(code ?? 0)).catch(err => {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  });
+}

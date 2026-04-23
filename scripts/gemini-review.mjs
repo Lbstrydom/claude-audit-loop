@@ -355,11 +355,18 @@ async function callGemini(ai, { systemPrompt, userPrompt, zodSchema, jsonSchema,
     clearTimeout(timer);
     const latencyMs = Date.now() - startMs;
     const isAbort = err.name === 'AbortError' || err.message?.toLowerCase().includes('abort');
+    // Surface provider error detail so model-not-found / bad-key don't look like generic failures.
+    // Extract structured fields from SDK error (GoogleGenAI attaches .status on HTTP failures).
+    const detail = err.status
+      ? `HTTP ${err.status}${err.message ? `: ${err.message}` : ''}`
+      : (err.message || 'unknown error');
     const msg = isAbort
       ? `[${passName ?? 'gemini'}] Timeout after ${(TIMEOUT_MS / 1000).toFixed(0)}s`
-      : `[${passName ?? 'gemini'}] ${err.message} (${(latencyMs / 1000).toFixed(1)}s)`;
+      : `[${passName ?? 'gemini'}] ${detail} (${(latencyMs / 1000).toFixed(1)}s)`;
     process.stderr.write(`  [${passName ?? 'gemini'}] FAILED: ${msg}\n`);
-    throw new Error(msg);
+    const wrapped = new Error(msg);
+    if (err.status) wrapped.status = err.status; // preserve for classifyLlmError (404 → non-retryable)
+    throw wrapped;
   }
 }
 
@@ -428,9 +435,15 @@ async function callClaudeOpus(anthropic, { systemPrompt, userPrompt, zodSchema, 
     return { result, usage, latencyMs };
   } catch (err) {
     const latencyMs = Date.now() - startMs;
-    const msg = `[${passName ?? 'claude-opus'}] ${err.message} (${(latencyMs / 1000).toFixed(1)}s)`;
+    // Surface provider error detail so model-not-found / bad-key don't look like generic failures.
+    const detail = err.status
+      ? `HTTP ${err.status}${err.message ? `: ${err.message}` : ''}`
+      : (err.message || 'unknown error');
+    const msg = `[${passName ?? 'claude-opus'}] ${detail} (${(latencyMs / 1000).toFixed(1)}s)`;
     process.stderr.write(`  [${passName ?? 'claude-opus'}] FAILED: ${msg}\n`);
-    throw new Error(msg);
+    const wrapped = new Error(msg);
+    if (err.status) wrapped.status = err.status;
+    throw wrapped;
   }
 }
 

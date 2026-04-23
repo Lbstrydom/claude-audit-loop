@@ -148,6 +148,58 @@ tests/                      # Node.js built-in test runner (node --test)
 Run: `npm test` (uses Node.js built-in test runner, 47 tests)
 Covers: atomic writes, schema derivation, ledger operations, finding identity, FP tracker, bandit posterior, reward computation.
 
+## Model Resolution
+
+`scripts/lib/model-resolver.mjs` resolves model IDs so config stops going stale
+when providers ship new versions. All model-reading env vars in config.mjs pass
+through `resolveModel()`.
+
+**Sentinels** (preferred in `.env`):
+
+| Sentinel            | Picks from                                  |
+|---------------------|---------------------------------------------|
+| `latest-gpt`        | newest non-mini GPT in the pool             |
+| `latest-gpt-mini`   | newest GPT mini variant                     |
+| `latest-opus`       | newest Claude Opus                          |
+| `latest-sonnet`     | newest Claude Sonnet                        |
+| `latest-haiku`      | newest Claude Haiku (prefers undated alias) |
+| `latest-pro`        | `gemini-pro-latest` (alias short-circuit)   |
+| `latest-flash`      | `gemini-flash-latest`                       |
+| `latest-flash-lite` | `gemini-flash-lite-latest`                  |
+
+**Resolution order** in `resolveModel(modelId)`:
+1. Apply `DEPRECATED_REMAP` — stale concrete IDs (`gpt-5.2`, `gemini-3-flash`,
+   `claude-opus-3`, …) are rewritten to a sentinel with a one-time warning.
+2. If the result is a sentinel, merge live catalog ∪ `STATIC_POOL`, then pick
+   the newest entry matching the tier. Google's `gemini-{tier}-latest` alias
+   is authoritative (short-circuits version heuristics).
+3. If result is concrete, return as-is.
+
+**Live catalog** (optional): call `await refreshModelCatalog()` at the top of a
+script's `main()` to populate the session cache from the provider's `/models`
+endpoint. Silent on failure — falls back to the static pool. CLI self-check:
+
+```bash
+node scripts/lib/model-resolver.mjs resolve             # show current resolution
+node scripts/lib/model-resolver.mjs catalog             # live catalog delta vs static
+```
+
+**Anti-patterns to avoid:**
+- Do NOT pin concrete model IDs in new code — use a sentinel (`latest-*`).
+- Do NOT drop `-preview` suffixes from Gemini 3 IDs without verifying via
+  `curl https://generativelanguage.googleapis.com/v1beta/models?key=$KEY`.
+  The bare `gemini-3-flash` / `gemini-3.1-pro` have never shipped — Google
+  returns 404.
+- Do NOT retry 404. It's a client error (model not found). `classifyLlmError`
+  treats any 4xx (except 429) as non-retryable.
+- When you catch and rewrap an LLM error, surface `err.status` and the real
+  provider message. Don't collapse to `"API error ${status}"` — the provider's
+  `error.message` is what tells you which model wasn't found.
+
+**Refreshing the static pool** (quarterly): update `STATIC_POOL` and
+`DEPRECATED_REMAP` in `scripts/lib/model-resolver.mjs` and run
+`node scripts/lib/model-resolver.mjs resolve` to verify.
+
 ## Memory-Health Gate
 
 `scripts/memory-health.mjs` runs three trigger metrics against Supabase to decide
@@ -177,16 +229,18 @@ the full clustering pipeline.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `OPENAI_API_KEY` | Yes | — | GPT-5.4 access |
+| `OPENAI_API_KEY` | Yes | — | GPT access (audit model defaults to latest pinned GPT) |
 | `GEMINI_API_KEY` | No | — | Gemini final review (Step 7 falls back to Claude Opus if absent) |
-| `OPENAI_AUDIT_MODEL` | No | `gpt-5.4` | Override GPT model |
+| `OPENAI_AUDIT_MODEL` | No | `latest-gpt` | Model sentinel or concrete ID (see "Model Resolution" below) |
 | `OPENAI_AUDIT_REASONING` | No | `high` | Reasoning effort |
-| `GEMINI_REVIEW_MODEL` | No | `gemini-3.1-pro-preview` | Override Gemini model |
+| `GEMINI_REVIEW_MODEL` | No | `latest-pro` | Gemini model sentinel or concrete ID |
 | `GEMINI_REVIEW_TIMEOUT_MS` | No | `120000` | Gemini timeout |
 | `ANTHROPIC_API_KEY` | No | — | Claude Haiku fallback for brief generation |
-| `CLAUDE_FINAL_REVIEW_MODEL` | No | `claude-opus-4-1` | Override Claude Opus model for Step 7 fallback |
-| `BRIEF_MODEL_GEMINI` | No | `gemini-2.5-flash` | Override brief generation Gemini model |
-| `BRIEF_MODEL_CLAUDE` | No | `claude-haiku-4-5-20251001` | Override brief generation Claude model |
+| `CLAUDE_FINAL_REVIEW_MODEL` | No | `latest-opus` | Claude Opus override (Step 7 fallback) |
+| `BRIEF_MODEL_GEMINI` | No | `latest-flash` | Brief-generation Gemini model |
+| `BRIEF_MODEL_CLAUDE` | No | `latest-haiku` | Brief-generation Claude model |
+| `META_ASSESS_MODEL` | No | `latest-flash` | Meta-assessment Gemini model |
+| `META_ASSESS_GPT_FALLBACK` | No | `latest-gpt-mini` | Meta-assessment GPT fallback when GEMINI_API_KEY is absent |
 | `SUPPRESS_SIMILARITY_THRESHOLD` | No | `0.35` | Jaccard threshold for R2+ suppression (0.0-1.0) |
 | `SUPABASE_AUDIT_URL` | No | — | Supabase project URL for audit-loop cloud learning store |
 | `SUPABASE_AUDIT_ANON_KEY` | No | — | Supabase anon key for audit-loop (falls back to local-only mode) |

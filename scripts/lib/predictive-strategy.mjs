@@ -146,8 +146,9 @@ export class PredictiveStrategy {
       return { estimatedCostUsd: 0, estimatedMinutes: 0, estimatedTokens: 0, confidence: 'none' };
     }
 
-    const pricing = modelPricing['gpt-5.4'];
-    const geminiPricing = modelPricing['gemini-3.1'];
+    // Tier-keyed pricing — resilient to model version churn.
+    const pricing = modelPricing['gpt-5'] ?? modelPricing['gpt-4'];
+    const geminiPricing = modelPricing['gemini-pro'] ?? modelPricing['gemini-3.1'];
 
     // Group passes into parallel waves
     const waves = [
