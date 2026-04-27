@@ -60,7 +60,7 @@ import {
 import { initLearningStore, isCloudEnabled, upsertRepo, upsertPlan, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
 import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
-import { supportsReasoningEffort } from './lib/model-resolver.mjs';
+import { supportsReasoningEffort, refreshModelCatalog, resolveModel } from './lib/model-resolver.mjs';
 import {
   LlmError, classifyLlmError, buildReducePayload, normalizeFindingsForOutput as _normalizeFindingsForOutput,
   resolveLedgerPath, MAX_REDUCE_JSON_CHARS, MAP_FAILURE_THRESHOLD, RETRY_MAX_ATTEMPTS,
@@ -1838,6 +1838,24 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Live-catalog refresh: populate session cache so providers' newest models
+  // are visible to resolveModel(). Module-load resolution (config.mjs) used
+  // STATIC_POOL only — the warning below surfaces drift so operators can
+  // restart with the env var pointing at the live newest. Set
+  // MODEL_CATALOG_REFRESH=skip in air-gapped CI / when API quota is scarce.
+  if (process.env.MODEL_CATALOG_REFRESH !== 'skip') {
+    try { await refreshModelCatalog(); } catch { /* silent — falls back to static */ }
+    try {
+      const liveResolution = resolveModel(process.env.OPENAI_AUDIT_MODEL || 'latest-gpt', { silent: true });
+      if (liveResolution !== MODEL) {
+        process.stderr.write(
+          `  [startup] Live catalog suggests "${liveResolution}" but session uses "${MODEL}" ` +
+          '(resolved at module load before refresh). Restart to apply the newer model.\n'
+        );
+      }
+    } catch { /* ignore — never block audit on resolver introspection */ }
+  }
+
   const args = process.argv.slice(2);
   const mode = args[0];
   const planFile = args[1];

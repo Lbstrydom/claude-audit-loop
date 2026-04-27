@@ -100,10 +100,16 @@ function matchPattern(filePath, pattern) {
  * @returns {{ files: Array<{ path: string, absPath: string, content: string, sizeBytes: number }> }}
  */
 export function scanInstructionFiles(repoRoot, options = {}) {
-  const excludeDirs = new Set(MANDATORY_EXCLUDES.map(e => e.split('/')[0]));
+  // Only collapse SIMPLE excludes (no `/`) into the directory-name set.
+  // Glob-style entries like `tests/**/fixtures` must NOT shorten to `tests`
+  // — that would skip the whole tests/ tree. The walkDir fixtures-handler
+  // takes care of the nested-fixtures case via path inspection.
+  const excludeDirs = new Set(
+    MANDATORY_EXCLUDES.filter(e => !e.includes('/')),
+  );
   if (options.additionalExcludes) {
     for (const e of options.additionalExcludes) {
-      excludeDirs.add(e.split('/')[0]);
+      if (!e.includes('/')) excludeDirs.add(e);
     }
   }
 

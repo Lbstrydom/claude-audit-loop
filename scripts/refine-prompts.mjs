@@ -13,6 +13,7 @@ import { loadOutcomes, computePassEffectiveness, computePassEWR } from './lib/fi
 import { sanitizeOutcomes } from './lib/sanitizer.mjs';
 import { reservoirSample } from './lib/rng.mjs';
 import { PASS_NAMES, learningConfig, briefConfig } from './lib/config.mjs';
+import { refreshModelCatalog } from './lib/model-resolver.mjs';
 
 const MIN_EXAMPLES_THRESHOLD = learningConfig.minExamplesThreshold;
 
@@ -191,6 +192,11 @@ async function suggestRefinements(passName, outcomesPath) {
 }
 
 async function main() {
+  // Live-catalog refresh (see openai-audit.mjs for rationale).
+  if (process.env.MODEL_CATALOG_REFRESH !== 'skip') {
+    try { await refreshModelCatalog(); } catch { /* silent */ }
+  }
+
   const args = process.argv.slice(2);
   const passName = args[0];
   const outcomesPath = args.includes('--outcomes')

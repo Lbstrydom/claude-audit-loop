@@ -56,13 +56,16 @@ export function mergeBlock(existing, block = COPILOT_BLOCK) {
 
 /**
  * Extract just the managed block from content (for SHA comparison).
+ * Searches for END_MARKER strictly after START_MARKER so a stray END_MARKER
+ * earlier in the file cannot produce a negative-length window.
  * @param {string} content
  * @returns {string|null}
  */
 export function extractBlock(content) {
   const startIdx = content.indexOf(START_MARKER);
-  const endIdx = content.indexOf(END_MARKER);
-  if (startIdx === -1 || endIdx === -1) return null;
+  if (startIdx === -1) return null;
+  const endIdx = content.indexOf(END_MARKER, startIdx + START_MARKER.length);
+  if (endIdx === -1) return null;
   return content.slice(startIdx, endIdx + END_MARKER.length);
 }
 

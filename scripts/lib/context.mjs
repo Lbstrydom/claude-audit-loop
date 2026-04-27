@@ -37,13 +37,29 @@ export function getClaudeMdCache() {
 
 // ── Private Helpers ─────────────────────────────────────────────────────────
 
+// Search order: AGENTS.md (canonical, cross-tool standard) first. Slim
+// CLAUDE.md typically just imports AGENTS.md, so reading AGENTS.md directly
+// avoids the chicken-and-egg of resolving @./AGENTS.md imports here.
+// Falls through to CLAUDE.md (legacy/full content), legacy mixed-case
+// Agents.md, then Copilot instructions.
+const INSTRUCTION_FILE_CANDIDATES = [
+  'AGENTS.md',
+  'CLAUDE.md',
+  'Agents.md',                           // legacy mixed-case (case-sensitive FS)
+  '.github/copilot-instructions.md',
+];
+
 /**
- * Read and cache the project's instruction file (CLAUDE.md, Agents.md, etc.).
+ * Read and cache the project's instruction file. Tries AGENTS.md first
+ * (cross-tool canonical), falls back to CLAUDE.md / legacy / Copilot.
+ * If both AGENTS.md and a non-trivial CLAUDE.md are present, AGENTS.md
+ * wins because the slim-CLAUDE.md+@import pattern means CLAUDE.md is
+ * usually just a 30-line addendum.
  * @returns {string} File content, or empty string if not found
  */
 function _getClaudeMd() {
   if (_claudeMdCache !== null) return _claudeMdCache;
-  for (const name of ['CLAUDE.md', 'Agents.md', '.github/copilot-instructions.md']) {
+  for (const name of INSTRUCTION_FILE_CANDIDATES) {
     const p = path.resolve(name);
     if (fs.existsSync(p)) {
       _claudeMdCache = fs.readFileSync(p, 'utf-8');
@@ -59,7 +75,7 @@ function _getClaudeMd() {
  * @returns {string|null} Path to instruction file, or null
  */
 function _getClaudeMdPath() {
-  for (const name of ['CLAUDE.md', 'Agents.md', '.github/copilot-instructions.md']) {
+  for (const name of INSTRUCTION_FILE_CANDIDATES) {
     const p = path.resolve(name);
     if (fs.existsSync(p)) return p;
   }

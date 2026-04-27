@@ -1,4 +1,9 @@
-# CLAUDE.md - Claude Engineering Skills
+# AGENTS.md — Claude Engineering Skills
+
+> **Canonical project context for all AI coding agents.** Read by Claude Code,
+> Claude in VS Code, GitHub Copilot, Cursor, Windsurf, Codex CLI, Gemini CLI.
+> Claude users — see [CLAUDE.md](./CLAUDE.md) for Claude Code-specific
+> addenda; everything below is shared.
 
 ## Project Overview
 
@@ -12,7 +17,11 @@
 ```
 /plan-backend + /plan-frontend   → architecture & UX planning
         ↓
-/audit-loop                      → code quality gate (GPT-5.4 + Gemini arbiter)
+/audit-plan                      → iterative plan refinement (max 3 rounds, rigor-pressure stop)
+        ↓
+/audit-code                      → multi-pass code audit (R2+ suppression, debt capture)
+        ↓
+(/audit-loop dispatches to one of the above by mode keyword)
         ↓
 /ux-lock                         → Playwright e2e spec for each fix (locks in DOM contract)
         ↓
@@ -32,8 +41,14 @@ skills/<name>/                   ← authoritative; edit ONLY here
 └── examples/<sample>.md         ← optional output templates
 
 .claude/skills/<name>/            ← generated copy — run `npm run skills:regenerate`
-.github/skills/<name>/            ← generated copy
 ```
+
+> **Note**: `.github/skills/<name>/` was a previously-generated mirror that
+> no documented AI tool reads. Deprecated in Phase 4 of ai-context-sync.
+> `--keep-github-skills` flag (on `npm run skills:regenerate` and
+> `npm run sync`) preserves the old behaviour for one minor release. For
+> Copilot teammates, the supported surface is `.github/prompts/` slash-command
+> shims (see Phase 3).
 
 Every reference file has `summary:` YAML frontmatter that must byte-match
 the parent SKILL.md's reference-index row. `npm run skills:check` enforces
@@ -41,7 +56,9 @@ this — see `docs/skill-reference-format.md`.
 
 Each skill is a sibling — they share env vars and Supabase stores but have distinct scopes:
 - **plan-***: code that doesn't exist yet. `/plan-frontend` produces a machine-parseable "Section 9 — Acceptance Criteria" that `/ux-lock verify` consumes.
-- **audit-loop**: code that was just written (static analysis + LLM audit)
+- **audit-plan**: refines plans before implementation (max 3 rounds, rigor-pressure stop). Single-file edits.
+- **audit-code**: code that was just written (5-pass parallel static analysis + LLM audit + R2+ suppression).
+- **audit-loop**: thin orchestrator dispatching to /audit-plan or /audit-code by input shape.
 - **ux-lock**: code that was just fixed (Playwright e2e regression lock). **Verify mode** (`/ux-lock verify <plan.md>`) grades a plan-frontend plan against its live implementation — each criterion becomes a Playwright test case; results populate `plan_verification_runs` + `plan_verification_items`.
 - **persona-test**: deployed app (live browser, user flows, UX findings)
 - **ship**: packaging and delivery
@@ -63,16 +80,7 @@ This is required before the MCP server will start. Without it, the server crashe
 npx @playwright/mcp@latest --version   # should print a version number
 ```
 
-**Windows users** — if Playwright tools still don't appear after installing Chromium and restarting, add this override to `~/.claude/settings.json`:
-```json
-"mcpServers": {
-  "playwright": {
-    "command": "npx.cmd",
-    "args": ["@playwright/mcp@latest", "--headless"]
-  }
-}
-```
-Then restart Claude Code. Windows requires `npx.cmd` (the `.cmd` wrapper) rather than bare `npx` for Claude Code's process spawner to resolve it correctly.
+**Windows users** — Claude Code may need an MCP override; see [CLAUDE.md](./CLAUDE.md#claude-code-only-notes).
 
 BrightData Scraping Browser is also supported (handles anti-bot/CAPTCHA) but requires a paid account and KYC approval. Playwright is preferred for testing your own apps.
 
@@ -99,7 +107,7 @@ scripts/
 │   ├── plan-paths.mjs      # Plan path extraction (regex + fuzzy keyword discovery)
 │   ├── ledger.mjs          # Adjudication ledger, R2+ suppression, finding metadata
 │   ├── code-analysis.mjs   # Chunking, dependency graphs, audit units, map-reduce
-│   ├── context.mjs         # Repo profiling, audit brief generation, CLAUDE.md parsing
+│   ├── context.mjs         # Repo profiling, audit brief generation, AGENTS.md/CLAUDE.md parsing
 │   ├── findings.mjs        # Semantic IDs + barrel re-exports for findings subsystem
 │   ├── findings-format.mjs # Finding display formatting (pure renderer)
 │   ├── findings-tracker.mjs # FP tracker (v2), lazy-decay EMA, multi-scope counters
@@ -119,8 +127,7 @@ tests/                      # Node.js built-in test runner (node --test)
 ├── shared.test.mjs         # 33 tests: schemas, atomic writes, ledger, FP tracker
 └── bandit.test.mjs         # 14 tests: Thompson Sampling, reward computation
 
-.claude/skills/audit-loop/SKILL.md   # Claude Code skill definition
-.github/skills/audit-loop/SKILL.md   # VS Code / Copilot skill definition (identical)
+.claude/skills/audit-loop/SKILL.md   # Claude Code skill definition (generated from skills/)
 ```
 
 ### Script Responsibilities
@@ -135,7 +142,7 @@ tests/                      # Node.js built-in test runner (node --test)
 - **Adaptive sizing**: `computePassLimits()` scales token limits and timeouts based on context size
 - **Graceful degradation**: `safeCallGPT()` catches failures and returns empty results instead of crashing
 - **Semantic dedup**: Content-hash IDs (`semanticId()`) enable exact cross-round and cross-model finding matching
-- **Targeted context**: `readProjectContextForPass()` sends only relevant CLAUDE.md sections per pass (~1500 chars vs 8000)
+- **Targeted context**: `readProjectContextForPass()` sends only relevant AGENTS.md sections per pass (~1500 chars vs 8000)
 - **Sensitive file filtering**: `.env`, credentials, keys are never sent to external APIs
 - **Atomic persistence**: `atomicWriteFileSync()` — temp file + rename for crash-safe writes (ledger, bandit, FP tracker)
 - **Fuzzy file discovery**: When plan paths don't match exact filenames, Phase 2 extracts PascalCase/backtick identifiers and matches against repo files
@@ -148,20 +155,99 @@ tests/                      # Node.js built-in test runner (node --test)
 Run: `npm test` (uses Node.js built-in test runner, 47 tests)
 Covers: atomic writes, schema derivation, ledger operations, finding identity, FP tracker, bandit posterior, reward computation.
 
+## Model Resolution
+
+`scripts/lib/model-resolver.mjs` resolves model IDs so config stops going stale
+when providers ship new versions. All model-reading env vars in config.mjs pass
+through `resolveModel()`.
+
+**Sentinels** (preferred in `.env`):
+
+| Sentinel            | Picks from                                  |
+|---------------------|---------------------------------------------|
+| `latest-gpt`        | newest non-mini GPT in the pool             |
+| `latest-gpt-mini`   | newest GPT mini variant                     |
+| `latest-opus`       | newest Claude Opus                          |
+| `latest-sonnet`     | newest Claude Sonnet                        |
+| `latest-haiku`      | newest Claude Haiku (prefers undated alias) |
+| `latest-pro`        | `gemini-pro-latest` (alias short-circuit)   |
+| `latest-flash`      | `gemini-flash-latest`                       |
+| `latest-flash-lite` | `gemini-flash-lite-latest`                  |
+
+**Resolution order** in `resolveModel(modelId)`:
+1. Apply `DEPRECATED_REMAP` — stale concrete IDs (`gpt-5.2`, `gemini-3-flash`,
+   `claude-opus-3`, …) are rewritten to a sentinel with a one-time warning.
+2. If the result is a sentinel, merge live catalog ∪ `STATIC_POOL`, then pick
+   the newest entry matching the tier. Google's `gemini-{tier}-latest` alias
+   is authoritative (short-circuits version heuristics).
+3. If result is concrete, return as-is.
+
+**Live catalog** (optional): call `await refreshModelCatalog()` at the top of a
+script's `main()` to populate the session cache from the provider's `/models`
+endpoint. Silent on failure — falls back to the static pool. CLI self-check:
+
+```bash
+node scripts/lib/model-resolver.mjs resolve             # show current resolution
+node scripts/lib/model-resolver.mjs catalog             # live catalog delta vs static
+```
+
+**Anti-patterns to avoid:**
+- Do NOT pin concrete model IDs in new code — use a sentinel (`latest-*`).
+- Do NOT drop `-preview` suffixes from Gemini 3 IDs without verifying via
+  `curl https://generativelanguage.googleapis.com/v1beta/models?key=$KEY`.
+  The bare `gemini-3-flash` / `gemini-3.1-pro` have never shipped — Google
+  returns 404.
+- Do NOT retry 404. It's a client error (model not found). `classifyLlmError`
+  treats any 4xx (except 429) as non-retryable.
+- When you catch and rewrap an LLM error, surface `err.status` and the real
+  provider message. Don't collapse to `"API error ${status}"` — the provider's
+  `error.message` is what tells you which model wasn't found.
+
+**Refreshing the static pool** (quarterly): update `STATIC_POOL` and
+`DEPRECATED_REMAP` in `scripts/lib/model-resolver.mjs` and run
+`node scripts/lib/model-resolver.mjs resolve` to verify.
+
+## Memory-Health Gate
+
+`scripts/memory-health.mjs` runs three trigger metrics against Supabase to decide
+whether our flat `audit_findings` + fingerprint-dedup design is starting to leak
+signal that a graph-shaped memory (pgvector + community clustering) would
+recover. Three triggers:
+
+| Metric | What it measures | Default trigger |
+|---|---|---|
+| Fuzzy re-raise rate | New-fingerprint findings whose text matches a prior finding (trigram sim > 0.6) | `> 15%` |
+| Cluster density | Median per-repo count of open finding pairs with sim > 0.5 but different fingerprints | `>= 5` |
+| Recurrence rate | Fixed findings that reappear in same repo within 30 days under a new fingerprint | `> 10%` |
+
+Runtime is the `memory_health_metrics(window_days)` Postgres RPC added by
+`supabase/migrations/20260421120000_memory_health.sql` (uses `pg_trgm`).
+
+**Auto-scheduled** via `.github/workflows/memory-health.yml` — runs every Monday
+09:00 UTC, silent when all metrics green, opens/updates a sticky GH issue
+(label `memory-health`) when any trigger fires. Auto-closes when metrics
+return to green. Run locally: `npm run memory:health` or `npm run memory:health:json`.
+
+**Decision rule**: 0 triggers for 4 weeks → current design is fine. 1 trigger
+for 2 consecutive weeks → prototype pgvector similarity. 2+ triggers → build
+the full clustering pipeline.
+
 ## Environment Variables
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `OPENAI_API_KEY` | Yes | — | GPT-5.4 access |
+| `OPENAI_API_KEY` | Yes | — | GPT access (audit model defaults to latest pinned GPT) |
 | `GEMINI_API_KEY` | No | — | Gemini final review (Step 7 falls back to Claude Opus if absent) |
-| `OPENAI_AUDIT_MODEL` | No | `gpt-5.4` | Override GPT model |
+| `OPENAI_AUDIT_MODEL` | No | `latest-gpt` | Model sentinel or concrete ID (see "Model Resolution" below) |
 | `OPENAI_AUDIT_REASONING` | No | `high` | Reasoning effort |
-| `GEMINI_REVIEW_MODEL` | No | `gemini-3.1-pro-preview` | Override Gemini model |
+| `GEMINI_REVIEW_MODEL` | No | `latest-pro` | Gemini model sentinel or concrete ID |
 | `GEMINI_REVIEW_TIMEOUT_MS` | No | `120000` | Gemini timeout |
 | `ANTHROPIC_API_KEY` | No | — | Claude Haiku fallback for brief generation |
-| `CLAUDE_FINAL_REVIEW_MODEL` | No | `claude-opus-4-1` | Override Claude Opus model for Step 7 fallback |
-| `BRIEF_MODEL_GEMINI` | No | `gemini-2.5-flash` | Override brief generation Gemini model |
-| `BRIEF_MODEL_CLAUDE` | No | `claude-haiku-4-5-20251001` | Override brief generation Claude model |
+| `CLAUDE_FINAL_REVIEW_MODEL` | No | `latest-opus` | Claude Opus override (Step 7 fallback) |
+| `BRIEF_MODEL_GEMINI` | No | `latest-flash` | Brief-generation Gemini model |
+| `BRIEF_MODEL_CLAUDE` | No | `latest-haiku` | Brief-generation Claude model |
+| `META_ASSESS_MODEL` | No | `latest-flash` | Meta-assessment Gemini model |
+| `META_ASSESS_GPT_FALLBACK` | No | `latest-gpt-mini` | Meta-assessment GPT fallback when GEMINI_API_KEY is absent |
 | `SUPPRESS_SIMILARITY_THRESHOLD` | No | `0.35` | Jaccard threshold for R2+ suppression (0.0-1.0) |
 | `SUPABASE_AUDIT_URL` | No | — | Supabase project URL for audit-loop cloud learning store |
 | `SUPABASE_AUDIT_ANON_KEY` | No | — | Supabase anon key for audit-loop (falls back to local-only mode) |
@@ -171,6 +257,11 @@ Covers: atomic writes, schema derivation, ledger operations, finding identity, F
 | `PERSONA_TEST_SUPABASE_ANON_KEY` | No | — | Supabase anon key for persona-test |
 | `PERSONA_TEST_APP_URL` | No | — | Default app URL for persona-test list/add (per-project `.env`) |
 | `PERSONA_TEST_REPO_NAME` | No | — | Repo name for cross-referencing audit-loop findings (per-project `.env`) |
+| `MEMORY_HEALTH_WINDOW_DAYS` | No | `30` | Memory-health lookback window |
+| `MEMORY_HEALTH_FUZZY_RATE` | No | `0.15` | Fuzzy re-raise rate trigger threshold |
+| `MEMORY_HEALTH_CLUSTER_MEDIAN` | No | `5` | Cluster density trigger threshold (median similar pairs/repo) |
+| `MEMORY_HEALTH_RECURRENCE_RATE` | No | `0.10` | Fixed-finding recurrence rate trigger threshold |
+| `MEMORY_HEALTH_MIN_FINDINGS` | No | `50` | Minimum findings in window to report a trigger (below → INSUFFICIENT_DATA) |
 
 ## Cross-Skill Data Loop
 

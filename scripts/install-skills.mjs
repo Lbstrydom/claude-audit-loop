@@ -57,6 +57,7 @@ function parseArgs(argv) {
   const args = {
     local: false, remote: false, surface: 'both', skills: null,
     force: false, dryRun: false, target: null,
+    keepGithubSkills: false,
   };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
@@ -67,6 +68,7 @@ function parseArgs(argv) {
       case '--force': args.force = true; break;
       case '--dry-run': args.dryRun = true; break;
       case '--target': case '--repo-root': args.target = path.resolve(argv[++i]); break;
+      case '--keep-github-skills': args.keepGithubSkills = true; break;
     }
   }
   if (!args.local && !args.remote) {
@@ -172,6 +174,20 @@ function main() {
   }
   console.log(`  Skills: ${availableSkills.join(', ')}`);
 
+  // Phase 4 deprecation: detect stale `.github/skills/` files at the target
+  // and surface a visible deprecation notice. Files are NOT auto-deleted —
+  // operators remove them once they confirm nothing else reads them.
+  const staleGithubSkills = path.join(repoRoot, '.github', 'skills');
+  if (!args.keepGithubSkills && fs.existsSync(staleGithubSkills)) {
+    process.stderr.write(
+      `${Y}[install] DEPRECATION:${X} .github/skills/ is no longer maintained ` +
+      '(no documented tool reads it).\n' +
+      `  Existing files at ${path.relative(repoRoot, staleGithubSkills)} are not deleted by this install.\n` +
+      '  To preserve them and keep installing into that path, pass --keep-github-skills.\n' +
+      '  Once confirmed unused, delete the directory manually.\n',
+    );
+  }
+
   // ── Build write list (per-file, per-surface) ─────────────────────────────
   const writes = [];
   const managedFiles = [];
@@ -180,7 +196,15 @@ function main() {
     const meta = manifest.skills[skillName];
     const skillSrcDir = path.resolve('skills', skillName);
     const files = expandSkillFiles(skillName, meta);
-    const surfaces = resolveSkillFiles(skillName, args.surface, repoRoot, files);
+    let surfaces = resolveSkillFiles(skillName, args.surface, repoRoot, files);
+
+    // Phase 4 deprecation: skip `.github/skills/<name>/` mirror unless the
+    // operator explicitly opted into the legacy behaviour. The Copilot
+    // surface remains supported via the `.github/copilot-instructions.md`
+    // managed block and `.github/prompts/*.prompt.md` shims (Phase 3).
+    if (!args.keepGithubSkills) {
+      surfaces = surfaces.filter(t => t.surface !== 'copilot');
+    }
 
     for (const t of surfaces) {
       const srcPath = path.join(skillSrcDir, t.relPath);

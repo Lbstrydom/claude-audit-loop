@@ -1,0 +1,398 @@
+#!/usr/bin/env node
+/**
+ * @fileoverview Drift detector for AGENTS.md ↔ CLAUDE.md alignment.
+ *
+ * Enforces the canonical relationship: AGENTS.md is shared project context;
+ * CLAUDE.md is a slim addendum that imports AGENTS.md and contains only
+ * Claude-specific notes (allowlisted h2 headings).
+ *
+ * Rules:
+ *   ctx/missing-import          HIGH    CLAUDE.md doesn't @import AGENTS.md
+ *   ctx/non-allowlist-heading   HIGH    CLAUDE.md h2 not in allowlist
+ *   ctx/shared-section-drift    HIGH    Same h2 in both files, bodies differ
+ *   ctx/oversized-claude-md     MEDIUM  CLAUDE.md exceeds maxClaudeMdLines
+ *
+ * Exit codes:
+ *   0  No findings
+ *   1  HIGH findings (or any findings under --strict)
+ *   2  MEDIUM findings only (without --strict)
+ *
+ * Config: optional `.claude-context-allowlist.json` at repo root:
+ *   { "allowlist": ["Custom Heading", ...], "maxClaudeMdLines": 100 }
+ *
+ * @module scripts/check-context-drift
+ */
+
+import 'dotenv/config';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { z } from 'zod';
+
+import { scanInstructionFiles } from './lib/claudemd/file-scanner.mjs';
+import { toSarif } from './lib/claudemd/sarif-formatter.mjs';
+
+// ── Config schema ───────────────────────────────────────────────────────────
+
+const ConfigSchema = z.object({
+  allowlist: z.array(z.string().min(1)).optional(),
+  maxClaudeMdLines: z.number().int().positive().optional(),
+}).strict();
+
+// ── Defaults ────────────────────────────────────────────────────────────────
+
+const DEFAULT_ALLOWLIST = [
+  'Claude Code-only Notes',
+  'Claude-only Notes',
+  'Slash Commands',
+  'Hooks',
+  'Local Overrides',
+  'Memory',
+  'Memory & the `#`-key',
+];
+
+const DEFAULT_MAX_CLAUDE_MD_LINES = 80;
+
+// ── Config loader ───────────────────────────────────────────────────────────
+
+/**
+ * Load + validate the optional `.claude-context-allowlist.json` config.
+ * In strict mode, throws on validation errors so CI fails fast. In non-strict
+ * mode, warns and falls back to defaults so local exploration is forgiving.
+ */
+function loadConfig(repoRoot, { strict = false } = {}) {
+  const defaults = {
+    allowlist: DEFAULT_ALLOWLIST,
+    maxClaudeMdLines: DEFAULT_MAX_CLAUDE_MD_LINES,
+  };
+  const cfgPath = path.join(repoRoot, '.claude-context-allowlist.json');
+  if (!fs.existsSync(cfgPath)) return defaults;
+
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+  } catch (err) {
+    const msg = `Failed to parse ${cfgPath}: ${err.message}`;
+    if (strict) throw new Error(msg);
+    process.stderr.write(`[check-context-drift] WARN: ${msg} — using defaults\n`);
+    return defaults;
+  }
+
+  const parsed = ConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map(i => `  ${i.path.join('.')}: ${i.message}`).join('\n');
+    const msg = `Invalid config at ${cfgPath}:\n${issues}`;
+    if (strict) throw new Error(msg);
+    process.stderr.write(`[check-context-drift] WARN: ${msg}\n  using defaults\n`);
+    return defaults;
+  }
+
+  return {
+    allowlist: parsed.data.allowlist ?? DEFAULT_ALLOWLIST,
+    maxClaudeMdLines: parsed.data.maxClaudeMdLines ?? DEFAULT_MAX_CLAUDE_MD_LINES,
+  };
+}
+
+// ── Markdown parsing ────────────────────────────────────────────────────────
+
+/**
+ * Track whether the current line is inside a fenced code block, following
+ * CommonMark rules: opening fence is N>=3 backticks or tildes; closing
+ * fence must use the SAME character AND have length >= the opening fence.
+ * This means a block opened with ```` (4 backticks) is not closed by ```
+ * (3 backticks) — the latter is treated as content inside the block.
+ *
+ * Returns an updater that takes a line and returns whether that line is
+ * either inside a fence or is a fence delimiter (i.e. not a heading).
+ */
+function makeFenceTracker() {
+  let inFence = false;
+  let marker = null;
+  let openLength = 0;
+  return function update(line) {
+    const m = /^\s*(```+|~~~+)/.exec(line);
+    if (!m) return inFence;
+    const fenceStr = m[1];
+    const ch = fenceStr[0];
+    const len = fenceStr.length;
+    if (!inFence) {
+      inFence = true;
+      marker = ch;
+      openLength = len;
+      return true;
+    }
+    // Closing requires same char AND length >= open length.
+    if (ch === marker && len >= openLength) {
+      inFence = false;
+      marker = null;
+      openLength = 0;
+    }
+    return true; // line is a fence delimiter or inside a fence — not a heading
+  };
+}
+
+/**
+ * Extract h2 sections from markdown content. Fence-aware: skips heading
+ * detection inside fenced code blocks (``` or ~~~) so that markdown
+ * containing example headings doesn't confuse the parser.
+ * @param {string} content
+ * @returns {Array<{heading: string, body: string[], line: number}>}
+ */
+export function extractH2Sections(content) {
+  const lines = content.split('\n');
+  const sections = [];
+  const isFenced = makeFenceTracker();
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isFenced(line)) {
+      if (current) current.body.push(line);
+      continue;
+    }
+    const m = /^## (.+?)\s*$/.exec(line);
+    if (m) {
+      if (current) sections.push(current);
+      current = { heading: m[1].trim(), body: [], line: i + 1 };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current) sections.push(current);
+  return sections;
+}
+
+/**
+ * Whitespace-tolerant body comparison: collapses runs of whitespace and
+ * drops empty lines before comparing.
+ */
+export function bodiesEqual(a, b) {
+  const norm = lines => lines.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
+  return norm(a) === norm(b);
+}
+
+/**
+ * Check if CLAUDE.md imports AGENTS.md within the first 30 lines (covers
+ * comment-led intros). Accepts `@./AGENTS.md`, `@AGENTS.md`, `@/AGENTS.md`.
+ */
+export function hasAgentsImport(content) {
+  const lines = content.split('\n').slice(0, 30);
+  return lines.some(line => /^\s*@\.?\/?AGENTS\.md\b/.test(line));
+}
+
+// ── Check rules ─────────────────────────────────────────────────────────────
+
+function checkPair(agentsPath, claudePath, agentsContent, claudeContent, config) {
+  const findings = [];
+  const claudeLines = claudeContent.split('\n');
+
+  // Check 1: import
+  if (!hasAgentsImport(claudeContent)) {
+    findings.push({
+      ruleId: 'ctx/missing-import',
+      severity: 'error',
+      file: claudePath,
+      line: 1,
+      message: 'CLAUDE.md must contain @./AGENTS.md (or @AGENTS.md) within the first 30 lines. ' +
+               'Without the import, Claude reads only the slim addendum and misses shared context.',
+      semanticId: hashId(claudePath, 'missing-import'),
+    });
+  }
+
+  // Check 2: allowlist
+  const claudeSections = extractH2Sections(claudeContent);
+  for (const section of claudeSections) {
+    if (!config.allowlist.includes(section.heading)) {
+      findings.push({
+        ruleId: 'ctx/non-allowlist-heading',
+        severity: 'error',
+        file: claudePath,
+        line: section.line,
+        message: `CLAUDE.md has h2 heading "${section.heading}" which is not in the Claude-only allowlist. ` +
+                 'Move shared content to AGENTS.md, or add this heading to .claude-context-allowlist.json.',
+        semanticId: hashId(claudePath, `non-allowlist:${section.heading}`),
+      });
+    }
+  }
+
+  // Check 3: size
+  if (claudeLines.length > config.maxClaudeMdLines) {
+    findings.push({
+      ruleId: 'ctx/oversized-claude-md',
+      severity: 'warn',
+      file: claudePath,
+      line: claudeLines.length,
+      message: `CLAUDE.md is ${claudeLines.length} lines, exceeding the ${config.maxClaudeMdLines}-line cap for Claude-only addenda. ` +
+               'Move shared content to AGENTS.md.',
+      semanticId: hashId(claudePath, 'oversized'),
+    });
+  }
+
+  // Check 4: shared-section drift
+  const agentsSections = extractH2Sections(agentsContent);
+  const agentsByHeading = new Map(agentsSections.map(s => [s.heading, s]));
+  for (const claudeSection of claudeSections) {
+    const agentsSection = agentsByHeading.get(claudeSection.heading);
+    if (agentsSection && !bodiesEqual(claudeSection.body, agentsSection.body)) {
+      findings.push({
+        ruleId: 'ctx/shared-section-drift',
+        severity: 'error',
+        file: claudePath,
+        line: claudeSection.line,
+        message: `CLAUDE.md and AGENTS.md both contain "## ${claudeSection.heading}" but bodies differ. ` +
+                 'Pick a canonical home (AGENTS.md preferred for shared content) and remove the duplicate.',
+        semanticId: hashId(claudePath, `drift:${claudeSection.heading}`),
+      });
+    }
+  }
+
+  return findings;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function hashId(file, key) {
+  return crypto.createHash('sha256').update(`${file}|${key}`).digest('hex').slice(0, 16);
+}
+
+/**
+ * Group instruction files by directory and pair AGENTS.md ↔ CLAUDE.md
+ * within the same directory.
+ */
+export function findPairs(files) {
+  const byDir = new Map();
+  for (const f of files) {
+    const baseName = path.basename(f.path);
+    if (baseName !== 'AGENTS.md' && baseName !== 'CLAUDE.md') continue;
+    const dir = path.dirname(f.path) || '.';
+    if (!byDir.has(dir)) byDir.set(dir, {});
+    byDir.get(dir)[baseName] = f;
+  }
+  const pairs = [];
+  for (const [dir, entry] of byDir.entries()) {
+    pairs.push({
+      dir,
+      agents: entry['AGENTS.md'] || null,
+      claude: entry['CLAUDE.md'] || null,
+    });
+  }
+  return pairs;
+}
+
+/**
+ * Run all drift checks. Exposed for testing.
+ * @param {string} repoRoot
+ * @param {{strict?: boolean}} [opts] - In strict mode, config validation
+ *   errors throw rather than warn.
+ * @returns {{findings: Array}} report
+ */
+export function runDriftCheck(repoRoot, opts = {}) {
+  const config = loadConfig(repoRoot, { strict: !!opts.strict });
+  const { files } = scanInstructionFiles(repoRoot);
+  const pairs = findPairs(files);
+
+  const findings = [];
+  for (const pair of pairs) {
+    if (pair.agents && pair.claude) {
+      findings.push(...checkPair(
+        pair.agents.path, pair.claude.path,
+        pair.agents.content, pair.claude.content,
+        config,
+      ));
+    }
+    // If only one file exists, no drift to detect — single-file repo is fine.
+  }
+  return { findings };
+}
+
+// ── CLI ─────────────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const args = { format: 'text', strict: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--repo') args.repo = argv[++i];
+    else if (a === '--format') args.format = argv[++i];
+    else if (a === '--strict') args.strict = true;
+    else if (a === '--help' || a === '-h') { showHelp(); process.exit(0); }
+    else { process.stderr.write(`Unknown arg: ${a}\n`); process.exit(2); }
+  }
+  if (!['text', 'json', 'sarif'].includes(args.format)) {
+    process.stderr.write(`Invalid --format: ${args.format} (expected text|json|sarif)\n`);
+    process.exit(2);
+  }
+  return args;
+}
+
+function showHelp() {
+  process.stdout.write(`Usage: node scripts/check-context-drift.mjs [options]
+
+Detects drift between AGENTS.md and CLAUDE.md within a repo. Enforces:
+  - CLAUDE.md imports AGENTS.md (@./AGENTS.md)
+  - CLAUDE.md h2 headings only from Claude-only allowlist
+  - CLAUDE.md size cap (default 80 lines)
+  - Shared section bodies match between AGENTS.md and CLAUDE.md
+
+Options:
+  --repo <path>      Repo root (default: cwd)
+  --format <fmt>     text (default) | json | sarif
+  --strict           Exit non-zero on MEDIUM findings too
+  -h, --help         Show this help
+
+Config: .claude-context-allowlist.json (optional) at repo root:
+  { "allowlist": ["Custom Heading", ...], "maxClaudeMdLines": 100 }
+`);
+}
+
+function emitOutput(findings, format) {
+  if (format === 'json') {
+    process.stdout.write(JSON.stringify({ findings }, null, 2) + '\n');
+    return;
+  }
+  if (format === 'sarif') {
+    process.stdout.write(JSON.stringify(toSarif({ findings }), null, 2) + '\n');
+    return;
+  }
+  if (findings.length === 0) {
+    process.stdout.write('OK  No context drift detected.\n');
+    return;
+  }
+  const high = findings.filter(f => f.severity === 'error');
+  const med = findings.filter(f => f.severity === 'warn');
+  process.stdout.write('Context drift report\n');
+  process.stdout.write('====================\n');
+  process.stdout.write(`HIGH: ${high.length}  MEDIUM: ${med.length}\n\n`);
+  for (const f of findings) {
+    const sev = f.severity === 'error' ? 'HIGH' : 'MEDIUM';
+    process.stdout.write(`[${sev}] ${f.ruleId} — ${f.file}:${f.line ?? '?'}\n`);
+    process.stdout.write(`  ${f.message}\n\n`);
+  }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const repoRoot = path.resolve(args.repo || '.');
+  const report = runDriftCheck(repoRoot, { strict: args.strict });
+  emitOutput(report.findings, args.format);
+
+  const high = report.findings.filter(f => f.severity === 'error').length;
+  const med = report.findings.filter(f => f.severity === 'warn').length;
+  if (high > 0) process.exit(1);
+  if (med > 0) process.exit(args.strict ? 1 : 2);
+  process.exit(0);
+}
+
+// Run only when invoked as a script (Windows-safe — match by basename).
+const invokedDirectly = (() => {
+  try {
+    const metaPath = new URL(import.meta.url).pathname.toLowerCase();
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname.toLowerCase() : '';
+    return metaPath.endsWith('/check-context-drift.mjs') && argvPath.endsWith('/check-context-drift.mjs');
+  } catch { return false; }
+})();
+
+if (invokedDirectly) {
+  main().catch(err => {
+    process.stderr.write(`Error: ${err.message}\n${err.stack}\n`);
+    process.exit(99);
+  });
+}

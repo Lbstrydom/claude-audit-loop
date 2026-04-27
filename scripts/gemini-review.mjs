@@ -26,6 +26,7 @@ import { readFileOrDie, readFilesAsContext, extractPlanPaths, writeOutput, isAud
 import { semanticId, formatFindings, appendOutcome, FalsePositiveTracker } from './lib/findings.mjs';
 import { readProjectContext, initAuditBrief, generateRepoProfile } from './lib/context.mjs';
 import { geminiConfig, claudeConfig } from './lib/config.mjs';
+import { refreshModelCatalog, resolveModel } from './lib/model-resolver.mjs';
 import { PromptBandit } from './bandit.mjs';
 import { getActivePrompt, getActiveRevisionId, bootstrapFromConstants } from './lib/prompt-registry.mjs';
 // NOTE: lib/llm-wrappers.mjs provides shared wrappers for learning/refinement/evolution paths.
@@ -638,6 +639,19 @@ function formatReviewResult(result, usage, latencyMs, provider) {
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Live-catalog refresh (see openai-audit.mjs for rationale).
+  if (process.env.MODEL_CATALOG_REFRESH !== 'skip') {
+    try { await refreshModelCatalog(); } catch { /* silent */ }
+    try {
+      const liveResolution = resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro', { silent: true });
+      if (liveResolution !== MODEL) {
+        process.stderr.write(
+          `  [startup] Live catalog suggests "${liveResolution}" but session uses "${MODEL}" — restart to apply.\n`
+        );
+      }
+    } catch { /* ignore */ }
+  }
+
   const args = process.argv.slice(2);
   const mode = args[0];
 

@@ -267,6 +267,20 @@ export function _resetCatalogCache() {
   _remapWarned.clear();
 }
 
+/**
+ * Read the live catalog for a provider (populated by `refreshModelCatalog`).
+ * Returns an empty array if the cache is empty or stale. Used by the
+ * model-freshness checker to compare live vs STATIC_POOL.
+ * @param {'openai'|'anthropic'|'google'} provider
+ * @returns {string[]}
+ */
+export function getLiveCatalog(provider) {
+  const entry = CATALOG_CACHE[provider];
+  if (!entry) return [];
+  if ((Date.now() - entry.fetchedAt) >= TTL_MS) return [];
+  return entry.ids.slice();
+}
+
 // ── Live catalog fetcher ────────────────────────────────────────────────────
 // Each fetch has its own short timeout. Failures degrade gracefully to static.
 // Empty API key → silently return empty pool (never throw).
