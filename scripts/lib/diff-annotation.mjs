@@ -8,8 +8,8 @@
  * @module scripts/lib/diff-annotation
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import { normalizePath } from './file-io.mjs';
 import { safeReadFile } from './audit-scope.mjs';
 
@@ -49,8 +49,8 @@ export function parseDiffFile(diffPath) {
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
     if (hunkMatch && currentFile) {
       diffMap.get(currentFile).hunks.push({
-        startLine: parseInt(hunkMatch[1], 10),
-        lineCount: parseInt(hunkMatch[2] || '1', 10)
+        startLine: Number.parseInt(hunkMatch[1], 10),
+        lineCount: Number.parseInt(hunkMatch[2] || '1', 10)
       });
     }
   }

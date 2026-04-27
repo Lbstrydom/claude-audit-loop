@@ -123,22 +123,22 @@ function fileShaShort(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 12);
 }
 
-function main() {
-  const args = parseArgs(process.argv);
-  const repoRoot = args.target || findRepoRoot();
+// ── main() helpers — keep main() under cognitive-complexity 15 ────────────
 
-  if (args.target) {
-    if (!fs.existsSync(args.target)) {
-      console.error(`${R}Error${X}: target directory does not exist: ${args.target}`);
-      process.exit(1);
-    }
-    const hasGit = fs.existsSync(path.join(args.target, '.git'));
-    const hasPkg = fs.existsSync(path.join(args.target, 'package.json'));
-    if (!hasGit && !hasPkg) {
-      console.error(`${Y}Warning${X}: target has no .git or package.json — are you sure this is a repo?`);
-    }
+function validateTarget(args) {
+  if (!args.target) return;
+  if (!fs.existsSync(args.target)) {
+    console.error(`${R}Error${X}: target directory does not exist: ${args.target}`);
+    process.exit(1);
   }
+  const hasGit = fs.existsSync(path.join(args.target, '.git'));
+  const hasPkg = fs.existsSync(path.join(args.target, 'package.json'));
+  if (!hasGit && !hasPkg) {
+    console.error(`${Y}Warning${X}: target has no .git or package.json — are you sure this is a repo?`);
+  }
+}
 
+function printBanner(args, repoRoot) {
   console.log(`${B}Engineering Skills Installer${X}`);
   console.log(`  Mode: ${args.local ? 'local' : 'remote'}`);
   console.log(`  Surface: ${args.surface}`);
@@ -146,10 +146,9 @@ function main() {
   if (args.target) console.log(`  ${D}(cross-repo install from ${process.cwd()})${X}`);
   if (args.dryRun) console.log(`  ${Y}DRY RUN — no files will be written${X}`);
   console.log('');
+}
 
-  // Crash recovery — reconcile any leftover journal before starting
-  const globalReceiptPath = receiptPath('global', repoRoot);
-  const repoReceiptPath = receiptPath('repo', repoRoot);
+function reconcileJournals(repoRoot, globalReceiptPath) {
   for (const journalBase of [repoRoot, path.dirname(globalReceiptPath)]) {
     const jp = path.join(journalBase, '.audit-loop-install-txn.json');
     const rec = recoverFromJournal(jp);
@@ -157,6 +156,115 @@ function main() {
       console.log(`  ${Y}Journal recovered${X} (${jp}): rolled-forward=${rec.rolledForward} rolled-back=${rec.rolledBack}`);
     }
   }
+}
+
+function maybeWarnGithubSkillsDeprecation(args, repoRoot) {
+  const stale = path.join(repoRoot, '.github', 'skills');
+  if (args.keepGithubSkills || !fs.existsSync(stale)) return;
+  process.stderr.write(
+    `${Y}[install] DEPRECATION:${X} .github/skills/ is no longer maintained ` +
+    '(no documented tool reads it).\n' +
+    `  Existing files at ${path.relative(repoRoot, stale)} are not deleted by this install.\n` +
+    '  To preserve them and keep installing into that path, pass --keep-github-skills.\n' +
+    '  Once confirmed unused, delete the directory manually.\n',
+  );
+}
+
+function buildSkillWrites(skillName, meta, args, repoRoot) {
+  const skillSrcDir = path.resolve('skills', skillName);
+  const files = expandSkillFiles(skillName, meta);
+  let surfaces = resolveSkillFiles(skillName, args.surface, repoRoot, files);
+  if (!args.keepGithubSkills) surfaces = surfaces.filter(t => t.surface !== 'copilot');
+  const writes = [];
+  const managedFiles = [];
+  for (const t of surfaces) {
+    const srcPath = path.join(skillSrcDir, t.relPath);
+    if (!fs.existsSync(srcPath)) {
+      console.error(`${R}Error${X}: source file missing for ${skillName}: ${t.relPath}`);
+      process.exit(1);
+    }
+    const content = fs.readFileSync(srcPath);
+    const sha = fileShaShort(content);
+    const manifestFile = files.find(f => f.relPath === t.relPath);
+    if (manifestFile && sha !== manifestFile.sha) {
+      console.error(
+        `${R}Error${X}: SHA mismatch for ${skillName}/${t.relPath} ` +
+        `(manifest: ${manifestFile.sha}, actual: ${sha}). Run: node scripts/build-manifest.mjs`,
+      );
+      process.exit(1);
+    }
+    const recordPath = t.scope === 'global'
+      ? t.filePath
+      : path.relative(repoRoot, t.filePath).replaceAll(/\\/g, '/');
+    writes.push({ path: recordPath, absPath: t.filePath, content, sha, scope: t.scope });
+    managedFiles.push({ path: recordPath, sha, skill: skillName, scope: t.scope });
+  }
+  return { writes, managedFiles };
+}
+
+function buildCopilotMergeWrite(args, repoRoot) {
+  if (args.surface !== 'copilot' && args.surface !== 'both') return null;
+  const copilotPath = path.join(repoRoot, '.github', 'copilot-instructions.md');
+  const existing = fs.existsSync(copilotPath) ? fs.readFileSync(copilotPath, 'utf-8') : null;
+  const merged = mergeBlock(existing);
+  const mergedBuf = Buffer.from(merged, 'utf-8');
+  const mergedSha = fileShaShort(mergedBuf);
+  const blockSha = crypto.createHash('sha256').update(COPILOT_BLOCK).digest('hex').slice(0, 12);
+  const recordPath = path.relative(repoRoot, copilotPath).replaceAll(/\\/g, '/');
+  return {
+    write: { path: recordPath, absPath: copilotPath, content: mergedBuf, sha: mergedSha, scope: 'repo' },
+    managed: { path: recordPath, sha: mergedSha, blockSha, skill: null, merged: true, scope: 'repo' },
+  };
+}
+
+function computeDeletes(writes, prevGlobalReceipt, prevRepoReceipt, repoRoot) {
+  const newAbsPaths = new Set(writes.map(w => w.absPath));
+  const deletes = [];
+  for (const prev of [prevGlobalReceipt, prevRepoReceipt]) {
+    if (!prev?.managedFiles) continue;
+    for (const mf of prev.managedFiles) {
+      const prevAbsPath = mf.scope === 'global' ? mf.path : path.join(repoRoot, mf.path);
+      if (!newAbsPaths.has(prevAbsPath)) deletes.push({ absPath: prevAbsPath, expectedSha: mf.sha });
+    }
+  }
+  return deletes;
+}
+
+function checkConflicts(writes, prevGlobalReceipt, prevRepoReceipt, args) {
+  const { safe, conflicts } = detectConflicts(writes, prevRepoReceipt, { force: args.force });
+  const { safe: safeGlobal, conflicts: conflictsGlobal } = detectConflicts(
+    writes.filter(w => w.scope === 'global'),
+    prevGlobalReceipt, { force: args.force },
+  );
+  const allConflicts = [
+    ...conflicts.filter(c => writes.find(w => w.path === c.path)?.scope !== 'global'),
+    ...conflictsGlobal,
+  ];
+  const allSafe = [...safe.filter(s => s.scope !== 'global'), ...safeGlobal];
+  return { allSafe, allConflicts };
+}
+
+function writeReceiptsByScope(managedFiles, manifest, args, repoReceiptPath, globalReceiptPath) {
+  const { global: globalManaged, repo: repoManaged } = partitionManagedFilesByScope(managedFiles);
+  const buildOpts = {
+    bundleVersion: manifest.bundleVersion,
+    sourceUrl: manifest.rawUrlBase,
+    surface: args.surface,
+  };
+  if (repoManaged.length > 0) writeReceipt(repoReceiptPath, buildReceipt({ ...buildOpts, managedFiles: repoManaged }));
+  if (globalManaged.length > 0) writeReceipt(globalReceiptPath, buildReceipt({ ...buildOpts, managedFiles: globalManaged }));
+  return { repoManaged, globalManaged };
+}
+
+function main() {
+  const args = parseArgs(process.argv);
+  const repoRoot = args.target || findRepoRoot();
+  validateTarget(args);
+  printBanner(args, repoRoot);
+
+  const globalReceiptPath = receiptPath('global', repoRoot);
+  const repoReceiptPath = receiptPath('repo', repoRoot);
+  reconcileJournals(repoRoot, globalReceiptPath);
 
   if (!args.local) {
     console.error(`${R}Error${X}: --remote mode not implemented yet (Phase F follow-up)`);
@@ -174,112 +282,26 @@ function main() {
   }
   console.log(`  Skills: ${availableSkills.join(', ')}`);
 
-  // Phase 4 deprecation: detect stale `.github/skills/` files at the target
-  // and surface a visible deprecation notice. Files are NOT auto-deleted —
-  // operators remove them once they confirm nothing else reads them.
-  const staleGithubSkills = path.join(repoRoot, '.github', 'skills');
-  if (!args.keepGithubSkills && fs.existsSync(staleGithubSkills)) {
-    process.stderr.write(
-      `${Y}[install] DEPRECATION:${X} .github/skills/ is no longer maintained ` +
-      '(no documented tool reads it).\n' +
-      `  Existing files at ${path.relative(repoRoot, staleGithubSkills)} are not deleted by this install.\n` +
-      '  To preserve them and keep installing into that path, pass --keep-github-skills.\n' +
-      '  Once confirmed unused, delete the directory manually.\n',
-    );
-  }
+  maybeWarnGithubSkillsDeprecation(args, repoRoot);
 
-  // ── Build write list (per-file, per-surface) ─────────────────────────────
+  // Build write list from skills + Copilot merge
   const writes = [];
   const managedFiles = [];
-
   for (const skillName of availableSkills) {
-    const meta = manifest.skills[skillName];
-    const skillSrcDir = path.resolve('skills', skillName);
-    const files = expandSkillFiles(skillName, meta);
-    let surfaces = resolveSkillFiles(skillName, args.surface, repoRoot, files);
-
-    // Phase 4 deprecation: skip `.github/skills/<name>/` mirror unless the
-    // operator explicitly opted into the legacy behaviour. The Copilot
-    // surface remains supported via the `.github/copilot-instructions.md`
-    // managed block and `.github/prompts/*.prompt.md` shims (Phase 3).
-    if (!args.keepGithubSkills) {
-      surfaces = surfaces.filter(t => t.surface !== 'copilot');
-    }
-
-    for (const t of surfaces) {
-      const srcPath = path.join(skillSrcDir, t.relPath);
-      if (!fs.existsSync(srcPath)) {
-        console.error(`${R}Error${X}: source file missing for ${skillName}: ${t.relPath}`);
-        process.exit(1);
-      }
-      const content = fs.readFileSync(srcPath);
-      const sha = fileShaShort(content);
-
-      // Verify SHA matches manifest (per-file validation)
-      const manifestFile = files.find(f => f.relPath === t.relPath);
-      if (manifestFile && sha !== manifestFile.sha) {
-        console.error(
-          `${R}Error${X}: SHA mismatch for ${skillName}/${t.relPath} ` +
-          `(manifest: ${manifestFile.sha}, actual: ${sha}). Run: node scripts/build-manifest.mjs`,
-        );
-        process.exit(1);
-      }
-
-      const recordPath = t.scope === 'global'
-        ? t.filePath            // absolute path for global receipt (G2 fix)
-        : path.relative(repoRoot, t.filePath).replace(/\\/g, '/');
-      writes.push({ path: recordPath, absPath: t.filePath, content, sha, scope: t.scope });
-      managedFiles.push({ path: recordPath, sha, skill: skillName, scope: t.scope });
-    }
+    const { writes: sw, managedFiles: sm } = buildSkillWrites(skillName, manifest.skills[skillName], args, repoRoot);
+    writes.push(...sw);
+    managedFiles.push(...sm);
+  }
+  const copilot = buildCopilotMergeWrite(args, repoRoot);
+  if (copilot) {
+    writes.push(copilot.write);
+    managedFiles.push(copilot.managed);
   }
 
-  // ── Copilot-instructions merge (G3 fix: final-merged SHA, not blockSha) ──
-  if (args.surface === 'copilot' || args.surface === 'both') {
-    const copilotPath = path.join(repoRoot, '.github', 'copilot-instructions.md');
-    const existing = fs.existsSync(copilotPath) ? fs.readFileSync(copilotPath, 'utf-8') : null;
-    const merged = mergeBlock(existing);
-    const mergedBuf = Buffer.from(merged, 'utf-8');
-    const mergedSha = fileShaShort(mergedBuf);
-    const blockSha = crypto.createHash('sha256').update(COPILOT_BLOCK).digest('hex').slice(0, 12);
-
-    const recordPath = path.relative(repoRoot, copilotPath).replace(/\\/g, '/');
-    writes.push({ path: recordPath, absPath: copilotPath, content: mergedBuf, sha: mergedSha, scope: 'repo' });
-    managedFiles.push({
-      path: recordPath,
-      sha: mergedSha,        // G3 fix: SHA of final merged file, matches on-disk SHA
-      blockSha,              // separate metadata for block-update detection
-      skill: null,
-      merged: true,
-      scope: 'repo',
-    });
-  }
-
-  // ── Lifecycle: compute deletes from previous receipts vs new manifest ────
   const { receipt: prevGlobalReceipt } = readReceipt(globalReceiptPath);
   const { receipt: prevRepoReceipt } = readReceipt(repoReceiptPath);
-  const newAbsPaths = new Set(writes.map(w => w.absPath));
-  const deletes = [];
-  for (const prev of [prevGlobalReceipt, prevRepoReceipt]) {
-    if (!prev?.managedFiles) continue;
-    for (const mf of prev.managedFiles) {
-      // scope check: global-receipt entries store absolute paths; repo store relative
-      const prevAbsPath = mf.scope === 'global'
-        ? mf.path
-        : path.join(repoRoot, mf.path);
-      if (!newAbsPaths.has(prevAbsPath)) {
-        deletes.push({ absPath: prevAbsPath, expectedSha: mf.sha });
-      }
-    }
-  }
-
-  // ── Conflict detection ──────────────────────────────────────────────────
-  const { safe, conflicts } = detectConflicts(writes, prevRepoReceipt, { force: args.force });
-  const { safe: safeGlobal, conflicts: conflictsGlobal } = detectConflicts(
-    writes.filter(w => w.scope === 'global'),
-    prevGlobalReceipt, { force: args.force },
-  );
-  const allConflicts = [...conflicts.filter(c => writes.find(w => w.path === c.path)?.scope !== 'global'), ...conflictsGlobal];
-  const allSafe = [...safe.filter(s => s.scope !== 'global'), ...safeGlobal];
+  const deletes = computeDeletes(writes, prevGlobalReceipt, prevRepoReceipt, repoRoot);
+  const { allSafe, allConflicts } = checkConflicts(writes, prevGlobalReceipt, prevRepoReceipt, args);
 
   if (allConflicts.length > 0) {
     console.log(`\n${R}Conflicts detected:${X}`);
@@ -297,7 +319,6 @@ function main() {
     process.exit(0);
   }
 
-  // ── Execute transaction (crash-safe WAL) ────────────────────────────────
   const result = executeTransaction({
     writes: allSafe.map(w => ({ absPath: w.absPath, content: w.content })),
     deletes,
@@ -309,46 +330,18 @@ function main() {
     console.error('All changes have been rolled back.');
     process.exit(1);
   }
-
   for (const skip of result.skippedDeletes) {
     console.log(`  ${Y}○${X} ${skip.absPath}: ${skip.reason}`);
   }
 
-  // ── Write receipts (split by scope — G2 fix) ────────────────────────────
-  const { global: globalManaged, repo: repoManaged } = partitionManagedFilesByScope(managedFiles);
-
-  if (repoManaged.length > 0) {
-    const receipt = buildReceipt({
-      bundleVersion: manifest.bundleVersion,
-      sourceUrl: manifest.rawUrlBase,
-      surface: args.surface,
-      managedFiles: repoManaged,
-    });
-    writeReceipt(repoReceiptPath, receipt);
-  }
-  if (globalManaged.length > 0) {
-    const receipt = buildReceipt({
-      bundleVersion: manifest.bundleVersion,
-      sourceUrl: manifest.rawUrlBase,
-      surface: args.surface,
-      managedFiles: globalManaged,
-    });
-    writeReceipt(globalReceiptPath, receipt);
-  }
-
+  const { repoManaged, globalManaged } = writeReceiptsByScope(managedFiles, manifest, args, repoReceiptPath, globalReceiptPath);
   ensureAuditGitignore(repoRoot, { dryRun: args.dryRun });
-
-  // ── npm deps (shared logic — also used by sync-to-repos.mjs) ────────────
   ensureAuditDeps(repoRoot, { dryRun: args.dryRun });
 
   console.log(`\n${G}Installed ${result.written} files${X}${result.deleted ? `, deleted ${result.deleted}` : ''}`);
   console.log(`  Bundle version: ${manifest.bundleVersion}`);
-  if (repoManaged.length > 0) {
-    console.log(`  Repo receipt: ${path.relative(repoRoot, repoReceiptPath)}`);
-  }
-  if (globalManaged.length > 0) {
-    console.log(`  Global receipt: ${globalReceiptPath}`);
-  }
+  if (repoManaged.length > 0) console.log(`  Repo receipt: ${path.relative(repoRoot, repoReceiptPath)}`);
+  if (globalManaged.length > 0) console.log(`  Global receipt: ${globalReceiptPath}`);
   for (const w of allSafe) console.log(`  ${G}+${X} ${w.path} ${D}(${w.scope})${X}`);
 }
 

@@ -1,8 +1,25 @@
 # Plan: Tech Debt Wave 3 — Lint Modernization + Cognitive-Complexity Sweep
 - **Date**: 2026-04-27
-- **Status**: Draft
+- **Status**: **Complete** (all 5 PRs shipped 2026-04-27)
 - **Author**: Claude + Louis
 - **Trigger**: SonarLint warnings cropped up on every Edit during ai-context-sync + audit-loop-split work. Pre-existing across the repo, not introduced by recent changes. Bundling fixes with feature work would muddy diffs; tracked here as a focused sweep.
+
+## Implementation Log
+
+### 2026-04-27 — All 5 PRs shipped in one session
+
+- **PR 1 — Dead-code removal**: Removed unused imports (`normalizePath`, `isSensitiveFile`, `readFileOrDie`, `estimateTokens`) from `scripts/lib/context.mjs` and unused `fs`/`path` imports from `scripts/refine-prompts.mjs`; removed unused `med` variable in `tests/check-model-freshness.test.mjs`.
+- **PR 2 — Bulk modernization**: 10 files swept to `node:fs` / `node:path` / `node:crypto` / `node:child_process` prefixes; 10+ files swept `parseInt` → `Number.parseInt`; 26 source + test files swept `replace(/x/g, ...)` → `replaceAll(/x/g, ...)`. Pure modernization, zero behavior changes.
+- **PR 3 — `scripts/install-skills.mjs` main()**: Refactored complexity 63 → ≤15 by extracting 8 named helpers (`validateTarget`, `printBanner`, `reconcileJournals`, `maybeWarnGithubSkillsDeprecation`, `buildSkillWrites`, `buildCopilotMergeWrite`, `computeDeletes`, `checkConflicts`, `writeReceiptsByScope`).
+- **PR 4 — `scripts/regenerate-skill-copies.mjs` main()**: Refactored complexity 98 → ≤15 by extracting 8 named helpers (`warnGithubSkillsDeprecation`, `loadSkillsOrDie`, `copyFileIfChanged`, `pruneFilesNotInSource`, `syncSkillToDests`, `pruneOrphanSkillDirs`, `syncCopilotPrompts` + sub-helpers `writePromptFiles`, `pruneStalePrompts`, and `computeVerdict`/`emitVerdict`).
+- **PR 5 — `scripts/gemini-review.mjs` main()**: Refactored complexity 90 → ≤15 by extracting 12 named helpers (`refreshCatalogAndWarn`, `runPingGemini`, `runPingClaude`, `runPing`, `parseReviewArgs`, `selectProvider`, `buildClient`, `isJsonTruncationError`, `runReviewWithRetry`, `applyDebtSuppression`, `addSemanticIds`, `emitReviewOutput`, `recordNewFindings`, `recordWronglyDismissed`, `recordGeminiOutcomes`).
+
+### Verification
+
+- 1126/1127 tests pass throughout (only pre-existing `vendoring-provenance` SHA pin remains).
+- `npm run skills:check` green for 9 skills.
+- `node scripts/regenerate-skill-copies.mjs --check` IN SYNC.
+- All extracted helpers preserve original behavior; refactor is a pure structural improvement.
 
 ---
 

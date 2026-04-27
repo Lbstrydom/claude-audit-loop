@@ -191,7 +191,7 @@ export function parseEslintOutput(stdout) {
         rule = msg.ruleId || 'unknown';
       }
       findings.push({
-        file: file.filePath ? path.relative(process.cwd(), file.filePath).replace(/\\/g, '/') : '',
+        file: file.filePath ? path.relative(process.cwd(), file.filePath).replaceAll(/\\/g, '/') : '',
         line: msg.line || 1,
         endLine: msg.endLine,
         column: msg.column,
@@ -208,7 +208,7 @@ export function parseRuffOutput(stdout) {
   if (!stdout || !stdout.trim()) return [];
   const data = JSON.parse(stdout);
   return data.map(item => ({
-    file: item.filename ? path.relative(process.cwd(), item.filename).replace(/\\/g, '/') : '',
+    file: item.filename ? path.relative(process.cwd(), item.filename).replaceAll(/\\/g, '/') : '',
     line: item.location?.row || 1,
     endLine: item.end_location?.row,
     column: item.location?.column,
@@ -225,9 +225,9 @@ export function parseTscOutput(stdout) {
   let match;
   while ((match = regex.exec(stdout)) !== null) {
     findings.push({
-      file: match[1].replace(/\\/g, '/'),
-      line: parseInt(match[2], 10),
-      column: parseInt(match[3], 10),
+      file: match[1].replaceAll(/\\/g, '/'),
+      line: Number.parseInt(match[2], 10),
+      column: Number.parseInt(match[3], 10),
       rule: match[4],
       message: match[5].trim(),
       fixable: false,
@@ -243,8 +243,8 @@ export function parseFlake8PylintOutput(stdout) {
   let match;
   while ((match = regex.exec(stdout)) !== null) {
     findings.push({
-      file: match[1].replace(/\\/g, '/'),
-      line: parseInt(match[2], 10),
+      file: match[1].replaceAll(/\\/g, '/'),
+      line: Number.parseInt(match[2], 10),
       rule: match[3],
       message: match[4].trim(),
       fixable: false,

@@ -92,7 +92,7 @@ function expandSources(sourcesArg) {
       const dir = path.dirname(p);
       const pattern = path.basename(p);
       const regex = new RegExp(
-        '^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$'
+        '^' + pattern.replaceAll(/\./g, '\\.').replaceAll(/\*/g, '.*') + '$'
       );
       try {
         for (const entry of fs.readdirSync(dir)) {

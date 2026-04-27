@@ -185,7 +185,7 @@ function buildRecord({ sourceFile, phaseTag, findingId, description, note = '', 
     .digest('hex').slice(0, 12);
 
   return {
-    sourceFile: path.relative(process.cwd(), path.resolve(sourceFile)).replace(/\\/g, '/'),
+    sourceFile: path.relative(process.cwd(), path.resolve(sourceFile)).replaceAll(/\\/g, '/'),
     phaseTag,
     findingId,
     description,

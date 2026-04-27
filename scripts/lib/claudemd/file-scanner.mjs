@@ -70,8 +70,8 @@ function walkDir(dir, patterns, excludeDirs) {
 // Simple pattern matching for our known patterns.
 // Supports: exact match, glob-star/name (any directory), dir/wildcard/name (one-level wildcard)
 function matchPattern(filePath, pattern) {
-  const norm = filePath.replace(/\\/g, '/');
-  const pat = pattern.replace(/\\/g, '/');
+  const norm = filePath.replaceAll(/\\/g, '/');
+  const pat = pattern.replaceAll(/\\/g, '/');
 
   if (pat.startsWith('**/')) {
     // Match filename anywhere
@@ -121,7 +121,7 @@ export function scanInstructionFiles(repoRoot, options = {}) {
     try {
       const content = fs.readFileSync(absPath, 'utf-8');
       files.push({
-        path: relPath.replace(/\\/g, '/'),
+        path: relPath.replaceAll(/\\/g, '/'),
         absPath,
         content,
         sizeBytes: Buffer.byteLength(content, 'utf-8'),

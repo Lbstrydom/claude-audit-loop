@@ -6,8 +6,8 @@
  * @module scripts/lib/audit-scope
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 // normalizePath not used directly here but re-exported via file-io.mjs barrel
 
 // ── Sensitive File Filtering ────────────────────────────────────────────────

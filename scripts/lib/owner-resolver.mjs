@@ -95,7 +95,7 @@ export function resolveOwner(filePath, { explicitOwner, rootDir } = {}) {
   if (!entries || entries.length === 0) return undefined;
 
   // Normalize path: codeowners-utils expects forward slashes, no leading slash
-  const normalized = String(filePath).replace(/\\/g, '/').replace(/^\.?\//, '');
+  const normalized = String(filePath).replaceAll(/\\/g, '/').replace(/^\.?\//, '');
   try {
     const match = matchFile(normalized, entries);
     return match?.owners?.[0];

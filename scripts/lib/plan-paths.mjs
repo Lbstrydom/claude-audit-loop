@@ -6,8 +6,8 @@
  * @module scripts/lib/plan-paths
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ALL_EXTENSIONS_PATTERN } from './language-profiles.mjs';
 import { normalizePath } from './file-io.mjs';
 import { isSensitiveFile, isAuditInfraFile } from './audit-scope.mjs';
@@ -105,7 +105,7 @@ function _extractPlanKeywords(planContent) {
   let m;
   while ((m = pascalRegex.exec(planContent)) !== null) {
     keywords.add(m[1].toLowerCase());
-    const parts = m[1].replace(/([A-Z])/g, ' $1').trim().split(/\s+/);
+    const parts = m[1].replaceAll(/([A-Z])/g, ' $1').trim().split(/\s+/);
     for (const part of parts) {
       if (part.length >= 4) keywords.add(part.toLowerCase());
     }
@@ -120,7 +120,7 @@ function _extractPlanKeywords(planContent) {
 
   const headingRegex = /^#{2,4}\s+(.+)$/gm;
   while ((m = headingRegex.exec(planContent)) !== null) {
-    const words = m[1].replace(/[^a-zA-Z\s]/g, '').split(/\s+/);
+    const words = m[1].replaceAll(/[^a-zA-Z\s]/g, '').split(/\s+/);
     for (const w of words) {
       if (w.length >= 4) keywords.add(w.toLowerCase());
     }
@@ -159,7 +159,7 @@ function _scanRepoFiles() {
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
         if (EXT_SET.has(ext) && !isSensitiveFile(entry.name)) {
-          const rel = path.relative(process.cwd(), full).replace(/\\/g, '/');
+          const rel = path.relative(process.cwd(), full).replaceAll(/\\/g, '/');
           if (!isAuditInfraFile(rel)) results.push(rel);
         }
       }

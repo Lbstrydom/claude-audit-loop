@@ -5,9 +5,9 @@
  * fuzzy suppression of re-raised findings, and Round 2+ prompt construction.
  */
 
-import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import lockfile from 'proper-lockfile';
 
 import { normalizePath, atomicWriteFileSync } from './file-io.mjs';
@@ -29,8 +29,8 @@ function getFileRegex() { return buildFileReferenceRegex(); }
  */
 export function generateTopicId(finding) {
   const normFile = normalizePath(finding._primaryFile || finding.section?.split(':')[0] || 'unknown');
-  const normPrinciple = (finding.principle || 'unknown').split('/')[0].split('—')[0].trim().toLowerCase().replace(/\s+/g, '-');
-  const normCategory = (finding.category || 'unknown').replace(/\[.*?\]\s*/g, '').trim().toLowerCase().replace(/\s+/g, '-');
+  const normPrinciple = (finding.principle || 'unknown').split('/')[0].split('—')[0].trim().toLowerCase().replaceAll(/\s+/g, '-');
+  const normCategory = (finding.category || 'unknown').replaceAll(/\[.*?\]\s*/g, '').trim().toLowerCase().replaceAll(/\s+/g, '-');
   const pass = finding._pass || 'unknown';
   // Include semantic hash for disambiguation — prevents collisions when multiple
   // findings share the same file/principle/category/pass combination.
@@ -241,7 +241,7 @@ export function populateFindingMetadata(finding, passName) {
  * @returns {number} Similarity score 0-1
  */
 export function jaccardSimilarity(a, b) {
-  const tokenize = s => new Set((s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean));
+  const tokenize = s => new Set((s || '').toLowerCase().replaceAll(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean));
   const setA = tokenize(a);
   const setB = tokenize(b);
   if (setA.size === 0 && setB.size === 0) return 0;
@@ -296,7 +296,7 @@ export function suppressReRaises(findings, ledger, { changedFiles = [], impactSe
 
   for (const f of findings) {
     // Fix #4: Hard suppress check — category+file ruled overrule 3+ times
-    const fCatFile = `${(f.category || '').toLowerCase().replace(/\[.*?\]\s*/g, '').trim()}|${normalizePath(f._primaryFile || f.section || '')}`;
+    const fCatFile = `${(f.category || '').toLowerCase().replaceAll(/\[.*?\]\s*/g, '').trim()}|${normalizePath(f._primaryFile || f.section || '')}`;
     const overruleCount = overruleCountIndex.get(fCatFile) || 0;
     if (overruleCount >= HARD_SUPPRESS_THRESHOLD) {
       suppressed.push({

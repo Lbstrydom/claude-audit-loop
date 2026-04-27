@@ -638,63 +638,59 @@ function formatReviewResult(result, usage, latencyMs, provider) {
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-async function main() {
-  // Live-catalog refresh (see openai-audit.mjs for rationale).
-  if (process.env.MODEL_CATALOG_REFRESH !== 'skip') {
-    try { await refreshModelCatalog(); } catch { /* silent */ }
-    try {
-      const liveResolution = resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro', { silent: true });
-      if (liveResolution !== MODEL) {
-        process.stderr.write(
-          `  [startup] Live catalog suggests "${liveResolution}" but session uses "${MODEL}" — restart to apply.\n`
-        );
-      }
-    } catch { /* ignore */ }
-  }
+// ── main() helpers — keep main() under cognitive-complexity 15 ────────────
 
-  const args = process.argv.slice(2);
-  const mode = args[0];
-
-  // Ping mode — quick connectivity test
-  if (mode === 'ping') {
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const response = await ai.models.generateContent({
-          model: MODEL,
-          contents: 'Reply with exactly: Gemini ready'
-        });
-        console.log(`✓ ${MODEL}: ${response.text.trim()}`);
-        process.exit(0);
-      } catch (err) {
-        console.error(`✗ ${MODEL}: ${err.message}`);
-        process.exit(1);
-      }
+async function refreshCatalogAndWarn() {
+  if (process.env.MODEL_CATALOG_REFRESH === 'skip') return;
+  try { await refreshModelCatalog(); } catch { /* silent */ }
+  try {
+    const liveResolution = resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro', { silent: true });
+    if (liveResolution !== MODEL) {
+      process.stderr.write(
+        `  [startup] Live catalog suggests "${liveResolution}" but session uses "${MODEL}" — restart to apply.\n`,
+      );
     }
+  } catch { /* ignore */ }
+}
 
-    if (process.env.ANTHROPIC_API_KEY) {
-      try {
-        const { default: Anthropic } = await import('@anthropic-ai/sdk');
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-        const response = await anthropic.messages.create({
-          model: CLAUDE_OPUS_MODEL,
-          max_tokens: 32,
-          messages: [{ role: 'user', content: 'Reply with exactly: Claude ready' }]
-        });
-        const text = response.content?.[0]?.text?.trim() || '';
-        console.log(`✓ ${CLAUDE_OPUS_MODEL}: ${text}`);
-        process.exit(0);
-      } catch (err) {
-        console.error(`✗ ${CLAUDE_OPUS_MODEL}: ${err.message}`);
-        process.exit(1);
-      }
-    }
-
-    console.error('Error: set GEMINI_API_KEY or ANTHROPIC_API_KEY');
+async function runPingGemini() {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({ model: MODEL, contents: 'Reply with exactly: Gemini ready' });
+    console.log(`✓ ${MODEL}: ${response.text.trim()}`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`✗ ${MODEL}: ${err.message}`);
     process.exit(1);
   }
+}
 
-  // Review mode
+async function runPingClaude() {
+  try {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const response = await anthropic.messages.create({
+      model: CLAUDE_OPUS_MODEL,
+      max_tokens: 32,
+      messages: [{ role: 'user', content: 'Reply with exactly: Claude ready' }],
+    });
+    const text = response.content?.[0]?.text?.trim() || '';
+    console.log(`✓ ${CLAUDE_OPUS_MODEL}: ${text}`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`✗ ${CLAUDE_OPUS_MODEL}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+async function runPing() {
+  if (process.env.GEMINI_API_KEY) await runPingGemini();
+  if (process.env.ANTHROPIC_API_KEY) await runPingClaude();
+  console.error('Error: set GEMINI_API_KEY or ANTHROPIC_API_KEY');
+  process.exit(1);
+}
+
+function parseReviewArgs(args) {
   const planFile = args[1];
   const transcriptFile = args[2];
   const jsonMode = args.includes('--json');
@@ -704,227 +700,236 @@ async function main() {
   const providerOverride = providerIdx !== -1 && args[providerIdx + 1] ? args[providerIdx + 1] : null;
   const modeIdx = args.indexOf('--mode');
   const auditMode = modeIdx !== -1 && args[modeIdx + 1] ? args[modeIdx + 1] : 'code';
+  return { planFile, transcriptFile, jsonMode, outFile, providerOverride, auditMode };
+}
 
-  if (mode !== 'review' || !planFile || !transcriptFile) {
-    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>] [--provider gemini|anthropic] [--mode plan|code]');
-    console.error('       node scripts/gemini-review.mjs ping');
-    process.exit(1);
-  }
-
-  if (auditMode !== 'plan' && auditMode !== 'code') {
-    console.error(`Error: --mode must be "plan" or "code", got "${auditMode}"`);
-    process.exit(1);
-  }
-
-  // --provider flag overrides env var auto-detection
-  let provider = null;
+function selectProvider(providerOverride) {
   if (providerOverride === 'anthropic' || providerOverride === 'claude-opus') {
     if (!process.env.ANTHROPIC_API_KEY) {
       console.error('Error: --provider anthropic requires ANTHROPIC_API_KEY');
       process.exit(1);
     }
-    provider = 'claude-opus';
-  } else if (providerOverride === 'gemini') {
+    return 'claude-opus';
+  }
+  if (providerOverride === 'gemini') {
     if (!process.env.GEMINI_API_KEY) {
       console.error('Error: --provider gemini requires GEMINI_API_KEY');
       process.exit(1);
     }
-    provider = 'gemini';
-  } else if (providerOverride) {
+    return 'gemini';
+  }
+  if (providerOverride) {
     console.error(`Error: Unknown provider "${providerOverride}". Use "gemini" or "anthropic".`);
     process.exit(1);
-  } else if (process.env.GEMINI_API_KEY) {
-    // Auto-detect from env vars (existing behavior)
-    provider = 'gemini';
-  } else if (process.env.ANTHROPIC_API_KEY) {
-    provider = 'claude-opus';
   }
-  if (!provider) {
-    console.error('Error: Final review requires GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY');
-    console.error('Set GEMINI_API_KEY for Gemini, or ANTHROPIC_API_KEY for Claude Opus fallback.');
-    console.error('Or use --provider gemini|anthropic to force a specific provider.');
+  if (process.env.GEMINI_API_KEY) return 'gemini';
+  if (process.env.ANTHROPIC_API_KEY) return 'claude-opus';
+  console.error('Error: Final review requires GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY');
+  console.error('Set GEMINI_API_KEY for Gemini, or ANTHROPIC_API_KEY for Claude Opus fallback.');
+  console.error('Or use --provider gemini|anthropic to force a specific provider.');
+  process.exit(1);
+  return null;
+}
+
+async function buildClient(provider) {
+  if (provider === 'gemini') {
+    return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  process.stderr.write(`  [final-review] GEMINI_API_KEY missing; using Claude Opus fallback (${CLAUDE_OPUS_MODEL}).\n`);
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
+
+function isJsonTruncationError(err) {
+  return err.message?.includes('Unterminated string')
+    || err.message?.includes('JSON')
+    || err.message?.includes('parse');
+}
+
+async function runReviewWithRetry(provider, client, planContent, transcriptContent, projectContext, auditMode) {
+  const MAX_ATTEMPTS = 2;
+  let txContent = transcriptContent;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const r = await runFinalReview(provider, client, planContent, txContent, projectContext, auditMode);
+      return { ...r, transcriptContent: txContent };
+    } catch (err) {
+      if (!isJsonTruncationError(err) || attempt >= MAX_ATTEMPTS) throw err;
+      process.stderr.write(`  [final-review] JSON truncation on attempt ${attempt} — retrying with conciseness instruction...\n`);
+      txContent = JSON.stringify({
+        ...JSON.parse(txContent),
+        _retryHint: 'IMPORTANT: Your previous response was truncated. Be MORE CONCISE in all string fields. Keep quality_summary under 500 chars and overall_reasoning under 1500 chars.',
+      });
+    }
+  }
+  throw new Error('unreachable');
+}
+
+async function applyDebtSuppression(result, transcriptContent) {
+  try {
+    const transcriptObj = JSON.parse(transcriptContent);
+    const suppressionCtx = transcriptObj._debtMemory?.suppressionContext
+      || transcriptObj.debt_memory?.suppressionContext
+      || [];
+    if (!Array.isArray(suppressionCtx) || suppressionCtx.length === 0) return;
+    if (!Array.isArray(result.new_findings)) return;
+    const { jaccardSimilarity } = await import('./lib/ledger.mjs');
+    // Threshold 0.30 vs suppressReRaises' 0.35 — debt envelope signatures
+    // (category+section) are shorter than new_findings (which include detail
+    // text), so asymmetric lengths dilute Jaccard.
+    const THRESHOLD = 0.3;
+    const before = result.new_findings.length;
+    const kept = [];
+    const debtSuppressed = [];
+    for (const f of result.new_findings) {
+      const fSig = `${f.category} ${f.section} ${f.detail}`;
+      let match = null;
+      let bestScore = 0;
+      for (const d of suppressionCtx) {
+        const score = jaccardSimilarity(fSig, `${d.category} ${d.section}`);
+        if (score > bestScore) { bestScore = score; match = d; }
+      }
+      if (match && bestScore > THRESHOLD) debtSuppressed.push({ finding: f, matchedTopic: match.topicId, score: bestScore });
+      else kept.push(f);
+    }
+    if (debtSuppressed.length === 0) return;
+    process.stderr.write(`  [final-review] Debt re-suppression: ${debtSuppressed.length}/${before} new_findings matched pre-filtered debt\n`);
+    for (const s of debtSuppressed.slice(0, 3)) {
+      process.stderr.write(`    [debt-suppressed] ${s.matchedTopic.slice(0, 8)} score=${s.score.toFixed(2)}\n`);
+    }
+    result.new_findings = kept;
+    result._debtSuppressedCount = debtSuppressed.length;
+  } catch { /* transcript not JSON or no _debtMemory — skip */ }
+}
+
+function addSemanticIds(result, provider) {
+  if (!result.new_findings) return;
+  for (let i = 0; i < result.new_findings.length; i++) {
+    const f = result.new_findings[i];
+    f.id = `${provider === 'gemini' ? 'G' : 'C'}${i + 1}`;
+    f._hash = semanticId(f);
+    f._source = provider;
+  }
+}
+
+function emitReviewOutput(result, usage, latencyMs, provider, jsonMode, outFile) {
+  if (jsonMode || outFile) {
+    const selectedModel = provider === 'gemini' ? MODEL : CLAUDE_OPUS_MODEL;
+    const data = { ...result, _model: selectedModel, _provider: provider, _usage: usage };
+    if (outFile) {
+      const newCount = result.new_findings?.length ?? 0;
+      const dismissedCount = result.wrongly_dismissed?.length ?? 0;
+      const summaryLine = `Verdict: ${result.verdict} | New: ${newCount} | Wrongly dismissed: ${dismissedCount} | ${(latencyMs / 1000).toFixed(0)}s`;
+      writeOutput(data, outFile, summaryLine);
+    } else {
+      console.log(JSON.stringify(data, null, 2));
+    }
+    return;
+  }
+  console.log(formatReviewResult(result, usage, latencyMs, provider));
+}
+
+function recordNewFindings(result, fpTracker, repoFP, revId) {
+  if (!Array.isArray(result.new_findings)) return;
+  for (const f of result.new_findings) {
+    appendOutcome('.audit/outcomes.jsonl', {
+      findingId: f.id,
+      severity: f.severity,
+      category: f.category,
+      section: f.section,
+      pass: 'gemini-new',
+      model: 'gemini',
+      accepted: null,
+      gemini_reconfirmed: true,
+      round: 0,
+      promptVariant: revId,
+      promptRevisionId: revId,
+      semanticHash: f._hash,
+    });
+    fpTracker.record(f, true, repoFP);
+  }
+}
+
+function recordWronglyDismissed(result, revId) {
+  if (!Array.isArray(result.wrongly_dismissed)) return;
+  for (const w of result.wrongly_dismissed) {
+    appendOutcome('.audit/outcomes.jsonl', {
+      findingId: w.original_finding_id,
+      severity: w.recommended_severity,
+      category: `[wrongly-dismissed] ${w.original_finding_id}`,
+      section: w.reason_claude_was_wrong?.slice(0, 120) || '',
+      pass: 'gemini-wrongly-dismissed',
+      model: 'gemini',
+      accepted: null,
+      gemini_reconfirmed: true,
+      round: 0,
+      promptVariant: revId,
+      promptRevisionId: revId,
+      semanticHash: semanticId({
+        category: w.original_finding_id,
+        section: w.reason_claude_was_wrong || '',
+        detail: '',
+      }),
+    });
+  }
+}
+
+function recordGeminiOutcomes(result) {
+  try {
+    const repoProfile = generateRepoProfile();
+    const repoFP = repoProfile?.repoFingerprint || null;
+    const bandit = new PromptBandit();
+    const fpTracker = new FalsePositiveTracker();
+    const revId = getActiveRevisionId('gemini-review') || 'default';
+    recordNewFindings(result, fpTracker, repoFP, revId);
+    recordWronglyDismissed(result, revId);
+    const VERDICT_REWARDS = { APPROVE: 0.8, CONCERNS: 0.5, CONCERNS_REMAINING: 0.35, REJECT: 0.2 };
+    const verdictReward = VERDICT_REWARDS[result.verdict] ?? 0.5;
+    bandit.update('gemini-review', revId, verdictReward);
+    bandit.flush();
+    fpTracker.flush?.();
+    const newCount = result.new_findings?.length ?? 0;
+    const wrongCount = result.wrongly_dismissed?.length ?? 0;
+    if (newCount > 0 || wrongCount > 0) {
+      process.stderr.write(`  [learning] Recorded ${newCount} new + ${wrongCount} wrongly-dismissed outcomes for gemini-review pass\n`);
+    }
+  } catch (learnErr) {
+    process.stderr.write(`  [learning] ${learnErr.message?.slice(0, 100)}\n`);
+  }
+}
+
+async function main() {
+  await refreshCatalogAndWarn();
+
+  const args = process.argv.slice(2);
+  const mode = args[0];
+  if (mode === 'ping') return runPing();
+
+  const { planFile, transcriptFile, jsonMode, outFile, providerOverride, auditMode } = parseReviewArgs(args);
+  if (mode !== 'review' || !planFile || !transcriptFile) {
+    console.error('Usage: node scripts/gemini-review.mjs review <plan-file> <transcript-file> [--json] [--out <file>] [--provider gemini|anthropic] [--mode plan|code]');
+    console.error('       node scripts/gemini-review.mjs ping');
+    process.exit(1);
+  }
+  if (auditMode !== 'plan' && auditMode !== 'code') {
+    console.error(`Error: --mode must be "plan" or "code", got "${auditMode}"`);
     process.exit(1);
   }
 
+  const provider = selectProvider(providerOverride);
   const planContent = readFileOrDie(planFile);
-  let transcriptContent = readFileOrDie(transcriptFile);
-  await initAuditBrief(); // Pre-generate context brief
+  const transcriptContent = readFileOrDie(transcriptFile);
+  await initAuditBrief();
   const projectContext = readProjectContext();
-  let client;
-  if (provider === 'gemini') {
-    client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  } else {
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    process.stderr.write(`  [final-review] GEMINI_API_KEY missing; using Claude Opus fallback (${CLAUDE_OPUS_MODEL}).\n`);
-  }
+  const client = await buildClient(provider);
 
   try {
-    // Auto-retry on JSON truncation (Gemini verbosity can exceed output limits)
-    let result, usage, latencyMs;
-    const MAX_REVIEW_ATTEMPTS = 2;
-    for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
-      try {
-        ({ result, usage, latencyMs } = await runFinalReview(provider, client, planContent, transcriptContent, projectContext, auditMode));
-        break; // Success
-      } catch (err) {
-        const isTruncation = err.message?.includes('Unterminated string') ||
-          err.message?.includes('JSON') ||
-          err.message?.includes('parse');
-        if (isTruncation && attempt < MAX_REVIEW_ATTEMPTS) {
-          process.stderr.write(`  [final-review] JSON truncation on attempt ${attempt} — retrying with conciseness instruction...\n`);
-          // Append conciseness hint to transcript for retry
-          transcriptContent = JSON.stringify({
-            ...JSON.parse(transcriptContent),
-            _retryHint: 'IMPORTANT: Your previous response was truncated. Be MORE CONCISE in all string fields. Keep quality_summary under 500 chars and overall_reasoning under 1500 chars.'
-          });
-          continue;
-        }
-        throw err;
-      }
-    }
-
-    // Phase D.4 defense-in-depth: re-suppress Gemini new_findings that match
-    // pre-filtered debt topics, even if the reviewer ignored our warning.
-    // Fuzzy match on category+section+detail against the transcript envelope.
-    try {
-      const transcriptObj = JSON.parse(transcriptContent);
-      const suppressionCtx = transcriptObj._debtMemory?.suppressionContext
-        || transcriptObj.debt_memory?.suppressionContext
-        || [];
-      if (Array.isArray(suppressionCtx) && suppressionCtx.length > 0 && Array.isArray(result.new_findings)) {
-        const { jaccardSimilarity } = await import('./lib/ledger.mjs');
-        // Threshold 0.30 (slightly lower than suppressReRaises' 0.35) because
-        // debt envelope signatures are short (category+section) while Gemini's
-        // new_findings include long detail text — asymmetric signature lengths
-        // dilute Jaccard. 0.30 captures real matches without over-suppressing.
-        const THRESHOLD = 0.3;
-        const before = result.new_findings.length;
-        const kept = [];
-        const debtSuppressed = [];
-        for (const f of result.new_findings) {
-          const fSig = `${f.category} ${f.section} ${f.detail}`;
-          let match = null;
-          let bestScore = 0;
-          for (const d of suppressionCtx) {
-            const dSig = `${d.category} ${d.section}`;
-            const score = jaccardSimilarity(fSig, dSig);
-            if (score > bestScore) { bestScore = score; match = d; }
-          }
-          if (match && bestScore > THRESHOLD) {
-            debtSuppressed.push({ finding: f, matchedTopic: match.topicId, score: bestScore });
-          } else {
-            kept.push(f);
-          }
-        }
-        if (debtSuppressed.length > 0) {
-          process.stderr.write(`  [final-review] Debt re-suppression: ${debtSuppressed.length}/${before} new_findings matched pre-filtered debt\n`);
-          for (const s of debtSuppressed.slice(0, 3)) {
-            process.stderr.write(`    [debt-suppressed] ${s.matchedTopic.slice(0, 8)} score=${s.score.toFixed(2)}\n`);
-          }
-          result.new_findings = kept;
-          result._debtSuppressedCount = debtSuppressed.length;
-        }
-      }
-    } catch { /* transcript not JSON or no _debtMemory — skip */ }
-
-    // Add semantic hashes to new findings for cross-model tracking
-    if (result.new_findings) {
-      for (let i = 0; i < result.new_findings.length; i++) {
-        const f = result.new_findings[i];
-        f.id = `${provider === 'gemini' ? 'G' : 'C'}${i + 1}`;
-        f._hash = semanticId(f);
-        f._source = provider;
-      }
-    }
-
-    if (jsonMode || outFile) {
-      const selectedModel = provider === 'gemini' ? MODEL : CLAUDE_OPUS_MODEL;
-      const data = { ...result, _model: selectedModel, _provider: provider, _usage: usage };
-      if (outFile) {
-        const newCount = result.new_findings?.length ?? 0;
-        const dismissedCount = result.wrongly_dismissed?.length ?? 0;
-        const summaryLine = `Verdict: ${result.verdict} | New: ${newCount} | Wrongly dismissed: ${dismissedCount} | ${(latencyMs / 1000).toFixed(0)}s`;
-        writeOutput(data, outFile, summaryLine);
-      } else {
-        console.log(JSON.stringify(data, null, 2));
-      }
-    } else {
-      console.log(formatReviewResult(result, usage, latencyMs, provider));
-    }
-
-    // ── Learning: record Gemini findings as outcomes ──────────────────────
-    // This feeds the bandit, FP tracker, meta-assessment, and prompt refinement
-    // for the 'gemini-review' pass — same pipeline as GPT audit passes.
-    try {
-      const repoProfile = generateRepoProfile();
-      const repoFP = repoProfile?.repoFingerprint || null;
-      const bandit = new PromptBandit();
-      const fpTracker = new FalsePositiveTracker();
-      const revId = getActiveRevisionId('gemini-review') || 'default';
-
-      // Record new_findings as outcomes (pre-triage — accepted is null).
-      // Separate claude_accepted / gemini_reconfirmed fields enable independent
-      // accuracy tracking without circular bias (M6 fix).
-      if (Array.isArray(result.new_findings)) {
-        for (const f of result.new_findings) {
-          appendOutcome('.audit/outcomes.jsonl', {
-            findingId: f.id,
-            severity: f.severity,
-            category: f.category,
-            section: f.section,
-            pass: 'gemini-new',
-            model: 'gemini',
-            accepted: null, // Pre-triage: outcome-sync writes actual result after deliberation
-            gemini_reconfirmed: true, // Gemini raised it — considers it valid
-            round: 0,
-            promptVariant: revId,
-            promptRevisionId: revId,
-            semanticHash: f._hash,
-          });
-          fpTracker.record(f, true, repoFP);
-        }
-      }
-
-      // Record wrongly_dismissed as high-signal outcomes (Gemini caught what GPT missed)
-      if (Array.isArray(result.wrongly_dismissed)) {
-        for (const w of result.wrongly_dismissed) {
-          appendOutcome('.audit/outcomes.jsonl', {
-            findingId: w.original_finding_id,
-            severity: w.recommended_severity,
-            category: `[wrongly-dismissed] ${w.original_finding_id}`,
-            section: w.reason_claude_was_wrong?.slice(0, 120) || '',
-            pass: 'gemini-wrongly-dismissed',
-            model: 'gemini',
-            accepted: null, // Pre-triage: deliberation determines actual outcome
-            gemini_reconfirmed: true,
-            round: 0,
-            promptVariant: revId,
-            promptRevisionId: revId,
-            semanticHash: semanticId({ category: w.original_finding_id, section: w.reason_claude_was_wrong || '', detail: '' }),
-          });
-        }
-      }
-
-      // Update bandit for the review prompt variant
-      // Reward based on verdict: APPROVE (fair deliberation) = good, REJECT (missed issues) = bad
-      const VERDICT_REWARDS = { APPROVE: 0.8, CONCERNS: 0.5, CONCERNS_REMAINING: 0.35, REJECT: 0.2 };
-      const verdictReward = VERDICT_REWARDS[result.verdict] ?? 0.5;
-      bandit.update('gemini-review', revId, verdictReward);
-      bandit.flush();
-
-      // Persist FP tracker
-      fpTracker.flush?.();
-
-      const newCount = result.new_findings?.length ?? 0;
-      const wrongCount = result.wrongly_dismissed?.length ?? 0;
-      if (newCount > 0 || wrongCount > 0) {
-        process.stderr.write(`  [learning] Recorded ${newCount} new + ${wrongCount} wrongly-dismissed outcomes for gemini-review pass\n`);
-      }
-    } catch (learnErr) {
-      process.stderr.write(`  [learning] ${learnErr.message?.slice(0, 100)}\n`);
-    }
-
+    const r = await runReviewWithRetry(provider, client, planContent, transcriptContent, projectContext, auditMode);
+    const { result, usage, latencyMs, transcriptContent: usedTranscript } = r;
+    await applyDebtSuppression(result, usedTranscript);
+    addSemanticIds(result, provider);
+    emitReviewOutput(result, usage, latencyMs, provider, jsonMode, outFile);
+    recordGeminiOutcomes(result);
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);

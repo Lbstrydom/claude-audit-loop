@@ -23,7 +23,7 @@ const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', D = '\x1b[2m', B = '\x1b[1
 
 const args = process.argv.slice(2);
 const JSON_MODE = args.includes('--json');
-const DAYS = parseInt(args[args.indexOf('--days') + 1] || '30', 10) || 30;
+const DAYS = Number.parseInt(args[args.indexOf('--days') + 1] || '30', 10) || 30;
 
 // ── Supabase ────────────────────────────────────────────────────────────────
 

@@ -61,8 +61,8 @@ function parseArgs(argv) {
     changedFile: get('--changed-file'),
     ledgerPath: get('--ledger') || DEFAULT_DEBT_LEDGER_PATH,
     eventsPath: get('--events') || DEFAULT_DEBT_EVENTS_PATH,
-    recurringThreshold: parseInt(get('--recurring-threshold') || '3', 10),
-    surfaceThreshold: parseInt(get('--surface-threshold') || '1', 10),
+    recurringThreshold: Number.parseInt(get('--recurring-threshold') || '3', 10),
+    surfaceThreshold: Number.parseInt(get('--surface-threshold') || '1', 10),
     outFile: get('--out'),
     noOpIfEmpty: args.includes('--no-op-if-empty'),
     noGit: args.includes('--no-git'),
@@ -104,11 +104,11 @@ Exit codes: 0=ok, 1=op-error
  */
 export function findTouchedDebt(entries, changedFiles) {
   if (!entries?.length || !changedFiles?.length) return [];
-  const changedSet = new Set(changedFiles.map(f => f.replace(/\\/g, '/').replace(/^\.?\//, '')));
+  const changedSet = new Set(changedFiles.map(f => f.replaceAll(/\\/g, '/').replace(/^\.?\//, '')));
   return entries.filter(e => {
     const files = e.affectedFiles || [];
     return files.some(f => {
-      const norm = String(f).replace(/\\/g, '/').replace(/^\.?\//, '');
+      const norm = String(f).replaceAll(/\\/g, '/').replace(/^\.?\//, '');
       // Match either by equality OR substring (PR diff paths may be partial)
       return changedSet.has(norm)
         || [...changedSet].some(c => c.endsWith(norm) || norm.endsWith(c));
@@ -324,8 +324,8 @@ function main() {
 
 // Only run main() when this file is invoked directly as a CLI, not when imported
 // by tests. import.meta.url is a file:// URL; process.argv[1] is the script path.
-const isDirectInvocation = import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`
-  || import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'));
+const isDirectInvocation = import.meta.url === `file://${process.argv[1].replaceAll(/\\/g, '/')}`
+  || import.meta.url.endsWith(process.argv[1].replaceAll(/\\/g, '/'));
 if (isDirectInvocation) {
   main();
 }

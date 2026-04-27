@@ -82,7 +82,7 @@ export const SKILL_ENTRY_SCRIPTS = Object.freeze({
  * tokens cannot produce malformed frontmatter.
  */
 function yamlQuote(s) {
-  return `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${String(s).replaceAll(/\\/g, '\\\\').replaceAll(/"/g, '\\"')}"`;
 }
 
 // ── Frontmatter parsing ─────────────────────────────────────────────────────
@@ -134,7 +134,7 @@ export function generatePromptFile(skillName, frontmatter) {
   // file's purpose section close to the canonical skill doc without copying
   // the full multi-paragraph description.
   const firstSentence = (frontmatter?.description || entry.summary)
-    .replace(/\s+/g, ' ')
+    .replaceAll(/\s+/g, ' ')
     .trim()
     .split(/(?<=\.)\s/)[0]
     .slice(0, 240);

@@ -145,7 +145,7 @@ function parseArgs(argv) {
 
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
-      case '--max-rounds': args.maxRounds = parseInt(argv[++i], 10); break;
+      case '--max-rounds': args.maxRounds = Number.parseInt(argv[++i], 10); break;
       case '--skip-gemini': args.skipGemini = true; break;
       case '--scope': args.scope = argv[++i]; break;
       case '--base': args.base = argv[++i]; break;

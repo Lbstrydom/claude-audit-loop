@@ -80,7 +80,7 @@ export function recordWithDecay(pattern, accepted, halfLifeMs = learningConfig.o
  * Extract structured dimensions from a finding.
  */
 export function extractDimensions(finding, repoFingerprint = null, filePath = null) {
-  const category = (finding.category || '').replace(/\[.*?\]\s*/g, '').trim().toLowerCase();
+  const category = (finding.category || '').replaceAll(/\[.*?\]\s*/g, '').trim().toLowerCase();
   const principle = (finding.principle || 'unknown').toLowerCase();
   const severity = finding.severity || 'UNKNOWN';
   const repoId = repoFingerprint || GLOBAL_REPO_ID;
@@ -117,7 +117,7 @@ export class FalsePositiveTracker {
 
   /** Generate a legacy-compatible pattern key from a finding. */
   patternKey(finding) {
-    const category = (finding.category || '').replace(/\[.*?\]\s*/g, '').trim().toLowerCase();
+    const category = (finding.category || '').replaceAll(/\[.*?\]\s*/g, '').trim().toLowerCase();
     const principle = (finding.principle || 'unknown').toLowerCase();
     return `${category}::${finding.severity || 'UNKNOWN'}::${principle}`;
   }

@@ -214,7 +214,6 @@ describe('check-model-freshness', () => {
         },
       });
       const high = report.findings.filter(f => f.severity === 'error');
-      const med = report.findings.filter(f => f.severity === 'warn');
       const low = report.findings.filter(f => f.severity === 'note');
       assert.ok(high.length >= 1, `expected at least one HIGH, got: ${high.length}`);
       assert.ok(low.length >= 1, `expected at least one LOW (premature-remap), got: ${low.length}`);

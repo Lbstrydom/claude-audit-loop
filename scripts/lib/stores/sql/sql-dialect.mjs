@@ -67,10 +67,10 @@ export function buildUpsert({ table, columns, conflictTarget, updateColumns, dia
  */
 export function expandTemplate(sql, dialect, schema) {
   return sql
-    .replace(/\{\{JSONB\}\}/g, dialect === 'postgres' ? 'jsonb' : 'TEXT')
-    .replace(/\{\{TIMESTAMPTZ\}\}/g, dialect === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT')
-    .replace(/\{\{UUID_PK\}\}/g, dialect === 'postgres' ? 'TEXT PRIMARY KEY' : 'TEXT PRIMARY KEY')
-    .replace(/\{\{SCHEMA\}\}/g, schema ? `${quoteIdent(schema)}.` : '');
+    .replaceAll(/\{\{JSONB\}\}/g, dialect === 'postgres' ? 'jsonb' : 'TEXT')
+    .replaceAll(/\{\{TIMESTAMPTZ\}\}/g, dialect === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT')
+    .replaceAll(/\{\{UUID_PK\}\}/g, dialect === 'postgres' ? 'TEXT PRIMARY KEY' : 'TEXT PRIMARY KEY')
+    .replaceAll(/\{\{SCHEMA\}\}/g, schema ? `${quoteIdent(schema)}.` : '');
 }
 
 export { IDENT_PATTERN };

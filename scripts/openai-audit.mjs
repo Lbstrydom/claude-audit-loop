@@ -1246,7 +1246,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   // Cross-pass dedup: if two passes flag the same issue (>80% word overlap on
   // section+detail), keep the higher-severity one
   function tokenize(s) {
-    return (s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+    return (s ?? '').toLowerCase().replaceAll(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
   }
   function wordOverlap(a, b) {
     const ta = new Set(tokenize(a));
@@ -1338,12 +1338,12 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
     const matchedGpt = new Set();
     for (const tf of toolFindingsInResult) {
       const [tFile, tLineStr] = (tf.section || '').split(':');
-      const tLine = parseInt(tLineStr, 10);
+      const tLine = Number.parseInt(tLineStr, 10);
       let matched = false;
       for (const gf of gptFindingsInResult) {
         const gFile = gf._primaryFile || (gf.section || '').split(':')[0];
         if (normalizePath(tFile || '') !== normalizePath(gFile || '')) continue;
-        const gLine = parseInt((gf.section || '').split(':')[1], 10);
+        const gLine = Number.parseInt((gf.section || '').split(':')[1], 10);
         if (isNaN(gLine) || isNaN(tLine)) continue; // G3 fix: both need line numbers
         if (Math.abs(gLine - tLine) <= 5) {
           matched = true;
@@ -1882,7 +1882,7 @@ async function main() {
 
   // --round <n>: audit round number (default: 1). R2+ enables suppression, diff annotation, impact scoping
   const roundIdx = args.indexOf('--round');
-  const round = roundIdx !== -1 && args[roundIdx + 1] ? parseInt(args[roundIdx + 1], 10) : 1;
+  const round = roundIdx !== -1 && args[roundIdx + 1] ? Number.parseInt(args[roundIdx + 1], 10) : 1;
 
   // --ledger <file>: adjudication ledger — single canonical read+write path
   const ledgerIdx = args.indexOf('--ledger');
@@ -1945,7 +1945,7 @@ async function main() {
   const escalateIdx = args.indexOf('--escalate-recurring');
   // Default to 5 on R2+ runs — recurring debt items get re-examined automatically
   const escalateRecurring = escalateIdx !== -1 && args[escalateIdx + 1]
-    ? parseInt(args[escalateIdx + 1], 10)
+    ? Number.parseInt(args[escalateIdx + 1], 10)
     : (round >= 2 ? 5 : null);
 
   // A/B test: pipeline variant selection

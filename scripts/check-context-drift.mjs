@@ -166,7 +166,7 @@ export function extractH2Sections(content) {
  * drops empty lines before comparing.
  */
 export function bodiesEqual(a, b) {
-  const norm = lines => lines.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
+  const norm = lines => lines.map(l => l.replaceAll(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
   return norm(a) === norm(b);
 }
 
@@ -385,7 +385,7 @@ async function main() {
 const invokedDirectly = (() => {
   try {
     const metaPath = new URL(import.meta.url).pathname.toLowerCase();
-    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname.toLowerCase() : '';
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replaceAll(/\\/g, '/')}`).pathname.toLowerCase() : '';
     return metaPath.endsWith('/check-context-drift.mjs') && argvPath.endsWith('/check-context-drift.mjs');
   } catch { return false; }
 })();

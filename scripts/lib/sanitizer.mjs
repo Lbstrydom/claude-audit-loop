@@ -40,7 +40,7 @@ export function recencyBucket(ts) {
 
 /** Sanitize file path: two-level (directory/basename), redact absolute paths. */
 export function sanitizePath(filePath) {
-  const parts = filePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const parts = filePath.replaceAll(/\\/g, '/').split('/').filter(Boolean);
   if (parts.length >= 2) return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
   return parts[parts.length - 1] || 'unknown';
 }
@@ -57,9 +57,9 @@ const SAFE_LONG_TOKEN_PATTERNS = [
 /** Detect and redact common secret patterns in text. */
 export function redactSecrets(text) {
   return text
-    .replace(/(key|token|secret|password|api_key)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
-    .replace(/-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g, '[REDACTED_KEY]')
-    .replace(/[A-Za-z0-9_-]{20,}/g, (match) => {
+    .replaceAll(/(key|token|secret|password|api_key)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+    .replaceAll(/-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g, '[REDACTED_KEY]')
+    .replaceAll(/[A-Za-z0-9_-]{20,}/g, (match) => {
       // Preserve known safe internal identifiers (20+ chars that are project artifacts)
       if (SAFE_LONG_TOKEN_PATTERNS.some(p => p.test(match))) return match;
       return '[REDACTED_TOKEN]';

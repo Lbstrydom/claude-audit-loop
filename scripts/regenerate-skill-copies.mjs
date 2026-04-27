@@ -49,102 +49,95 @@ function sha(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 12);
 }
 
-function main() {
-  const DRY = process.argv.includes('--dry-run');
-  const CHECK = process.argv.includes('--check');
+// ── main() helpers — keep main() under cognitive-complexity 15 ────────────
 
-  // Phase-4 deprecation: warn when stale .github/skills/ files are present
-  // and the user has NOT opted into keeping them. The files are not deleted
-  // here — operators remove them once they confirm nothing reads them.
+function warnGithubSkillsDeprecation() {
   const ghSkillsDir = path.join(ROOT, '.github', 'skills');
-  if (!KEEP_GITHUB_SKILLS && fs.existsSync(ghSkillsDir)) {
-    process.stderr.write(
-      `${Y}[regenerate] DEPRECATION: .github/skills/ is no longer maintained ` +
-      `(no documented tool reads it).\n` +
-      `  Existing files at ${path.relative(ROOT, ghSkillsDir)} are not deleted ` +
-      `by this run. To preserve them and keep regenerating, pass --keep-github-skills.\n` +
-      `  Once confirmed unused, delete the directory manually.${X}\n`
-    );
-  }
+  if (KEEP_GITHUB_SKILLS || !fs.existsSync(ghSkillsDir)) return;
+  process.stderr.write(
+    `${Y}[regenerate] DEPRECATION: .github/skills/ is no longer maintained ` +
+    `(no documented tool reads it).\n` +
+    `  Existing files at ${path.relative(ROOT, ghSkillsDir)} are not deleted ` +
+    `by this run. To preserve them and keep regenerating, pass --keep-github-skills.\n` +
+    `  Once confirmed unused, delete the directory manually.${X}\n`,
+  );
+}
 
+function loadSkillsOrDie() {
   if (!fs.existsSync(SRC_ROOT)) {
     process.stderr.write(`${R}skills/ does not exist at ${SRC_ROOT}${X}\n`);
     process.exit(2);
   }
-
   const skills = listSkillNames(SRC_ROOT);
   if (skills.length === 0) {
     process.stderr.write(`${R}No skills found under ${SRC_ROOT}${X}\n`);
     process.exit(2);
   }
+  return skills;
+}
 
-  let writes = 0, deletes = 0, unchanged = 0;
-  const violations = [];
-
-  for (const name of skills) {
-    const skillSrcDir = path.join(SRC_ROOT, name);
-    let srcFiles;
-    try {
-      srcFiles = enumerateSkillFiles(skillSrcDir, { strict: true });
-    } catch (err) {
-      process.stderr.write(`${R}${name}: ${err.message}${X}\n`);
-      violations.push(`${name}: ${err.message}`);
-      continue;
-    }
-
-    for (const destRoot of DEST_ROOTS) {
-      const destDir = path.join(destRoot, name);
-      fs.mkdirSync(destDir, { recursive: true });
-
-      // Write / update every file from source
-      for (const rel of srcFiles) {
-        const srcAbs = path.join(skillSrcDir, rel);
-        const dstAbs = path.join(destDir, rel);
-        fs.mkdirSync(path.dirname(dstAbs), { recursive: true });
-
-        const srcBuf = fs.readFileSync(srcAbs);
-        const dstExists = fs.existsSync(dstAbs);
-        const dstBuf = dstExists ? fs.readFileSync(dstAbs) : null;
-
-        if (dstBuf && sha(srcBuf) === sha(dstBuf)) {
-          unchanged++;
-          continue;
-        }
-        if (DRY || CHECK) {
-          process.stdout.write(`${Y}~${X} ${path.relative(ROOT, dstAbs)} ${D}(${dstExists ? 'update' : 'create'})${X}\n`);
-        } else {
-          fs.writeFileSync(dstAbs, srcBuf);
-        }
-        writes++;
-      }
-
-      // Prune files in dest that are not in source
-      if (fs.existsSync(destDir)) {
-        const destFiles = enumerateSkillFiles(destDir, { strict: false });
-        const srcSet = new Set(srcFiles);
-        for (const rel of destFiles) {
-          if (srcSet.has(rel)) continue;
-          const dstAbs = path.join(destDir, rel);
-          if (DRY || CHECK) {
-            process.stdout.write(`${R}-${X} ${path.relative(ROOT, dstAbs)} ${D}(prune)${X}\n`);
-          } else {
-            fs.unlinkSync(dstAbs);
-          }
-          deletes++;
-        }
-      }
-    }
+function copyFileIfChanged(srcAbs, dstAbs, opts) {
+  fs.mkdirSync(path.dirname(dstAbs), { recursive: true });
+  const srcBuf = fs.readFileSync(srcAbs);
+  const dstExists = fs.existsSync(dstAbs);
+  const dstBuf = dstExists ? fs.readFileSync(dstAbs) : null;
+  if (dstBuf && sha(srcBuf) === sha(dstBuf)) return 'unchanged';
+  if (opts.dryOrCheck) {
+    process.stdout.write(`${Y}~${X} ${path.relative(ROOT, dstAbs)} ${D}(${dstExists ? 'update' : 'create'})${X}\n`);
+  } else {
+    fs.writeFileSync(dstAbs, srcBuf);
   }
+  return 'wrote';
+}
 
-  // Also prune any orphan skill directories in dests that don't exist in source
-  const srcNames = new Set(skills);
+function pruneFilesNotInSource(destDir, srcSet, opts) {
+  if (!fs.existsSync(destDir)) return 0;
+  let deletes = 0;
+  const destFiles = enumerateSkillFiles(destDir, { strict: false });
+  for (const rel of destFiles) {
+    if (srcSet.has(rel)) continue;
+    const dstAbs = path.join(destDir, rel);
+    if (opts.dryOrCheck) {
+      process.stdout.write(`${R}-${X} ${path.relative(ROOT, dstAbs)} ${D}(prune)${X}\n`);
+    } else {
+      fs.unlinkSync(dstAbs);
+    }
+    deletes++;
+  }
+  return deletes;
+}
+
+function syncSkillToDests(name, opts) {
+  const skillSrcDir = path.join(SRC_ROOT, name);
+  let srcFiles;
+  try {
+    srcFiles = enumerateSkillFiles(skillSrcDir, { strict: true });
+  } catch (err) {
+    process.stderr.write(`${R}${name}: ${err.message}${X}\n`);
+    return { violation: `${name}: ${err.message}`, writes: 0, unchanged: 0, deletes: 0 };
+  }
+  let writes = 0, unchanged = 0, deletes = 0;
+  for (const destRoot of DEST_ROOTS) {
+    const destDir = path.join(destRoot, name);
+    fs.mkdirSync(destDir, { recursive: true });
+    for (const rel of srcFiles) {
+      const result = copyFileIfChanged(path.join(skillSrcDir, rel), path.join(destDir, rel), opts);
+      if (result === 'wrote') writes++;
+      else unchanged++;
+    }
+    deletes += pruneFilesNotInSource(destDir, new Set(srcFiles), opts);
+  }
+  return { writes, unchanged, deletes };
+}
+
+function pruneOrphanSkillDirs(srcSet, opts) {
+  let deletes = 0;
   for (const destRoot of DEST_ROOTS) {
     if (!fs.existsSync(destRoot)) continue;
     for (const ent of fs.readdirSync(destRoot, { withFileTypes: true })) {
-      if (!ent.isDirectory()) continue;
-      if (srcNames.has(ent.name)) continue;
+      if (!ent.isDirectory() || srcSet.has(ent.name)) continue;
       const dstDir = path.join(destRoot, ent.name);
-      if (DRY || CHECK) {
+      if (opts.dryOrCheck) {
         process.stdout.write(`${R}-${X} ${path.relative(ROOT, dstDir)}/ ${D}(prune orphan skill)${X}\n`);
       } else {
         fs.rmSync(dstDir, { recursive: true, force: true });
@@ -152,60 +145,104 @@ function main() {
       deletes++;
     }
   }
+  return deletes;
+}
 
-  // Generate Copilot prompt-file shims under .github/prompts/. Phase 3 of
-  // ai-context-sync — gives VS Code Copilot teammates parity slash commands
-  // backed by the same CLIs Claude skills orchestrate.
-  const promptDir = path.join(ROOT, '.github', 'prompts');
-  const promptEntries = generateAllPromptFiles(SRC_ROOT);
-  const expectedPromptPaths = new Set();
-  for (const entry of promptEntries) {
+function writePromptFiles(entries, opts) {
+  const expected = new Set();
+  let writes = 0, unchanged = 0;
+  for (const entry of entries) {
     const dstAbs = path.join(ROOT, entry.relPath);
-    expectedPromptPaths.add(dstAbs);
+    expected.add(dstAbs);
     fs.mkdirSync(path.dirname(dstAbs), { recursive: true });
     const dstExists = fs.existsSync(dstAbs);
     const dstContent = dstExists ? fs.readFileSync(dstAbs, 'utf-8') : null;
-    if (dstContent === entry.content) {
-      unchanged++;
-      continue;
-    }
-    if (DRY || CHECK) {
+    if (dstContent === entry.content) { unchanged++; continue; }
+    if (opts.dryOrCheck) {
       process.stdout.write(`${Y}~${X} ${path.relative(ROOT, dstAbs)} ${D}(${dstExists ? 'update' : 'create'} prompt)${X}\n`);
     } else {
       fs.writeFileSync(dstAbs, entry.content);
     }
     writes++;
   }
-  // Prune stale prompt files (skill removed from registry or skill deleted)
-  if (fs.existsSync(promptDir)) {
-    for (const f of fs.readdirSync(promptDir)) {
-      if (!f.endsWith('.prompt.md')) continue;
-      const abs = path.join(promptDir, f);
-      if (expectedPromptPaths.has(abs)) continue;
-      // Only prune if managed (has our marker) — never delete operator-authored prompts.
-      const content = fs.readFileSync(abs, 'utf-8');
-      if (!content.includes('<!-- audit-loop-bundle:prompt:start -->')) continue;
-      if (DRY || CHECK) {
-        process.stdout.write(`${R}-${X} ${path.relative(ROOT, abs)} ${D}(prune managed prompt)${X}\n`);
-      } else {
-        fs.unlinkSync(abs);
-      }
-      deletes++;
-    }
-  }
+  return { writes, unchanged, expected };
+}
 
-  const verdict = violations.length > 0 ? 'VIOLATIONS' : (writes + deletes === 0 ? 'IN SYNC' : 'CHANGES');
+function pruneStalePrompts(promptDir, expected, opts) {
+  if (!fs.existsSync(promptDir)) return 0;
+  let deletes = 0;
+  for (const f of fs.readdirSync(promptDir)) {
+    if (!f.endsWith('.prompt.md')) continue;
+    const abs = path.join(promptDir, f);
+    if (expected.has(abs)) continue;
+    const content = fs.readFileSync(abs, 'utf-8');
+    // Only prune managed files; leave operator-authored prompts alone.
+    if (!content.includes('<!-- audit-loop-bundle:prompt:start -->')) continue;
+    if (opts.dryOrCheck) {
+      process.stdout.write(`${R}-${X} ${path.relative(ROOT, abs)} ${D}(prune managed prompt)${X}\n`);
+    } else {
+      fs.unlinkSync(abs);
+    }
+    deletes++;
+  }
+  return deletes;
+}
+
+function syncCopilotPrompts(opts) {
+  const promptDir = path.join(ROOT, '.github', 'prompts');
+  const entries = generateAllPromptFiles(SRC_ROOT);
+  const { writes, unchanged, expected } = writePromptFiles(entries, opts);
+  const deletes = pruneStalePrompts(promptDir, expected, opts);
+  return { writes, unchanged, deletes };
+}
+
+function computeVerdict(stats, violationsCount) {
+  if (violationsCount > 0) return 'VIOLATIONS';
+  if (stats.writes + stats.deletes === 0) return 'IN SYNC';
+  return 'CHANGES';
+}
+
+function emitVerdict(stats, violations, check) {
+  const verdict = computeVerdict(stats, violations.length);
   process.stdout.write(
-    `\n${B}regenerate-skill-copies:${X} ${writes} write, ${deletes} prune, ${unchanged} unchanged` +
+    `\n${B}regenerate-skill-copies:${X} ${stats.writes} write, ${stats.deletes} prune, ${stats.unchanged} unchanged` +
     (violations.length ? `, ${R}${violations.length} violations${X}` : '') +
     ` — ${verdict}\n`,
   );
-
   if (violations.length > 0) process.exit(2);
-  if (CHECK && (writes + deletes) > 0) {
+  if (check && (stats.writes + stats.deletes) > 0) {
     process.stderr.write(`\n${R}Destinations differ from source. Run: node scripts/regenerate-skill-copies.mjs${X}\n`);
     process.exit(1);
   }
+}
+
+function main() {
+  const DRY = process.argv.includes('--dry-run');
+  const CHECK = process.argv.includes('--check');
+  const opts = { dryOrCheck: DRY || CHECK };
+
+  warnGithubSkillsDeprecation();
+  const skills = loadSkillsOrDie();
+
+  const stats = { writes: 0, deletes: 0, unchanged: 0 };
+  const violations = [];
+
+  for (const name of skills) {
+    const r = syncSkillToDests(name, opts);
+    if (r.violation) violations.push(r.violation);
+    stats.writes += r.writes;
+    stats.unchanged += r.unchanged;
+    stats.deletes += r.deletes;
+  }
+
+  stats.deletes += pruneOrphanSkillDirs(new Set(skills), opts);
+
+  const promptStats = syncCopilotPrompts(opts);
+  stats.writes += promptStats.writes;
+  stats.unchanged += promptStats.unchanged;
+  stats.deletes += promptStats.deletes;
+
+  emitVerdict(stats, violations, CHECK);
   process.exit(0);
 }
 

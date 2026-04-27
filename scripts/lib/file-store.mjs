@@ -53,7 +53,7 @@ function _acquireLockSync(lockPath, staleLockTimeoutMs) {
       // Check if lock is stale
       try {
         const content = fs.readFileSync(lockPath, 'utf-8');
-        const lockTs = parseInt(content.split('\n')[1], 10);
+        const lockTs = Number.parseInt(content.split('\n')[1], 10);
         if (!isNaN(lockTs) && (Date.now() - lockTs) > staleLockTimeoutMs) {
           process.stderr.write(`  [store] Breaking stale lock: ${lockPath}\n`);
           try { fs.unlinkSync(lockPath); } catch { /* race ok */ }

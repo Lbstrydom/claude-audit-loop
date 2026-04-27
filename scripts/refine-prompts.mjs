@@ -7,8 +7,6 @@
  */
 
 // dotenv loaded by lib/config.mjs (worktree-safe discovery)
-import fs from 'fs';
-import path from 'path';
 import { loadOutcomes, computePassEffectiveness, computePassEWR } from './lib/findings.mjs';
 import { sanitizeOutcomes } from './lib/sanitizer.mjs';
 import { reservoirSample } from './lib/rng.mjs';

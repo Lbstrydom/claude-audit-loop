@@ -355,7 +355,7 @@ async function main() {
 const invokedDirectly = (() => {
   try {
     const metaPath = new URL(import.meta.url).pathname.toLowerCase();
-    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname.toLowerCase() : '';
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replaceAll(/\\/g, '/')}`).pathname.toLowerCase() : '';
     return metaPath.endsWith('/check-model-freshness.mjs') && argvPath.endsWith('/check-model-freshness.mjs');
   } catch { return false; }
 })();

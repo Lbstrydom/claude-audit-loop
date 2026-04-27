@@ -119,7 +119,7 @@ function deduplicateExclusions(ledgerExclusions, fpPatterns) {
  * Check if a finding matches a pattern/exclusion.
  */
 function matchesFinding(pattern, finding) {
-  const fCat = (finding.category || '').replace(/\[.*?\]\s*/g, '').trim().toLowerCase();
+  const fCat = (finding.category || '').replaceAll(/\[.*?\]\s*/g, '').trim().toLowerCase();
   const pCat = (pattern.category || '').toLowerCase();
   const fPrin = (finding.principle || '').toLowerCase();
   const pPrin = (pattern.principle || '').toLowerCase();

@@ -81,7 +81,7 @@ export function parseReferenceTable(markdown) {
       continue;
     }
 
-    const fileTrim = file.replace(/^`|`$/g, '').trim();
+    const fileTrim = file.replaceAll(/^`|`$/g, '').trim();
     const summaryTrim = summary.trim();
     const readWhenTrim = readWhen.trim();
 

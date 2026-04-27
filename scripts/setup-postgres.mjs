@@ -61,10 +61,10 @@ async function main() {
       let sql = fs.readFileSync(path.join(schemaDir, migration), 'utf-8');
       sql = expandTemplate(sql, 'postgres', schema);
       // Postgres needs GENERATED ALWAYS instead of AUTOINCREMENT
-      sql = sql.replace(/INTEGER PRIMARY KEY AUTOINCREMENT/g, 'SERIAL PRIMARY KEY');
+      sql = sql.replaceAll(/INTEGER PRIMARY KEY AUTOINCREMENT/g, 'SERIAL PRIMARY KEY');
       // INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
-      sql = sql.replace(/INSERT OR IGNORE INTO (\S+)/g, 'INSERT INTO $1')
-        .replace(/VALUES\s*\(([^)]+)\);/g, 'VALUES ($1) ON CONFLICT DO NOTHING;');
+      sql = sql.replaceAll(/INSERT OR IGNORE INTO (\S+)/g, 'INSERT INTO $1')
+        .replaceAll(/VALUES\s*\(([^)]+)\);/g, 'VALUES ($1) ON CONFLICT DO NOTHING;');
       await pool.query(sql);
       console.log(`  ${G}+${X} ${migration}`);
     }

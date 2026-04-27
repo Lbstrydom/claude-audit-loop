@@ -23,13 +23,13 @@ const STOPWORDS = new Set([
  */
 function normalizeMarkdown(text) {
   return text
-    .replace(/\[([^\]]*)\]\([^)]+\)/g, '$1')  // [text](url) → text
-    .replace(/`[^`]+`/g, '')                    // strip inline code
-    .replace(/\*\*([^*]+)\*\*/g, '$1')          // **bold** → bold
-    .replace(/\*([^*]+)\*/g, '$1')              // *italic* → italic
-    .replace(/#+\s*/g, '')                       // strip heading markers
-    .replace(/[-*]\s+/g, '')                     // strip list markers
-    .replace(/\|/g, ' ')                         // strip table pipes
+    .replaceAll(/\[([^\]]*)\]\([^)]+\)/g, '$1')  // [text](url) → text
+    .replaceAll(/`[^`]+`/g, '')                    // strip inline code
+    .replaceAll(/\*\*([^*]+)\*\*/g, '$1')          // **bold** → bold
+    .replaceAll(/\*([^*]+)\*/g, '$1')              // *italic* → italic
+    .replaceAll(/#+\s*/g, '')                       // strip heading markers
+    .replaceAll(/[-*]\s+/g, '')                     // strip list markers
+    .replaceAll(/\|/g, ' ')                         // strip table pipes
     .toLowerCase();
 }
 

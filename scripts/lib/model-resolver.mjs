@@ -104,8 +104,8 @@ export function parseClaudeModel(id) {
     provider: 'anthropic',
     family: 'claude',
     tier: m[1],
-    major: parseInt(m[2], 10),
-    minor: m[3] ? parseInt(m[3], 10) : 0,
+    major: Number.parseInt(m[2], 10),
+    minor: m[3] ? Number.parseInt(m[3], 10) : 0,
     date: m[4] || null,
     isPreview: false,
     original: id,
@@ -135,8 +135,8 @@ export function parseGeminiModel(id) {
     provider: 'google',
     family: 'gemini',
     tier: m[3],
-    major: parseInt(m[1], 10),
-    minor: m[2] ? parseInt(m[2], 10) : 0,
+    major: Number.parseInt(m[1], 10),
+    minor: m[2] ? Number.parseInt(m[2], 10) : 0,
     suffix: m[4] || null,
     isAlias: false,
     isPreview: m[4] === 'preview',
@@ -152,8 +152,8 @@ export function parseOpenAIModel(id) {
   return {
     provider: 'openai',
     family: m[1],
-    major: parseInt(m[2], 10),
-    minor: m[3] ? parseInt(m[3], 10) : 0,
+    major: Number.parseInt(m[2], 10),
+    minor: m[3] ? Number.parseInt(m[3], 10) : 0,
     variant,
     isLite: /^(mini|nano)$/.test(variant || ''),
     isPreview: /preview/.test(variant || ''),
@@ -498,7 +498,7 @@ async function _cli() {
 const invokedDirectly = (() => {
   try {
     const metaPath = new URL(import.meta.url).pathname;
-    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname : '';
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replaceAll(/\\/g, '/')}`).pathname : '';
     // Compare basenames to avoid path-separator mismatches
     return metaPath.toLowerCase().endsWith('/model-resolver.mjs') &&
       argvPath.toLowerCase().endsWith('/model-resolver.mjs');

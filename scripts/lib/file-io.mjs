@@ -7,8 +7,8 @@
  * @module scripts/lib/file-io
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // ── Atomic File Writes ──────────────────────────────────────────────────────
 // Write to a temp file in the same directory, then rename for crash-safety.
@@ -39,14 +39,14 @@ export function atomicWriteFileSync(filePath, data) {
 export function normalizePath(p) {
   const resolved = path.resolve(p);
   const cwdPrefix = path.resolve('.');
-  return resolved.replace(cwdPrefix, '').replace(/\\/g, '/').replace(/^\//, '').toLowerCase();
+  return resolved.replace(cwdPrefix, '').replaceAll(/\\/g, '/').replace(/^\//, '').toLowerCase();
 }
 
 // ── Safe Parsing ────────────────────────────────────────────────────────────
 
 /** Safe parseInt with fallback for NaN. */
 export function safeInt(val, fallback) {
-  const n = parseInt(val, 10);
+  const n = Number.parseInt(val, 10);
   return Number.isNaN(n) ? fallback : n;
 }
 

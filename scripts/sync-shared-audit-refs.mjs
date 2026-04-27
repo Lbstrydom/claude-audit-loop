@@ -168,7 +168,7 @@ function main() {
 const invokedDirectly = (() => {
   try {
     const metaPath = new URL(import.meta.url).pathname.toLowerCase();
-    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).pathname.toLowerCase() : '';
+    const argvPath = process.argv[1] ? new URL(`file://${process.argv[1].replaceAll(/\\/g, '/')}`).pathname.toLowerCase() : '';
     return metaPath.endsWith('/sync-shared-audit-refs.mjs') && argvPath.endsWith('/sync-shared-audit-refs.mjs');
   } catch { return false; }
 })();

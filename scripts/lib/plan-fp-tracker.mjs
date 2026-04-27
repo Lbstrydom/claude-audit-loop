@@ -6,8 +6,8 @@
  * @module scripts/lib/plan-fp-tracker
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { jaccardSimilarity } from './ledger.mjs';
 import { atomicWriteFileSync } from './file-io.mjs';

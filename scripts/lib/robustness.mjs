@@ -4,8 +4,8 @@
  * All functions are side-effect-free and testable in isolation.
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import { openaiConfig } from './config.mjs';
 
 // ── Constants ────────────────────────────────────────────────────────────────

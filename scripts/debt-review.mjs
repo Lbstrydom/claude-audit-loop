@@ -51,7 +51,7 @@ function parseArgs(argv) {
     localOnly: args.includes('--local-only'),
     includeSensitive: args.includes('--include-sensitive'),
     writePlanDoc: args.includes('--write-plan-doc'),
-    ttlDays: parseInt(get('--ttl-days') || '180', 10),
+    ttlDays: Number.parseInt(get('--ttl-days') || '180', 10),
     ledgerPath: get('--ledger') || DEFAULT_DEBT_LEDGER_PATH,
     eventsPath: get('--events') || DEFAULT_DEBT_EVENTS_PATH,
     outFile: get('--out'),
@@ -288,7 +288,7 @@ async function runLLMClustering(openai, entries, ttlDays, includeSensitive) {
 function writeTopRefactorPlanDoc(review, ledger) {
   if (review.refactorPlan.length === 0) return null;
   const top = review.refactorPlan[0];
-  const safeId = top.clusterId.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+  const safeId = top.clusterId.replaceAll(/[^a-z0-9-]/gi, '-').toLowerCase();
   const planPath = path.join('docs', 'plans', `refactor-${safeId}.md`);
   fs.mkdirSync(path.dirname(planPath), { recursive: true });
   const members = top.resolvedTopicIds

@@ -63,7 +63,7 @@ describe('findCodeownersFile', () => {
     seed('* @github', '.github/CODEOWNERS');
     seed('* @root', 'CODEOWNERS');
     const found = findCodeownersFile(tmpRoot);
-    assert.match(found.replace(/\\/g, '/'), /\.github\/CODEOWNERS$/);
+    assert.match(found.replaceAll(/\\/g, '/'), /\.github\/CODEOWNERS$/);
   });
 });
 

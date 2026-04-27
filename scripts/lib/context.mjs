@@ -5,12 +5,10 @@
  * @module scripts/lib/context
  */
 
-import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
-import { normalizePath, isSensitiveFile, readFileOrDie } from './file-io.mjs';
-import { estimateTokens } from './code-analysis.mjs';
 import { semanticId, setRepoProfileCache } from './findings.mjs';
 import { briefConfig } from './config.mjs';
 
@@ -104,7 +102,7 @@ function _extractRegexFacts(content) {
   while ((match = tableRowRegex.exec(content)) !== null) {
     const pkg = match[1].trim();
     const ver = match[2].trim();
-    const notes = match[3].replace(/\|/g, '').trim();
+    const notes = match[3].replaceAll(/\|/g, '').trim();
     // Skip table headers
     if (pkg === 'Package' || pkg === 'Variable' || ver === 'Version' || /^-+$/.test(ver)) continue;
     const line = notes ? `${pkg}@${ver} — ${notes.slice(0, 80)}` : `${pkg}@${ver}`;
@@ -115,7 +113,7 @@ function _extractRegexFacts(content) {
   // Version must have at least one dot (excludes bare numbers)
   const inlineDepRegex = /\*\*(`?[\w@/.-]+`?)\*\*:\s*(?:version\s+)?(\d+\.\d+[\d.]*\S*)/gi;
   while ((match = inlineDepRegex.exec(content)) !== null) {
-    const pkg = match[1].replace(/`/g, '');
+    const pkg = match[1].replaceAll(/`/g, '');
     const ver = match[2];
     if (/[a-z]/.test(pkg) && !depLines.some(l => l.startsWith(pkg))) depLines.push(`${pkg}@${ver}`);
   }
@@ -366,7 +364,7 @@ export function generateRepoProfile() {
         if (entry.isDirectory()) {
           scanDir(fullPath, depth + 1);
         } else if (codeExts.some(ext => entry.name.endsWith(ext))) {
-          allFiles.push(path.relative(path.resolve('.'), fullPath).replace(/\\/g, '/'));
+          allFiles.push(path.relative(path.resolve('.'), fullPath).replaceAll(/\\/g, '/'));
         }
       }
     } catch { /* permission errors, etc */ }
