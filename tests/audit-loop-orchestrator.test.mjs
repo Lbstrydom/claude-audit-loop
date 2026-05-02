@@ -86,34 +86,32 @@ describe('audit-loop orchestrator dispatch', () => {
     });
   });
 
-  describe('SKILL.md structural integrity', () => {
+  describe('SKILL.md structural integrity (deprecated shim)', () => {
+    // audit-loop was deprecated to a thin alias shim on 2026-05-02 — its
+    // chained mode moved to /cycle, atomic modes to /audit-plan + /audit-code.
+    // The shim's only job now is discoverability for muscle memory + routing
+    // users to the active skills.
     const SKILL_DIR = path.resolve('skills/audit-loop');
     const SKILL_MD = path.join(SKILL_DIR, 'SKILL.md');
 
-    it('SKILL.md exists and is the slim orchestrator', () => {
+    it('SKILL.md exists and stays slim (deprecation shim)', () => {
       const content = fs.readFileSync(SKILL_MD, 'utf-8');
       const lines = content.split('\n').length;
-      assert.ok(lines <= 100, `orchestrator should be ≤100 lines, got ${lines}`);
+      assert.ok(lines <= 100, `deprecation shim should be ≤100 lines, got ${lines}`);
     });
 
-    it('SKILL.md describes all 5 dispatch cases', () => {
+    it('SKILL.md is marked DEPRECATED and routes to active skills', () => {
       const content = fs.readFileSync(SKILL_MD, 'utf-8');
-      assert.match(content, /audit-plan/);
-      assert.match(content, /audit-code/);
-      assert.match(content, /FULL_CYCLE/);
-      assert.match(content, /PLAN_CYCLE/);
-      assert.match(content, /shorthand/i);
+      assert.match(content, /DEPRECATED/i, 'must be marked DEPRECATED');
+      // Must point at the three active skills that replace this:
+      assert.match(content, /\/audit-plan/, 'must reference /audit-plan');
+      assert.match(content, /\/audit-code/, 'must reference /audit-code');
+      assert.match(content, /\/cycle/, 'must reference /cycle (replaces "full" mode)');
     });
 
-    it('orchestrator has no reference files', () => {
+    it('shim has no reference files', () => {
       const refsDir = path.join(SKILL_DIR, 'references');
-      assert.ok(!fs.existsSync(refsDir), 'orchestrator should not have references/');
-    });
-
-    it('SKILL.md description routes users to the sub-skills', () => {
-      const content = fs.readFileSync(SKILL_MD, 'utf-8');
-      assert.match(content, /\/audit-plan/);
-      assert.match(content, /\/audit-code/);
+      assert.ok(!fs.existsSync(refsDir), 'shim should not have references/');
     });
   });
 });

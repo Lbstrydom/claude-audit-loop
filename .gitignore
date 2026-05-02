@@ -47,3 +47,9 @@ node_modules/
 
 # Stale artifact from early development
 --db-path
+
+# Architectural-memory cache (regenerated, never commit).
+.audit-loop/cache/
+
+# .env backups from rearrangement scripts (may contain secrets).
+.env.bak.*

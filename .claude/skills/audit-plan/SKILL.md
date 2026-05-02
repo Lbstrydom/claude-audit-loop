@@ -45,8 +45,15 @@ Show kickoff card:
 
 ## Step 1 — Plan Generation (PLAN_CYCLE only)
 
-Generate the plan with `/plan-backend` or `/plan-frontend` based on the task
-description. Save to `docs/plans/<name>.md`. Skip for PLAN_AUDIT.
+Generate the plan with `/plan` (the unified planner — auto-detects scope
+as backend / frontend / full-stack). Save to `docs/plans/<name>.md`.
+Skip for PLAN_AUDIT.
+
+`/plan-backend` and `/plan-frontend` are deprecated thin aliases that
+inject `--scope=backend|frontend` into `/plan`; either entry-point
+works. The output is one consolidated plan document regardless of
+scope, so this step always produces a single file to audit (no
+child-plan merging like the old flow).
 
 ---
 

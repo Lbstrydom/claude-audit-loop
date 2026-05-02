@@ -59,8 +59,38 @@ import {
 } from './lib/debt-memory.mjs';
 import { initLearningStore, isCloudEnabled, upsertRepo, upsertPlan, recordRunStart, recordRunComplete, recordFindings, recordPassStats, recordSuppressionEvents, recordAdjudicationEvent, syncBanditArms, syncFalsePositivePatterns } from './learning-store.mjs';
 import { PromptBandit, computeReward, buildContext } from './bandit.mjs';
-import { openaiConfig, PASS_NAMES } from './lib/config.mjs';
-import { supportsReasoningEffort, refreshModelCatalog, resolveModel } from './lib/model-resolver.mjs';
+import { openaiConfig, PASS_NAMES, modelPricing } from './lib/config.mjs';
+import { supportsReasoningEffort, refreshModelCatalog, resolveModel, pricingKey } from './lib/model-resolver.mjs';
+
+/**
+ * Print a one-line cost-estimate preflight to stderr so users see what
+ * an audit will roughly cost BEFORE the LLM calls start. Heuristic only —
+ * actual cost depends on output size, retries, and Gemini final review.
+ *
+ * @param {string} stage - 'plan' / 'code' / 'rebuttal' (for the label)
+ * @param {number} inputChars - estimated input chars across all calls
+ * @param {string} modelId - concrete model ID (post-resolve)
+ * @param {number} reasoningTokens - estimated reasoning tokens (high reasoning ≈ 4x input)
+ */
+function printCostPreflight(stage, inputChars, modelId, reasoningTokens = 0) {
+  if (process.env.AUDIT_NO_PREFLIGHT === '1') return;
+  const inputTokens = Math.ceil(inputChars / 4);
+  const outputTokens = Math.min(openaiConfig.maxOutputTokensCap || 16000, 16000);
+  const key = pricingKey ? pricingKey(modelId) : modelId;
+  const px = modelPricing[key] || modelPricing[modelId] || null;
+  if (!px) {
+    process.stderr.write(`  [cost] preflight: model ${modelId} not in price table — actual cost unknown\n`);
+    return;
+  }
+  // input + reasoning at input rate, output at output rate, cost in $/1M tokens
+  const cost = ((inputTokens + reasoningTokens) * px.input + outputTokens * px.output) / 1_000_000;
+  const reasoningNote = reasoningTokens > 0 ? `, ~${(reasoningTokens / 1000).toFixed(0)}k reasoning` : '';
+  process.stderr.write(
+    `  [cost] preflight: ${stage} audit ≈ $${cost.toFixed(2)} ` +
+    `(${(inputTokens / 1000).toFixed(1)}k in${reasoningNote}, up to ${(outputTokens / 1000).toFixed(0)}k out, ${modelId} @ $${px.input}/$${px.output} per 1M). ` +
+    `Set AUDIT_NO_PREFLIGHT=1 to suppress.\n`
+  );
+}
 import {
   LlmError, classifyLlmError, buildReducePayload, normalizeFindingsForOutput as _normalizeFindingsForOutput,
   resolveLedgerPath, MAX_REDUCE_JSON_CHARS, MAP_FAILURE_THRESHOLD, RETRY_MAX_ATTEMPTS,
@@ -2049,6 +2079,12 @@ async function main() {
     } else if (scopeMode === 'plan') {
       process.stderr.write(`  [scope] --scope=plan: auditing all plan-referenced files\n`);
     }
+    // Cost preflight — code audit is the most expensive: 5 passes × file context + Gemini final
+    const codeContextChars = (planContent?.length || 0) + (projectContext?.length || 0)
+      + (effectiveFileFilter ? measureContextChars(effectiveFileFilter, 8000) : 0);
+    const codePassMultiplier = passFilter ? passFilter.length : PASS_NAMES.length;
+    printCostPreflight('code', codeContextChars * codePassMultiplier, MODEL,
+      openaiConfig.reasoning === 'high' ? codeContextChars * 4 : 0);
     await runMultiPassCodeAudit(openai, planContent, projectContext, jsonMode, outFile, historyContext, { passFilter, fileFilter: effectiveFileFilter, round, ledgerFile: ledgerPath, diffFile, changedFiles, repoProfile, bandit, fpTracker, noLedger, noTools, strictLint, noDebtLedger, readOnlyDebt, debtLedgerPath, debtEventsPath, escalateRecurring, sessionCacheHit: cacheHit, scopeMode, planFile });
     return;
   }
@@ -2097,6 +2133,10 @@ async function main() {
     schemaName = 'plan_audit_result';
     userPrompt = `## Project Context\n${planContext}${depsBlock}${rulingsBlock}\n\n${historyContext ? `---\n\n${historyContext}\n` : ''}---\n\n## Plan to Audit\n${planContent}`;
   }
+
+  // Cost preflight (single-call modes: plan, rebuttal)
+  printCostPreflight(mode, (systemPrompt?.length || 0) + (userPrompt?.length || 0), MODEL,
+    openaiConfig.reasoning === 'high' ? (userPrompt?.length || 0) * 2 : 0);
 
   try {
     const { result, usage, latencyMs } = await callGPT(openai, {

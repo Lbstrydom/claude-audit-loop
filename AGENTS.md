@@ -332,6 +332,70 @@ When `--round >= 2`, the audit script enables three-layer defence against findin
 
 Two-axis state model: `adjudicationOutcome` (dismissed/accepted/severity_adjusted) + `remediationState` (pending/planned/fixed/verified/regressed). Written by orchestrator via `writeLedgerEntry()`.
 
+## Architectural Memory — Pre-fix Consultation (MANDATORY)
+
+The architectural-memory feature (`docs/plans/architectural-memory.md`)
+indexes every symbol in this repo into Supabase, with embeddings, so we
+can find near-duplicates before writing new code. The `/plan-backend`
+and `/plan-frontend` skills consult it automatically. **But ad-hoc
+fixes in Claude Code or Copilot bypass the planning skill entirely** —
+which is where most architectural drift creeps in.
+
+**Rule** — if you (the AI agent reading this) are about to write a new
+function, class, hook, component, route, method, or constant as part of
+a fix or feature request, you MUST first run:
+
+```bash
+node scripts/cross-skill.mjs get-neighbourhood --json '{
+  "targetPaths": ["<files you intend to touch>"],
+  "intentDescription": "<one-line summary of what you are about to write>",
+  "k": 8
+}'
+```
+
+Then act on the recommendation column:
+
+- **`reuse`** (cosine ≥ 0.90) — reuse the existing symbol unless the user explicitly wants a sibling. Note the existing symbol in your reply.
+- **`extend`** (0.85–0.90) — strongly prefer extending the existing symbol; document why if you create a new one.
+- **`justify-divergence`** (0.75–0.85) — write the new code, but explicitly mention in your reply that you saw the similar candidate and why divergence is the right call.
+- **`review`** (<0.75) or empty records — proceed greenfield.
+
+**When NOT to consult**:
+
+- Pure bug fixes that change only an existing function's body (no new symbol introduced).
+- Trivial edits: typos, formatting, single-line conditional tweaks.
+- Doc-only or test-only changes (unless adding new test helpers).
+- When the cloud store is offline (`{"cloud": false}`) — log a hint that `npm run arch:refresh` would enable consultation, then proceed.
+
+**Auto-fired via Claude Code hook**: `.claude/hooks/arch-memory-check.sh`
+runs on `UserPromptSubmit` whenever the user's prompt contains an intent
+verb (`fix`, `add`, `implement`, `create`, `build`, `write`, `refactor`,
+`make`, `wire`, `hook`, `introduce`, `replace`, `extend`). If the
+consultation fired, you'll see a `> **Architectural-memory consultation**`
+callout prepended to the prompt — treat it as authoritative and follow
+the recommendation column. If it didn't fire (e.g., the user asked a
+question that turned into a fix mid-conversation), run the command
+manually as described above.
+
+**Disable per-session** (rare — debugging the hook, or working on the
+hook's own tests): set `ARCH_MEMORY_HOOK_DISABLE=1` in env.
+
+**Cost**: each consultation = 1 Gemini embed (~$0.0003) + 1 Supabase
+RPC (~50–200ms). Cached on disk by `(intentDescription, model, dim)`
+so repeats within 24h are free.
+
+**Empirical effectiveness test** (run once per repo when deploying, and
+after major prompt changes — the recipe is also embedded as comments at
+the bottom of `tests/hook-arch-memory-check.test.mjs`):
+1. Pick a fix that has known near-duplicates (e.g. for ai-organiser:
+   "add a function that watches vault file renames").
+2. Two fresh Claude sessions, same prompt:
+   - Session A: `ARCH_MEMORY_HOOK_DISABLE=1` (control)
+   - Session B: hook enabled (treatment)
+3. Record per session: did Claude reuse, mention, or write blind? Token delta.
+4. Hook is "effective" if treatment reuses-or-mentions in ≥60% of cases
+   vs control's baseline. Run on 5–10 representative prompts.
+
 ## Code Style
 
 - ESM modules (`import`/`export`, not `require`)

@@ -91,6 +91,41 @@ record which override is active — it goes into the ship_event.
 
 ---
 
+## Step 0.5c — Architectural Memory Refresh (advisory)
+
+If the architectural memory is configured for this repo (per the
+`docs/plans/architectural-memory.md` rollout), refresh the per-repo
+symbol-index and regenerate `docs/architecture-map.md` so the committed
+artefact stays current with what's about to ship.
+
+```bash
+# Determine since-commit (last shipped). Use upstream/origin HEAD as a proxy
+# when no /ship event has been recorded yet.
+LAST=$(git rev-parse "@{upstream}" 2>/dev/null || git rev-parse "HEAD~1")
+node scripts/symbol-index/refresh.mjs --since-commit "$LAST" || true
+node scripts/symbol-index/render-mermaid.mjs || true
+# Stage the regenerated map if it changed (pure additive; never blocks ship)
+git add docs/architecture-map.md 2>/dev/null || true
+```
+
+**This step is ALWAYS advisory — it never blocks a ship.** Per the
+plan's failure matrix:
+
+- Cloud off (no `SUPABASE_AUDIT_URL`) → skip silently, ship continues.
+- `SERVICE_ROLE_REQUIRED` → print warning explaining how to enable
+  refresh, ship continues.
+- RPC error / embedding error → print warning, ship continues.
+- Incremental refresh uses `git diff --name-status <since>`
+  (NO `..HEAD`) UNION `git ls-files --others --exclude-standard` so
+  the working-tree edits about to be committed are visible
+  (per Gemini-G1 fix).
+
+If `docs/architecture-map.md` has changed, it's staged and included in
+the ship commit. The drift sticky-issue is only updated by the weekly
+GH workflow, never by /ship directly.
+
+---
+
 ## Step 1 — Assess What Changed
 
 Before updating docs, understand the current state:

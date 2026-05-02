@@ -42,17 +42,32 @@ export const SKILL_ENTRY_SCRIPTS = Object.freeze({
   'audit-loop': {
     script: 'openai-audit.mjs',
     cli: 'node .audit-loop/scripts/openai-audit.mjs code ${input:plan_path}',
-    summary: 'Orchestrator for /audit-plan + /audit-code; dispatches by mode keyword or shorthand.',
+    summary: 'DEPRECATED — use /cycle for chained workflow, /audit-plan or /audit-code for atomic invocations.',
+  },
+  'cycle': {
+    script: 'cycle.mjs',
+    cli: 'node .audit-loop/scripts/cycle.mjs ${input:task_or_plan}',
+    summary: 'End-to-end feature cycle: plan → audit-plan → impl gate → audit-code → persona-test → ux-lock → ship.',
+  },
+  'explain': {
+    script: 'explain.mjs',
+    cli: 'node .audit-loop/scripts/explain.mjs ${input:target}',
+    summary: 'Explain WHY code is structured this way — synthesises arch-memory, git history, principles, and plan citations.',
+  },
+  'plan': {
+    script: 'plan.mjs',
+    cli: 'node .audit-loop/scripts/plan.mjs ${input:task}',
+    summary: 'Unified planner — auto-detects backend/frontend/full-stack scope; one consolidated plan output.',
   },
   'plan-backend': {
     script: 'plan-backend.mjs',
     cli: 'node .audit-loop/scripts/plan-backend.mjs ${input:task}',
-    summary: 'Generate a backend architecture plan. Output to docs/plans/.',
+    summary: 'DEPRECATED alias — invokes /plan with --scope=backend. Prefer /plan directly.',
   },
   'plan-frontend': {
     script: 'plan-frontend.mjs',
     cli: 'node .audit-loop/scripts/plan-frontend.mjs ${input:task}',
-    summary: 'Generate a frontend/UX plan with acceptance criteria. Output to docs/plans/.',
+    summary: 'DEPRECATED alias — invokes /plan with --scope=frontend. Prefer /plan directly.',
   },
   'persona-test': {
     script: 'persona-test.mjs',

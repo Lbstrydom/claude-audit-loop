@@ -39,5 +39,21 @@
       "C:\\Users\\User\\.claude\\skills",
       "\\tmp"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/arch-memory-check.sh",
+            "shell": "bash",
+            "timeout": 12,
+            "statusMessage": "Consulting architectural memory..."
+          }
+        ]
+      }
+    ]
   }
 }

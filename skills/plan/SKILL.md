@@ -1,0 +1,406 @@
+---
+name: plan
+description: |
+  Unified architecture + UX planner with engineering principles. Auto-detects
+  whether the work is backend-only, frontend-only, or full-stack and applies
+  the appropriate principle sets. Use when the user asks to plan, design, or
+  architect anything — features, refactors, API endpoints, services, UI
+  components, pages, layouts, user flows, modals, forms, visual changes,
+  database schemas. Also auto-invoke when detecting planning context like
+  "I want to add", "let's design", "plan the implementation", "how should we
+  structure this", "I need to refactor", "design the UI for", "build a
+  component", "improve the UX of".
+
+  Accepts arguments describing the task: /plan add a wine recommendation engine
+
+  Optional explicit scope hint via `--scope=backend|frontend|full-stack` for
+  cases where auto-detection is wrong; otherwise scope is inferred from the
+  task description and the files mentioned.
+---
+
+# Unified Architecture + UX Planner
+
+Single planning skill that produces ONE consolidated plan document, even
+for cross-stack work. Replaces `/plan-backend` and `/plan-frontend` —
+those still work as thin scope-hinted aliases.
+
+**Token efficiency**: principle tables (20 engineering, 26 UX, 17
+technical) live in `references/*.md` and load on demand only when the
+detected scope needs them. Backend-only work loads only engineering
+references; frontend-only loads only UX + technical; full-stack loads
+both. Per-invocation cost ≈ what you'd pay for the original skills.
+
+---
+
+## Phase 0 — Repo Stack Detection + Scope Detection
+
+### Repo Stack Detection
+
+```bash
+node scripts/cross-skill.mjs detect-stack
+```
+
+Returns `{ stack, pythonFramework, detectedFrom }`.
+
+| `stack` | Profile to apply |
+|---|---|
+| `js-ts` | Universal principles |
+| `python` | Universal + Python profile (see references) |
+| `mixed` | File-based routing per the touched files; both profiles if both languages |
+| `unknown` | Universal principles only |
+
+### Scope (the new bit)
+
+Choose ONE of: `backend`, `frontend`, `full-stack`. Use this
+decision tree:
+
+| Signal | Conclusion |
+|---|---|
+| User explicitly passed `--scope=X` | Use X |
+| Task touches only routes/services/models/migrations/CLIs/scripts/server | `backend` |
+| Task touches only components/pages/layouts/styles/forms/UI flows | `frontend` |
+| Task spans both, OR mentions API + UI together, OR is a feature with user-visible behavior backed by data | `full-stack` |
+| Genuinely uncertain | `full-stack` (safer — extra principles cost a few tokens vs missing real concerns) |
+
+**Cite the detected scope at the top of the plan** in a one-liner so
+the auditor and reviewer know which principle sets apply.
+
+Lazy reference loading by scope:
+
+| Scope | References to load in Phase 2/3 |
+|---|---|
+| backend | `references/engineering-principles.md` (+ python-backend-profile if Python) |
+| frontend | `references/ux-principles.md` + `references/technical-principles.md` (+ python-frontend-profile if Python+templates) |
+| full-stack | All of the above |
+
+---
+
+## Phase 0.5 — Architectural-memory Neighbourhood
+
+If the architectural memory is populated for this repo (a prior
+`npm run arch:refresh` succeeded against a Supabase project), consult
+the symbol-index for near-duplicates BEFORE proposing new code:
+
+```bash
+node scripts/cross-skill.mjs get-neighbourhood --json '{
+  "targetPaths": ["<paths/being/touched>"],
+  "intentDescription": "<one-line task summary>",
+  "kind": ["function","class","component","hook","route","method"]
+}'
+```
+
+Inline the returned `markdown` field as **"Neighbourhood considered"**
+near the top of the plan output. State-handling per the failure matrix:
+
+- `cloud:false` → emit literal `npm run arch:refresh` hint; proceed.
+- `cloud:true, records:[]` → "No near-duplicates found — proceed."
+- `EMBEDDING_MISMATCH` / `RPC_ERROR` → emit `_consultation failed: <code>; plan proceeds without architectural context_`; continue.
+- `BAD_INPUT` → surface to user, abort plan generation.
+
+Treat `reuse`/`extend` recommendations as defaults; document divergence
+under "Proposed Architecture" if the plan creates a sibling instead.
+
+---
+
+## Phase 1 — Understand Before You Design
+
+**Explore the codebase FIRST.** The biggest planning failure is
+proposing solutions without understanding what already exists.
+
+### Pre-step — Persona test history (frontend or full-stack scope only)
+
+If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set
+AND scope ⊇ frontend, check whether persona testing has surfaced pain
+points in the area being planned:
+
+```bash
+curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,p0_count,p1_count" \
+  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+```
+
+Filter sessions whose `focus` overlaps with the feature. If matches
+found, include in the Context Summary as **Known user-visible issues**:
+
+```
+Known user-visible issues (from persona testing):
+  • [P0] Form submit unresponsive — "Pieter" session, Apr 14 (focus: adding a bottle)
+  • [P1] No loading state on search — 3 sessions, recurring
+```
+
+Treat P0/P1 matches as HIGH priority in the design.
+
+### Exploration checklist (apply the rows that match scope)
+
+**Always**:
+1. **Map the landscape**: read the relevant existing files
+2. **Identify existing patterns**: how does the codebase already solve similar problems?
+3. **Find reusable components**: existing services, utilities, abstractions, components
+4. **Check for prior art**: something similar partially built?
+
+**If scope ⊇ backend**:
+5. **Trace the data flow**: request lifecycle from route → service → DB and back
+
+**If scope ⊇ frontend**:
+6. **Audit the current UI**: read relevant HTML/CSS/JS for the area being changed
+7. **Map component landscape**: existing modals, cards, grids, forms, toasts
+8. **Identify the design language**: colour palette, typography, spacing, button styles
+9. **Trace user flows**: how the user navigates to and through related features
+10. **Check responsive behaviour**: how the UI handles different screen sizes
+11. **Note pain points**: what feels clunky, inconsistent, or confusing
+
+Do NOT propose a plan until exploration is complete.
+
+---
+
+## Phase 1.5 — Execution Model (backend or full-stack scope only)
+
+Forced question: **Are any planned operations dependent on others?**
+If yes, identify chains, prerequisites, and per-chain atomicity.
+
+This phase catches sequencing bugs that surface as HIGH findings in
+audit round 3+.
+
+### When this phase matters
+
+- **Batch operations**: moves, imports, migrations — order matters, partial failure needs rollback
+- **Multi-step workflows**: wizard flows, onboarding sequences — step N depends on step N-1
+- **State transitions**: status changes, approval chains — invalid intermediate states must be prevented
+- **Cross-entity operations**: swaps, cycles, rebalancing — A↔B swap is not two independent moves
+
+### What to produce
+
+1. **Dependency graph**: which operations must complete before others can start?
+2. **Chain identification**: group dependent operations into atomic chains
+3. **Failure semantics**: for each chain — rollback, retry, skip?
+4. **Concurrency model**: can chains run in parallel, or must they be serial?
+
+If all operations are independent — document that explicitly and move on.
+If ANY dependency exists — define execution order, atomicity boundary,
+and partial-failure recovery before proceeding.
+
+For frontend-only scope, this phase typically reduces to "operations are
+independent" and you move on quickly.
+
+---
+
+## Phase 2 — Engineering Principles (backend or full-stack scope)
+
+If scope ⊇ backend, every backend design decision is evaluated against
+20 principles across:
+- **Core Design** (1–10): DRY, SOLID, Modularity, No Hardcoding, Single Source of Truth
+- **Robustness** (11–16): Testability, Validation, Idempotency, Transaction Safety, Error Handling, Graceful Degradation
+- **Performance & Sustainability** (17–20): N+1 prevention, Backward Compat, Observability, Long-Term Flexibility
+
+Cite principle numbers in the plan's "Proposed Architecture" section
+(e.g. `(#1, #11)` next to a decision).
+
+Full tables + anti-patterns: `references/engineering-principles.md`.
+
+If frontend-only scope: skip this phase entirely.
+
+---
+
+## Phase 3 — UX & Design Principles (frontend or full-stack scope)
+
+If scope ⊇ frontend, every UI/UX decision is evaluated against 26
+principles across four groups: Gestalt, Interaction/Usability,
+Cognitive Load, Accessibility. Plus Nielsen's 10 heuristics as final
+cross-check.
+
+Cite numbers in the plan's "UX Design Decisions" section.
+
+Full tables: `references/ux-principles.md`.
+
+If backend-only scope: skip this phase entirely.
+
+---
+
+## Phase 4 — Technical Implementation Principles (frontend or full-stack scope)
+
+If scope ⊇ frontend, evaluate against 17 technical principles across
+Component Architecture (#27–31), State Management (#32–35), Event
+Handling (#36–39), CSS & Styling (#40–43).
+
+Cite numbers in the plan's "Technical Architecture" section.
+
+Full tables + anti-patterns: `references/technical-principles.md`.
+
+If backend-only scope: skip this phase entirely.
+
+---
+
+## Phase 5 — Long-Term Sustainability
+
+Resist the urge to solve only the immediate problem. Every plan answers:
+
+### System-level thinking (always)
+
+- **What assumptions does this design encode?** Which might change?
+- **If requirements change in 6 months, what breaks?** Design seams now so changes are localised.
+- **Does this tighten or loosen coupling?** Prefer loose coupling — components communicate through well-defined interfaces.
+- **Patterns or exceptions?** If this is the first of its kind, design as a pattern others can follow. If it deviates, justify why.
+
+### Architecture flexibility checklist
+
+- [ ] **Data-driven over logic-driven**: behaviour by data/config, not rewriting code?
+- [ ] **Strategy pattern over switch**: would a new variant require a new file (good) or modifying existing function (bad)?
+- [ ] **Composable pipeline**: can processing steps be added, removed, reordered without rewriting?
+- [ ] **Abstraction boundaries**: if we swap DB, AI provider, or external API, how many files change? Target: 1–2 adapter files.
+- [ ] **Migration path**: if this outgrows its design, is there a clear upgrade path without rewrite?
+
+### UI-specific (frontend or full-stack scope)
+
+- **What if the design system changes?** CSS variables + reusable classes?
+- **What if we add more items/views?** Does the layout scale from 5 to 500? From 3 tabs to 12?
+- **What if mobile support tightens?** Is the component architecture responsive-ready?
+- **What if accessibility requirements tighten?** ARIA attributes, keyboard flows, focus management already in place?
+- **Are we creating a reusable pattern?** First of its kind → design as template.
+
+---
+
+## Phase 6 — Present the Plan
+
+Structure ONE consolidated output document. Section presence depends on scope:
+
+### Always
+
+#### 1. Context Summary
+- Detected scope + stack + Python framework (one line)
+- What exists today (Phase 1)
+- Patterns reused vs new
+- Known user-visible issues (if persona data + frontend scope)
+- Neighbourhood considered (if Phase 0.5 fired with results)
+
+#### 2. Proposed Architecture
+- Component diagram (which files/modules, how they interact)
+- Data flow (request → response path) — backend/full-stack
+- User flow + ASCII wireframe — frontend/full-stack
+- Key design decisions and **which principles drove them** (cite #N)
+
+### If scope ⊇ frontend
+
+#### 3. UX Design Decisions
+- Key choices and **which UX principles drove them**
+- How Gestalt principles shaped the layout
+- How cognitive load was managed
+- Accessibility approach
+
+#### 4. Technical Architecture (frontend)
+- Component diagram (JS modules, how they interact)
+- State management approach
+- Event handling strategy
+- CSS architecture (new classes, variables, responsive approach)
+
+#### 5. State Map (frontend)
+For every component, document: Empty / Loading / Error / Success / Edge cases.
+
+### Always
+
+#### 6. Sustainability Notes
+- Assumptions that could change
+- How the design accommodates future change
+- Extension points deliberately built in
+
+#### 7. File-Level Plan
+For each file to be created or modified:
+- **File path** + purpose
+- **Key functions/exports** with brief descriptions
+- **Dependencies** (imports + what imports it)
+- **Why this file** (which principle justifies it)
+
+#### 8. Risk & Trade-off Register
+- Trade-offs made + why
+- What could go wrong
+- What was deliberately deferred (and why that is OK)
+
+#### 9. Testing Strategy
+- What gets unit tested
+- What gets integration tested
+- Key edge cases
+- (Frontend) Visual/manual checklist + a11y testing + responsive breakpoints
+
+### If scope ⊇ frontend
+
+#### 10. Acceptance Criteria (Playwright-verifiable)
+
+Same machine-parseable Section 9 as the previous `/plan-frontend`. Drives
+`/ux-lock verify`. Format:
+
+```
+- [SEVERITY] [CATEGORY] <one-line description>
+  - Setup: <how to reach the state this asserts on>
+  - Assert: <what to check, as a semantic DOM contract>
+```
+
+Severity: `P0`/`P1`/`P2`/`P3`. Category (closed set): `visibility`,
+`interaction`, `a11y`, `state`, `responsive`, `text`, `navigation`, `other`.
+
+Assertion rules (critical — verify mode cannot work if you break these):
+- Assert on **semantic DOM contracts only**: `getByRole(...)`, `getByLabel(...)`, `getByTestId(...)`, `aria-*`, ARIA roles, axe-core
+- **Never** reference CSS class names, internal state, or implementation details
+- **Never** describe "it should feel fast" — that's `/persona-test` territory
+- If a criterion can only be expressed via class selector, propose adding a `data-testid` during implementation
+
+Coverage guidance: ≥1 P0 per primary user flow; ≥1 a11y per new component;
+≥1 state criterion for components with loading/error/empty states; ≥1
+responsive if mobile is a target.
+
+If you can't write ≥5 criteria for a non-trivial frontend plan, it may
+be under-specified — revisit Phase 1 and §5 (State Map).
+
+---
+
+## Phase 7 — Persist the Plan
+
+Save to `docs/plans/<descriptive-name>.md`. Create `docs/plans/` if
+needed. Metadata header:
+
+```markdown
+# Plan: <Feature Name>
+- **Date**: <today's date>
+- **Status**: Draft | Approved | In Progress | Complete
+- **Author**: Claude + <user>
+- **Scope**: backend | frontend | full-stack   ← from Phase 0
+```
+
+Register in the cross-skill store so audit-loop + ux-lock can link:
+
+```bash
+node scripts/cross-skill.mjs upsert-plan --json '{
+  "path": "docs/plans/<name>.md",
+  "skill": "plan",
+  "status": "draft"
+}'
+```
+
+Update status as implementation progresses.
+
+---
+
+## Reminders
+
+- **Detect scope first** — Phase 0 is load-bearing; the rest of the flow keys off it
+- **Explore before proposing** — codebase is ground truth, not assumptions
+- **Name the principles** — every design choice cites which principle(s) it serves (#N)
+- **One document, one audit** — no merging child plans, no archive cruft
+- **Section 10 acceptance criteria is the ship gate** for frontend/full-stack — `/ux-lock verify` grades against these
+- **Show every state** — Empty/Loading/Error/Success for any component you design
+- **Wireframe before code** — ASCII layouts prevent expensive rework
+- **Accessibility is not optional** — baseline, not nice-to-have
+
+---
+
+## Reference files
+
+This skill's canonical flow is above. The files below cover specialised
+situations — read them only when the trigger applies (scope detection
+in Phase 0 tells you which ones).
+
+| File | Summary | Read when |
+|---|---|---|
+| `references/engineering-principles.md` | 20 engineering principles — core design, robustness, performance, sustainability. | Phase 2 — scope ⊇ backend AND writing Proposed Architecture; need to cite principles. |
+| `references/ux-principles.md` | 26 UX + design principles — Gestalt, interaction, cognitive load, accessibility, state/resilience. | Phase 3 — scope ⊇ frontend AND evaluating a design decision. |
+| `references/technical-principles.md` | 17 technical implementation principles — component architecture, state, events, CSS/styling. | Phase 4 — scope ⊇ frontend AND writing Technical Architecture. |
+| `references/python-backend-profile.md` | Python backend profile — framework-tagged principle checks + stack commands + anti-patterns. | Phase 0 detect-stack returned `python` (or mixed with Python backend files) AND scope ⊇ backend. |
+| `references/python-frontend-profile.md` | Python frontend profile — Jinja/Django/Flask template patterns + HTMX + anti-patterns. | Phase 0 detect-stack returned `python` (or mixed with Python frontend files) AND scope ⊇ frontend. |

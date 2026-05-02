@@ -49,7 +49,25 @@ import {
   upsertPersona,
   recordPersonaSession,
   isPersonaCloudEnabled,
+  // Architectural memory (Phase A)
+  upsertRepoByUuid,
+  getRepoIdByUuid,
+  openRefreshRun,
+  publishRefreshRun,
+  abortRefreshRun,
+  getActiveSnapshot,
+  recordSymbolDefinitions,
+  recordSymbolIndex,
+  recordSymbolEmbedding,
+  recordLayeringViolations,
+  setActiveEmbeddingModel,
+  callNeighbourhoodRpc,
+  computeDriftScore,
+  listSymbolsForSnapshot,
+  listLayeringViolationsForSnapshot,
 } from './learning-store.mjs';
+import { resolveRepoIdentity, persistRepoIdentity } from './lib/repo-identity.mjs';
+import { getNeighbourhoodForIntent } from './lib/neighbourhood-query.mjs';
 import { detectRepoStack, detectPythonEnvironmentManager } from './lib/repo-stack.mjs';
 import { StackProfileSchema } from './lib/schemas.mjs';
 import { z } from 'zod';
@@ -404,7 +422,215 @@ async function cmdWhoami() {
     commitSha: currentCommitSha(),
     branch: currentBranch(),
     supabaseConfigured: !!process.env.SUPABASE_AUDIT_URL,
+    serviceRoleConfigured: !!process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY,
   });
+}
+
+// ── Architectural Memory subcommands (Phase A) ──────────────────────────────
+
+async function cmdGetActiveRefreshId() {
+  await initLearningStore();
+  if (!isCloudEnabled()) return emit({ ok: true, cloud: false, refreshId: null });
+  const repoUuid = argOption('repo-uuid');
+  if (!repoUuid) return emitError('BAD_INPUT', '--repo-uuid required');
+  const repo = await getRepoIdByUuid(repoUuid);
+  if (!repo) return emit({ ok: true, cloud: true, repoFound: false, refreshId: null });
+  const snap = await getActiveSnapshot(repo.id);
+  emit({
+    ok: true,
+    cloud: true,
+    repoFound: true,
+    refreshId: snap?.refreshId || null,
+    activeEmbeddingModel: snap?.activeEmbeddingModel || null,
+    activeEmbeddingDim: snap?.activeEmbeddingDim || null,
+  });
+}
+
+async function cmdGetNeighbourhood() {
+  const p = parsePayload();
+  await initLearningStore();
+  if (!isCloudEnabled()) {
+    return emit({
+      ok: true, cloud: false, refreshId: null, records: [], totalCandidatesConsidered: 0,
+      truncated: false, hint: 'cloud disabled — run `npm run arch:refresh` to enable',
+    });
+  }
+  // Resolve repoUuid: explicit takes precedence; else derive from cwd
+  let repoUuid = p.repoUuid;
+  if (!repoUuid) {
+    repoUuid = resolveRepoIdentity(process.cwd()).repoUuid;
+  }
+  try {
+    const out = await getNeighbourhoodForIntent({
+      getRepoIdByUuid,
+      getActiveSnapshot,
+      callNeighbourhoodRpc: (args) => callNeighbourhoodRpc(args),
+    }, { ...p, repoUuid });
+    emit({ ok: true, cloud: true, ...out });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message, {
+      issues: err.issues,
+      expected: err.expected,
+      available: err.available,
+    });
+  }
+}
+
+async function cmdOpenRefreshRun() {
+  const p = parsePayload();
+  if (!p.repoUuid || !p.mode) return emitError('BAD_INPUT', 'repoUuid and mode required');
+  await initLearningStore();
+  try {
+    let repo = await getRepoIdByUuid(p.repoUuid);
+    if (!repo) {
+      const newRepo = await upsertRepoByUuid({ repoUuid: p.repoUuid, name: p.name || 'unknown' });
+      if (!newRepo) return emitError('UPSERT_FAILED', 'could not create audit_repos row');
+      repo = { id: newRepo.id };
+    }
+    const run = await openRefreshRun({
+      repoId: repo.id, mode: p.mode, walkStartCommit: p.walkStartCommit,
+    });
+    emit({ ok: true, cloud: true, repoId: repo.id, ...run });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdPublishRefreshRun() {
+  const p = parsePayload();
+  if (!p.repoId || !p.refreshId) return emitError('BAD_INPUT', 'repoId and refreshId required');
+  await initLearningStore();
+  try {
+    const r = await publishRefreshRun({ repoId: p.repoId, refreshId: p.refreshId });
+    emit({ ok: true, cloud: true, result: r });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdAbortRefreshRun() {
+  const p = parsePayload();
+  if (!p.refreshId) return emitError('BAD_INPUT', 'refreshId required');
+  await initLearningStore();
+  try {
+    await abortRefreshRun({ refreshId: p.refreshId, reason: p.reason });
+    emit({ ok: true, cloud: true });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdRecordSymbolDefinitions() {
+  const p = parsePayload();
+  if (!p.repoId || !Array.isArray(p.definitions)) return emitError('BAD_INPUT', 'repoId and definitions required');
+  await initLearningStore();
+  try {
+    const map = await recordSymbolDefinitions(p.repoId, p.definitions);
+    emit({ ok: true, cloud: true, definitionMap: map });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdRecordSymbolIndex() {
+  const p = parsePayload();
+  if (!p.refreshId || !p.repoId || !Array.isArray(p.rows)) {
+    return emitError('BAD_INPUT', 'refreshId, repoId, rows required');
+  }
+  await initLearningStore();
+  try {
+    const n = await recordSymbolIndex(p.refreshId, p.repoId, p.rows);
+    emit({ ok: true, cloud: true, inserted: n });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdRecordSymbolEmbedding() {
+  const p = parsePayload();
+  if (!p.definitionId || !p.embeddingModel || !p.dimension || !Array.isArray(p.vector)) {
+    return emitError('BAD_INPUT', 'definitionId, embeddingModel, dimension, vector required');
+  }
+  await initLearningStore();
+  try {
+    await recordSymbolEmbedding(p);
+    emit({ ok: true, cloud: true });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdRecordLayeringViolations() {
+  const p = parsePayload();
+  if (!p.refreshId || !p.repoId || !Array.isArray(p.violations)) {
+    return emitError('BAD_INPUT', 'refreshId, repoId, violations required');
+  }
+  await initLearningStore();
+  try {
+    const n = await recordLayeringViolations(p.refreshId, p.repoId, p.violations);
+    emit({ ok: true, cloud: true, inserted: n });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdSetActiveEmbeddingModel() {
+  const p = parsePayload();
+  if (!p.repoId || !p.model || !p.dim) return emitError('BAD_INPUT', 'repoId, model, dim required');
+  await initLearningStore();
+  try {
+    await setActiveEmbeddingModel({ repoId: p.repoId, model: p.model, dim: p.dim });
+    emit({ ok: true, cloud: true });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdListSymbolsForSnapshot() {
+  const p = parsePayload();
+  if (!p.refreshId) return emitError('BAD_INPUT', 'refreshId required');
+  await initLearningStore();
+  if (!isCloudEnabled()) return emit({ ok: true, cloud: false, rows: [] });
+  try {
+    const rows = await listSymbolsForSnapshot(p);
+    emit({ ok: true, cloud: true, rows, count: rows.length });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdListLayeringViolationsForSnapshot() {
+  const refreshId = argOption('refresh-id');
+  if (!refreshId) return emitError('BAD_INPUT', '--refresh-id required');
+  await initLearningStore();
+  if (!isCloudEnabled()) return emit({ ok: true, cloud: false, rows: [] });
+  try {
+    const rows = await listLayeringViolationsForSnapshot(refreshId);
+    emit({ ok: true, cloud: true, rows });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdComputeDriftScore() {
+  const p = parsePayload();
+  if (!p.repoId || !p.refreshId) return emitError('BAD_INPUT', 'repoId and refreshId required');
+  await initLearningStore();
+  if (!isCloudEnabled()) return emit({ ok: true, cloud: false, drift: null });
+  try {
+    const drift = await computeDriftScore(p);
+    emit({ ok: true, cloud: true, drift });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message);
+  }
+}
+
+async function cmdResolveRepoIdentity() {
+  const cwd = argOption('cwd') || process.cwd();
+  const persist = rest.includes('--persist');
+  const id = resolveRepoIdentity(cwd);
+  if (persist) persistRepoIdentity(id.repoUuid, cwd);
+  emit({ ok: true, ...id, persisted: persist });
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────────
@@ -426,6 +652,21 @@ const commands = {
   'add-persona': cmdAddPersona,
   'record-persona-session': cmdRecordPersonaSession,
   'whoami': cmdWhoami,
+  // Architectural memory
+  'resolve-repo-identity':            cmdResolveRepoIdentity,
+  'get-active-refresh-id':            cmdGetActiveRefreshId,
+  'get-neighbourhood':                cmdGetNeighbourhood,
+  'open-refresh-run':                 cmdOpenRefreshRun,
+  'publish-refresh-run':              cmdPublishRefreshRun,
+  'abort-refresh-run':                cmdAbortRefreshRun,
+  'record-symbol-definitions':        cmdRecordSymbolDefinitions,
+  'record-symbol-index':              cmdRecordSymbolIndex,
+  'record-symbol-embedding':          cmdRecordSymbolEmbedding,
+  'record-layering-violations':       cmdRecordLayeringViolations,
+  'set-active-embedding-model':       cmdSetActiveEmbeddingModel,
+  'list-symbols-for-snapshot':        cmdListSymbolsForSnapshot,
+  'list-layering-violations-for-snapshot': cmdListLayeringViolationsForSnapshot,
+  'compute-drift-score':              cmdComputeDriftScore,
 };
 
 async function main() {

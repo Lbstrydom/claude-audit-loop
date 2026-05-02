@@ -1,0 +1,121 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  normaliseSignature,
+  normaliseBody,
+  signatureHash,
+  chunkBatches,
+  cosineSimilarity,
+  rankNeighbourhood,
+  recommendationFromSimilarity,
+} from '../scripts/lib/symbol-index.mjs';
+
+describe('normaliseSignature', () => {
+  it('collapses whitespace', () => {
+    assert.equal(normaliseSignature('foo (  a, b )'), 'foo(a,b)');
+  });
+  it('handles empty', () => {
+    assert.equal(normaliseSignature(''), '');
+    assert.equal(normaliseSignature(null), '');
+  });
+});
+
+describe('normaliseBody', () => {
+  it('strips block comments', () => {
+    assert.equal(normaliseBody('a/* inner */b'), 'ab');
+  });
+  it('strips line comments', () => {
+    assert.equal(normaliseBody('a\n  // hi\nb'), 'a b');
+  });
+});
+
+describe('signatureHash', () => {
+  it('is deterministic across runs', () => {
+    const input = { symbolName: 'foo', signature: 'foo(a, b)', bodyText: 'return a+b' };
+    assert.equal(signatureHash(input), signatureHash(input));
+  });
+  it('differs when body changes substantively', () => {
+    const a = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'return 1' });
+    const b = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'return 2' });
+    assert.notEqual(a, b);
+  });
+  it('is stable across whitespace-only body changes', () => {
+    const a = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'return 1' });
+    const b = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'return  1\n' });
+    assert.equal(a, b);
+  });
+  it('is stable across LF/CRLF', () => {
+    const a = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'a\nb' });
+    const b = signatureHash({ symbolName: 'foo', signature: 'foo()', bodyText: 'a\r\nb' });
+    assert.equal(a, b);
+  });
+});
+
+describe('chunkBatches', () => {
+  it('chunks evenly', () => {
+    assert.deepEqual(chunkBatches([1, 2, 3, 4], 2), [[1, 2], [3, 4]]);
+  });
+  it('handles remainder', () => {
+    assert.deepEqual(chunkBatches([1, 2, 3], 2), [[1, 2], [3]]);
+  });
+  it('handles empty', () => {
+    assert.deepEqual(chunkBatches([], 5), []);
+  });
+  it('handles n<=0', () => {
+    assert.deepEqual(chunkBatches([1, 2], 0), []);
+  });
+});
+
+describe('cosineSimilarity', () => {
+  it('returns 1 for identical vectors', () => {
+    assert.ok(Math.abs(cosineSimilarity([1, 0, 1], [1, 0, 1]) - 1) < 1e-9);
+  });
+  it('returns 0 for orthogonal vectors', () => {
+    assert.equal(cosineSimilarity([1, 0], [0, 1]), 0);
+  });
+  it('returns 0 for length mismatch', () => {
+    assert.equal(cosineSimilarity([1, 2], [1, 2, 3]), 0);
+  });
+  it('returns 0 for empty', () => {
+    assert.equal(cosineSimilarity([], []), 0);
+  });
+});
+
+describe('rankNeighbourhood', () => {
+  const records = [
+    { symbolName: 'a', filePath: 'x.mjs', embedding: [1, 0] },
+    { symbolName: 'b', filePath: 'y.mjs', embedding: [0.9, 0.1] },
+    { symbolName: 'c', filePath: 'z.mjs', embedding: [0, 1] },
+  ];
+  it('combines hop_score + similarity', () => {
+    const ranked = rankNeighbourhood(records, [1, 0], ['x.mjs'], 3);
+    assert.equal(ranked[0].symbolName, 'a'); // hop=1 + sim=1 → score 1
+    // b has sim ~0.99 but no hop → 0.6 * 0.99 = ~0.59
+    // a has hop=1 + sim=1 → 0.4 + 0.6 = 1.0
+    assert.ok(ranked[0].score > ranked[1].score);
+  });
+  it('alphabetical tie-break', () => {
+    const ties = [
+      { symbolName: 'b', filePath: 'p.mjs', embedding: [1, 0] },
+      { symbolName: 'a', filePath: 'p.mjs', embedding: [1, 0] },
+    ];
+    const ranked = rankNeighbourhood(ties, [1, 0], [], 2);
+    assert.equal(ranked[0].symbolName, 'a');
+  });
+});
+
+describe('recommendationFromSimilarity', () => {
+  it('maps high sim to reuse', () => {
+    assert.equal(recommendationFromSimilarity(0.95), 'reuse');
+  });
+  it('maps moderate to extend', () => {
+    assert.equal(recommendationFromSimilarity(0.86), 'extend');
+  });
+  it('maps low-moderate to justify-divergence', () => {
+    assert.equal(recommendationFromSimilarity(0.78), 'justify-divergence');
+  });
+  it('maps low to review', () => {
+    assert.equal(recommendationFromSimilarity(0.5), 'review');
+  });
+});

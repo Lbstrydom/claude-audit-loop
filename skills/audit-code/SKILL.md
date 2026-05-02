@@ -40,6 +40,33 @@ Show kickoff card:
 
 ---
 
+## Step 0.5 — Architectural-memory catalogue (--scope=full only)
+
+When `--scope=full`, fetch the repo's symbol catalogue from architectural
+memory (if populated) and inline a "Symbol catalogue" section into the
+prompt context. This helps the auditor catch cross-file duplication that
+diff-scope cannot see.
+
+```bash
+# 1. Resolve repo identity + active snapshot
+node scripts/cross-skill.mjs get-active-refresh-id --repo-uuid "$(node scripts/cross-skill.mjs resolve-repo-identity | jq -r .repoUuid)"
+# 2. Fetch top-N symbols (env-tunable: ARCH_AUDIT_FULL_TOPN, default 200)
+node scripts/cross-skill.mjs list-symbols-for-snapshot --json '{"refreshId":"<from step 1>","limit":200}'
+```
+
+Format the rows as a `## Symbol catalogue (top N by domain)` section
+with `(domain alphabetical, symbol_name alphabetical)` ordering. Note
+truncation in the section header if `count == limit`.
+
+States:
+- `cloud:false` or `refreshId:null` → skip section silently (audit proceeds normally).
+- `RPC_ERROR` → skip section, log warning to stderr.
+
+This step is advisory. Audit must work even if architectural memory is
+unavailable — never fail the run.
+
+---
+
 ## Step 1 — Choose Audit Scope
 
 **CRITICAL**: GPT doesn't know what's "new" vs pre-existing — it flags

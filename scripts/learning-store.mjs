@@ -9,6 +9,8 @@
 import dotenv from 'dotenv';
 dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env', quiet: true });
 
+import crypto from 'node:crypto';
+
 let _supabase = null;
 let _userId = null;
 let _hasClassificationColumns = null;
@@ -1448,3 +1450,494 @@ export async function recordPersonaSession(session) {
   // existing row's id. Caller can compare to its generated session_id to tell.
   return { sessionId: data?.id || null, existed: false, statsUpdated };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Architectural Memory (per docs/plans/architectural-memory.md)
+//
+// Per R2 H10: writes use a SEPARATE service-role client. No anon-write
+// fallback exists; missing service-role key → SERVICE_ROLE_REQUIRED throw.
+// ════════════════════════════════════════════════════════════════════════════
+
+let _writeClient = null;
+
+/**
+ * Lazy-init the service-role write client. Throws SERVICE_ROLE_REQUIRED if
+ * the key is absent — no anon-write fallback (per R2 H10).
+ * @returns {Promise<object>}
+ */
+export async function getWriteClient() {
+  if (_writeClient) return _writeClient;
+  if (!process.env.SUPABASE_AUDIT_URL || !process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY) {
+    const err = new Error(
+      'SUPABASE_AUDIT_SERVICE_ROLE_KEY required for writes. ' +
+      'Set it in .env (developer-local) or as a GH secret (workflow). ' +
+      'No anon-write fallback exists by design.'
+    );
+    err.code = 'SERVICE_ROLE_REQUIRED';
+    throw err;
+  }
+  const { createClient } = await import('@supabase/supabase-js');
+  _writeClient = createClient(
+    process.env.SUPABASE_AUDIT_URL,
+    process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY,
+    { auth: { persistSession: false } }
+  );
+  return _writeClient;
+}
+
+/** Anon read client — same as the existing _supabase. */
+export function getReadClient() { return _supabase; }
+
+/**
+ * Resolve repo row by stable repo_uuid (per R1 H6 / R3 H6).
+ * Returns null if cloud disabled or row not found.
+ *
+ * @param {string} repoUuid
+ * @returns {Promise<{id: string, name: string, activeRefreshId: string|null, activeEmbeddingModel: string|null, activeEmbeddingDim: number|null}|null>}
+ */
+export async function getRepoIdByUuid(repoUuid) {
+  if (!_supabase) return null;
+  const { data, error } = await _supabase
+    .from('audit_repos')
+    .select('id, name, repo_uuid, active_refresh_id, active_embedding_model, active_embedding_dim')
+    .eq('repo_uuid', repoUuid)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    id: data.id,
+    name: data.name,
+    activeRefreshId: data.active_refresh_id,
+    activeEmbeddingModel: data.active_embedding_model,
+    activeEmbeddingDim: data.active_embedding_dim,
+  };
+}
+
+/**
+ * Upsert a repo row keyed on repo_uuid. Requires write client.
+ *
+ * @param {{repoUuid: string, name: string, fingerprint?: string}} input
+ * @returns {Promise<{id: string}|null>}
+ */
+export async function upsertRepoByUuid({ repoUuid, name, fingerprint }) {
+  const w = await getWriteClient();
+  // First try update by uuid
+  const { data: existing } = await w
+    .from('audit_repos')
+    .select('id')
+    .eq('repo_uuid', repoUuid)
+    .maybeSingle();
+  if (existing?.id) return { id: existing.id };
+  // Insert new row (fingerprint may be provided for backward-compat)
+  const fp = fingerprint || `repo_uuid:${repoUuid}`;
+  const { data, error } = await w
+    .from('audit_repos')
+    .upsert({ repo_uuid: repoUuid, name, fingerprint: fp, last_audited_at: new Date().toISOString() },
+            { onConflict: 'fingerprint' })
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    process.stderr.write(`  [arch] upsertRepoByUuid failed: ${error.message}\n`);
+    return null;
+  }
+  return data ? { id: data.id } : null;
+}
+
+/**
+ * Open a new refresh_run row. Holds the (repo_id, status='running') unique
+ * lock until publishRefreshRun or abortRefreshRun.
+ *
+ * @param {{repoId: string, mode: 'full'|'incremental', walkStartCommit?: string}} input
+ * @returns {Promise<{refreshId: string, cancellationToken: string}>}
+ */
+export async function openRefreshRun({ repoId, mode, walkStartCommit }) {
+  const w = await getWriteClient();
+  const cancellationToken = crypto.randomUUID();
+  const { data, error } = await w
+    .from('refresh_runs')
+    .insert({
+      repo_id: repoId,
+      mode,
+      walk_start_commit: walkStartCommit || null,
+      cancellation_token: cancellationToken,
+      last_heartbeat_at: new Date().toISOString(),
+    })
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    if (error.code === '23505') {
+      const e = new Error(`A refresh is already in flight for this repo. Pass --force to abort.`);
+      e.code = 'REFRESH_IN_FLIGHT';
+      throw e;
+    }
+    throw error;
+  }
+  return { refreshId: data.id, cancellationToken };
+}
+
+/**
+ * Atomic publish via Postgres RPC (per Gemini-R2 G1).
+ * supabase-js cannot multi-statement transact; must use the server-side RPC.
+ * R1 audit H4: active embedding model + dim are set atomically inside the
+ * publish RPC so repo metadata can never diverge from a half-completed refresh.
+ *
+ * @param {{repoId: string, refreshId: string, activeEmbeddingModel?: string, activeEmbeddingDim?: number}} input
+ */
+export async function publishRefreshRun({ repoId, refreshId, activeEmbeddingModel, activeEmbeddingDim }) {
+  const w = await getWriteClient();
+  const { data, error } = await w.rpc('publish_refresh_run', {
+    p_repo_id: repoId,
+    p_refresh_id: refreshId,
+    p_active_embedding_model: activeEmbeddingModel || null,
+    p_active_embedding_dim: activeEmbeddingDim || null,
+  });
+  if (error) throw new Error(`publish_refresh_run RPC failed: ${error.message}`);
+  return data;
+}
+
+/** Mark a refresh_run aborted. Workers checking status see this and exit. */
+export async function abortRefreshRun({ refreshId, reason }) {
+  const w = await getWriteClient();
+  const { error } = await w
+    .from('refresh_runs')
+    .update({ status: 'aborted', error: reason || null, completed_at: new Date().toISOString(), retention_class: 'aborted' })
+    .eq('id', refreshId);
+  if (error) throw new Error(`abortRefreshRun failed: ${error.message}`);
+}
+
+/** Touch heartbeat so --force can detect a live worker. */
+export async function heartbeatRefreshRun({ refreshId }) {
+  const w = await getWriteClient();
+  await w.from('refresh_runs')
+    .update({ last_heartbeat_at: new Date().toISOString() })
+    .eq('id', refreshId);
+}
+
+/**
+ * Read current `audit_repos.active_refresh_id` + active embedding model/dim.
+ * Reader (anon) — used by neighbourhood-query, render, audit-code.
+ *
+ * @param {string} repoId
+ * @returns {Promise<{refreshId: string|null, activeEmbeddingModel: string|null, activeEmbeddingDim: number|null}|null>}
+ */
+export async function getActiveSnapshot(repoId) {
+  if (!_supabase) return null;
+  const { data, error } = await _supabase
+    .from('audit_repos')
+    .select('active_refresh_id, active_embedding_model, active_embedding_dim')
+    .eq('id', repoId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return {
+    refreshId: data.active_refresh_id,
+    activeEmbeddingModel: data.active_embedding_model,
+    activeEmbeddingDim: data.active_embedding_dim,
+  };
+}
+
+// Chunk size for Supabase REST upserts. Large repos (8000+ symbols) blow
+// past Supabase's request body limit and PostgREST timeouts when sent in
+// one shot — found live during ai-organiser refresh (8406 symbols → fetch
+// failed). 500 rows/chunk keeps each request well under the 1MB limit and
+// inside the default 60s timeout.
+const UPSERT_CHUNK_SIZE = 500;
+
+function chunk(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+/**
+ * Wrap a Supabase request in retry+backoff so transient network blips
+ * (`TypeError: fetch failed`) don't abort a multi-thousand-symbol refresh.
+ * Found live during ai-organiser refresh (8406 symbols, mid-run fetch died).
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @param {string} label - for error context
+ * @param {number} maxAttempts
+ * @returns {Promise<T>}
+ */
+async function withRetry(fn, label, maxAttempts = 4) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try { return await fn(); }
+    catch (err) {
+      lastErr = err;
+      const msg = String(err.message || err);
+      const isNetwork = msg.includes('fetch failed') || msg.includes('ETIMEDOUT')
+        || msg.includes('ECONNRESET') || msg.includes('ENOTFOUND') || msg.includes('EAI_AGAIN');
+      if (!isNetwork || attempt === maxAttempts) throw err;
+      const delayMs = 500 * Math.pow(2, attempt - 1) + Math.random() * 250;
+      process.stderr.write(`  [arch] ${label} network blip (attempt ${attempt}/${maxAttempts}): ${msg.slice(0, 120)} — retrying in ${Math.round(delayMs)}ms\n`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/** Bulk upsert symbol_definitions; returns {[canonical_path|name|kind]: definitionId}. */
+export async function recordSymbolDefinitions(repoId, defs) {
+  if (!Array.isArray(defs) || defs.length === 0) return {};
+  const w = await getWriteClient();
+  const rows = defs.map(d => ({
+    repo_id: repoId,
+    canonical_path: d.canonicalPath,
+    symbol_name: d.symbolName,
+    kind: d.kind,
+    last_seen_at: new Date().toISOString(),
+  }));
+  const map = {};
+  for (const slice of chunk(rows, UPSERT_CHUNK_SIZE)) {
+    const data = await withRetry(async () => {
+      const { data, error } = await w
+        .from('symbol_definitions')
+        .upsert(slice, { onConflict: 'repo_id,canonical_path,symbol_name,kind' })
+        .select('id, canonical_path, symbol_name, kind');
+      if (error) throw new Error(`recordSymbolDefinitions failed: ${error.message}`);
+      return data;
+    }, 'recordSymbolDefinitions');
+    for (const r of (data || [])) {
+      map[`${r.canonical_path}|${r.symbol_name}|${r.kind}`] = r.id;
+    }
+  }
+  return map;
+}
+
+export async function recordSymbolIndex(refreshId, repoId, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return 0;
+  const w = await getWriteClient();
+  const payload = rows.map(r => ({
+    refresh_id: refreshId,
+    repo_id: repoId,
+    definition_id: r.definitionId,
+    file_path: r.filePath,
+    start_line: r.startLine,
+    end_line: r.endLine,
+    signature_hash: r.signatureHash,
+    purpose_summary: r.purposeSummary || null,
+    domain_tag: r.domainTag || null,
+  }));
+  let total = 0;
+  for (const slice of chunk(payload, UPSERT_CHUNK_SIZE)) {
+    await withRetry(async () => {
+      const { error } = await w
+        .from('symbol_index')
+        .upsert(slice, { onConflict: 'refresh_id,definition_id' });
+      if (error) throw new Error(`recordSymbolIndex failed: ${error.message}`);
+    }, 'recordSymbolIndex');
+    total += slice.length;
+  }
+  return total;
+}
+
+export async function recordSymbolEmbedding({ definitionId, embeddingModel, dimension, vector, signatureHash }) {
+  const w = await getWriteClient();
+  await withRetry(async () => {
+    const { error } = await w
+      .from('symbol_embeddings')
+      .upsert({
+        definition_id: definitionId,
+        embedding_model: embeddingModel,
+        dimension,
+        embedding: vector,
+        signature_hash: signatureHash,
+      }, { onConflict: 'definition_id,embedding_model,dimension,signature_hash' });
+    if (error) throw new Error(`recordSymbolEmbedding failed: ${error.message}`);
+  }, 'recordSymbolEmbedding');
+}
+
+export async function recordLayeringViolations(refreshId, repoId, violations) {
+  if (!Array.isArray(violations) || violations.length === 0) return 0;
+  const w = await getWriteClient();
+  const payload = violations.map(v => ({
+    refresh_id: refreshId,
+    repo_id: repoId,
+    rule_name: v.ruleName,
+    from_path: v.fromPath,
+    to_path: v.toPath,
+    severity: v.severity,
+    comment: v.comment || null,
+  }));
+  let total = 0;
+  for (const slice of chunk(payload, UPSERT_CHUNK_SIZE)) {
+    await withRetry(async () => {
+      const { error } = await w
+        .from('symbol_layering_violations')
+        .upsert(slice, { onConflict: 'refresh_id,rule_name,from_path,to_path' });
+      if (error) throw new Error(`recordLayeringViolations failed: ${error.message}`);
+    }, 'recordLayeringViolations');
+    total += slice.length;
+  }
+  return total;
+}
+
+/**
+ * Set the repo's active embedding model+dim atomically. Per R3 H7 + Gemini G2,
+ * `model` MUST be a concrete provider id (never a sentinel string).
+ */
+export async function setActiveEmbeddingModel({ repoId, model, dim }) {
+  if (!model || !dim) throw new Error('model and dim are both required');
+  const w = await getWriteClient();
+  const { error } = await w
+    .from('audit_repos')
+    .update({ active_embedding_model: model, active_embedding_dim: dim })
+    .eq('id', repoId);
+  if (error) throw new Error(`setActiveEmbeddingModel failed: ${error.message}`);
+}
+
+/** Read active embedding model + dim from repo state. */
+export async function getActiveEmbeddingModel(repoId) {
+  if (!_supabase) return null;
+  const { data } = await _supabase
+    .from('audit_repos')
+    .select('active_embedding_model, active_embedding_dim')
+    .eq('id', repoId)
+    .maybeSingle();
+  if (!data) return null;
+  return { model: data.active_embedding_model, dim: data.active_embedding_dim };
+}
+
+/**
+ * Call symbol_neighbourhood RPC.
+ *
+ * @param {{repoId: string, refreshId: string, targetPaths: string[], intentEmbedding: number[], kindFilter: string[]|null, k: number}} args
+ * @returns {Promise<object[]>}
+ */
+export async function callNeighbourhoodRpc({ repoId, refreshId, targetPaths, intentEmbedding, kindFilter, k }) {
+  if (!_supabase) return [];
+  const { data, error } = await _supabase.rpc('symbol_neighbourhood', {
+    p_repo_id: repoId,
+    p_refresh_id: refreshId,
+    p_target_paths: targetPaths,
+    p_intent_embedding: intentEmbedding,
+    p_kind_filter: kindFilter && kindFilter.length ? kindFilter : null,
+    p_k: k,
+  });
+  if (error) {
+    const e = new Error(`symbol_neighbourhood RPC failed: ${error.message}`);
+    e.code = 'RPC_ERROR';
+    throw e;
+  }
+  return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Compute drift score via RPC.
+ * @returns {Promise<object|null>}
+ */
+export async function computeDriftScore({ repoId, refreshId, simDup, simName }) {
+  if (!_supabase) return null;
+  const { data, error } = await _supabase.rpc('drift_score', {
+    p_repo_id: repoId,
+    p_refresh_id: refreshId,
+    p_sim_dup: simDup,
+    p_sim_name: simName,
+  });
+  if (error) {
+    const e = new Error(`drift_score RPC failed: ${error.message}`);
+    e.code = 'RPC_ERROR';
+    throw e;
+  }
+  return data;
+}
+
+/**
+ * Read symbols for a snapshot with paginated filters (R3 H9).
+ * Reads via anon.
+ */
+export async function listSymbolsForSnapshot({ refreshId, kind, domainTag, filePathPrefix, limit = 200, offset = 0 }) {
+  if (!_supabase) return [];
+  let q = _supabase
+    .from('symbol_index')
+    .select('id, definition_id, repo_id, file_path, start_line, end_line, signature_hash, purpose_summary, domain_tag, symbol_definitions!inner(symbol_name, kind)')
+    .eq('refresh_id', refreshId)
+    .order('file_path', { ascending: true })
+    .order('start_line', { ascending: true });
+  if (kind && kind.length) q = q.in('symbol_definitions.kind', kind);
+  if (domainTag) q = q.eq('domain_tag', domainTag);
+  if (filePathPrefix) q = q.like('file_path', `${filePathPrefix}%`);
+  q = q.range(offset, offset + limit - 1);
+  const { data, error } = await q;
+  if (error) {
+    const e = new Error(`listSymbolsForSnapshot failed: ${error.message}`);
+    e.code = 'RPC_ERROR';
+    throw e;
+  }
+  return (data || []).map(r => ({
+    id: r.id,
+    definitionId: r.definition_id,
+    refreshId,
+    repoId: r.repo_id,
+    filePath: r.file_path,
+    startLine: r.start_line,
+    endLine: r.end_line,
+    signatureHash: r.signature_hash,
+    purposeSummary: r.purpose_summary,
+    domainTag: r.domain_tag,
+    symbolName: r.symbol_definitions?.symbol_name,
+    kind: r.symbol_definitions?.kind,
+  }));
+}
+
+export async function listLayeringViolationsForSnapshot(refreshId) {
+  if (!_supabase) return [];
+  const { data, error } = await _supabase
+    .from('symbol_layering_violations')
+    .select('rule_name, from_path, to_path, severity, comment')
+    .eq('refresh_id', refreshId)
+    .order('rule_name');
+  if (error) throw new Error(`listLayeringViolations failed: ${error.message}`);
+  return (data || []).map(r => ({
+    ruleName: r.rule_name,
+    fromPath: r.from_path,
+    toPath: r.to_path,
+    severity: r.severity,
+    comment: r.comment,
+  }));
+}
+
+/**
+ * Bulk-copy untouched-file symbols from prior snapshot into new refresh_id.
+ * Implemented as INSERT ... SELECT via RPC for atomicity + speed.
+ * Touched file set is the union of A/M/D/R/U from git diff.
+ */
+export async function copyForwardUntouchedFiles({ repoId, fromRefreshId, toRefreshId, touchedFileSet }) {
+  const w = await getWriteClient();
+  // Read prior rows in pages, filter out touched, bulk insert. Simple
+  // pagination keeps memory bounded for large repos.
+  let copied = 0;
+  const pageSize = 500;
+  let offset = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data: rows, error } = await w
+      .from('symbol_index')
+      .select('definition_id, file_path, start_line, end_line, signature_hash, purpose_summary, domain_tag')
+      .eq('refresh_id', fromRefreshId)
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error(`copyForward read failed: ${error.message}`);
+    if (!rows || rows.length === 0) break;
+    const keep = rows.filter(r => !touchedFileSet.has(r.file_path));
+    if (keep.length > 0) {
+      const payload = keep.map(r => ({
+        refresh_id: toRefreshId,
+        repo_id: repoId,
+        definition_id: r.definition_id,
+        file_path: r.file_path,
+        start_line: r.start_line,
+        end_line: r.end_line,
+        signature_hash: r.signature_hash,
+        purpose_summary: r.purpose_summary,
+        domain_tag: r.domain_tag,
+      }));
+      const { error: insErr } = await w.from('symbol_index').insert(payload);
+      if (insErr) throw new Error(`copyForward insert failed: ${insErr.message}`);
+      copied += payload.length;
+    }
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+  return copied;
+}
+

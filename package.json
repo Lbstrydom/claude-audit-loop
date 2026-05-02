@@ -35,7 +35,13 @@
     "skills:check": "node scripts/check-skill-refs.mjs && node scripts/sync-shared-audit-refs.mjs --check && node scripts/regenerate-skill-copies.mjs --check",
     "audit:sync-shared-refs": "node scripts/sync-shared-audit-refs.mjs",
     "skills:manifest": "node scripts/build-manifest.mjs",
-    "skills:manifest:check": "node scripts/build-manifest.mjs --check"
+    "skills:manifest:check": "node scripts/build-manifest.mjs --check",
+    "arch:refresh": "node scripts/symbol-index/refresh.mjs",
+    "arch:refresh:full": "node scripts/symbol-index/refresh.mjs --full",
+    "arch:render": "node scripts/symbol-index/render-mermaid.mjs",
+    "arch:drift": "node scripts/symbol-index/drift.mjs",
+    "arch:prune": "node scripts/symbol-index/prune.mjs",
+    "arch:spike": "node scripts/symbol-index/spike-extract.mjs"
   },
   "keywords": [
     "claude",
@@ -62,6 +68,8 @@
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "pg": "^8.20.0"
+    "dependency-cruiser": "^17.3.10",
+    "pg": "^8.20.0",
+    "ts-morph": "^28.0.0"
   }
 }

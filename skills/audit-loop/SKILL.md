@@ -1,84 +1,47 @@
 ---
 name: audit-loop
 description: |
-  Orchestrator for /audit-plan + /audit-code. Dispatches by mode keyword
-  or shorthand. Use when you want the full plan-then-code cycle, or aren't
-  sure which audit mode applies. For atomic invocations and lower token
-  cost, prefer /audit-plan or /audit-code directly.
-  Triggers on: "audit loop", "plan and audit", "run the audit loop",
-  "auto-audit", "plan-audit-fix loop", "iterate on the plan", "GPT audit",
-  "full cycle".
-  Usage: /audit-loop plan <plan-file>             — Delegate to /audit-plan
-  Usage: /audit-loop code <plan-file>             — Delegate to /audit-code
-  Usage: /audit-loop <plan-file>                  — Shorthand → /audit-code
-  Usage: /audit-loop full <task-description>      — /audit-plan then /audit-code
-  Usage: /audit-loop <task-description>           — PLAN_CYCLE → /audit-plan
+  DEPRECATED — use `/cycle` for the full chained workflow, OR `/audit-plan`
+  / `/audit-code` for atomic invocations. The orchestrator dispatcher modes
+  this skill used to provide are now redundant: `/audit-loop plan <file>`
+  is just `/audit-plan <file>` (one fewer word); `/audit-loop code <file>`
+  is just `/audit-code <file>`; `/audit-loop full <task>` is now `/cycle <task>`.
+  This skill remains as a discoverable shim for muscle memory.
+  Triggers on: "audit loop", "plan and audit", "run the audit loop".
+  Usage: /audit-loop full <task>     — DEPRECATED → use /cycle <task>
+  Usage: /audit-loop plan <file>     — DEPRECATED → use /audit-plan <file>
+  Usage: /audit-loop code <file>     — DEPRECATED → use /audit-code <file>
 ---
 
-# Audit Loop Orchestrator
+# /audit-loop (deprecated alias)
 
-Thin dispatcher for the audit-plan and audit-code skills. Routes by input
-shape, then delegates to the appropriate sub-skill.
+This skill is a backward-compatibility shim. Its functionality has been
+unbundled into atomic skills + one orchestrator:
 
-**Input**: `$ARGUMENTS` — mode keyword + path, path alone, or task description.
+- **`/audit-plan <plan-file>`** — iteratively audit a plan file (was `/audit-loop plan <file>`)
+- **`/audit-code <plan-file>`** — multi-pass code audit against plan (was `/audit-loop code <file>` and `/audit-loop <file>`)
+- **`/cycle <task or plan-file>`** — chained workflow: plan → audit-plan → impl → audit-code → persona-test → ux-lock → ship (was `/audit-loop full <task>`)
 
----
+**Why deprecated:** the old dispatcher modes (`/audit-loop plan ...`,
+`/audit-loop code ...`) were pure overhead — they loaded an
+orchestrator SKILL.md just to delegate to the underlying skill. The
+only mode that added real value (chained execution) is now its own
+clear skill, `/cycle`.
 
-## Step 0 — Parse and Dispatch
+**What to do instead:**
 
-| Input | Dispatch to |
+| Old call | New call |
 |---|---|
-| `plan <plan-file>` | `/audit-plan <plan-file>` |
-| `code <plan-file>` | `/audit-code <plan-file>` |
-| `<plan-file>` (path resolves to existing file) | `/audit-code <plan-file>` |
-| `full <task description>` | chained: `/audit-plan <task>` → on success → `/audit-code <plan>` |
-| `<task description>` (no path) | `/audit-plan <task>` (PLAN_CYCLE) |
+| `/audit-loop plan docs/plans/x.md` | `/audit-plan docs/plans/x.md` |
+| `/audit-loop code docs/plans/x.md` | `/audit-code docs/plans/x.md` |
+| `/audit-loop docs/plans/x.md` | `/audit-code docs/plans/x.md` |
+| `/audit-loop full add a wine recommendation engine` | `/cycle add a wine recommendation engine` |
+| `/audit-loop add a wine recommendation engine` | `/cycle add a wine recommendation engine` |
 
-Detection rules:
-- A token is a plan-file path if it ends in `.md` AND `fs.existsSync(path)`.
-- Otherwise treat it as a task description.
+**Note on the user-global `/audit` skill**: there is also a
+`~/.claude/skills/audit/SKILL.md` that is a *different* tool — it's a
+single-pass Claude-only audit (no GPT/Gemini, no API cost) used for
+quick mid-coding checks. That skill is intentionally separate from this
+project's heavy multi-model audit pipeline. Don't conflate them.
 
-Show kickoff card:
-```
-═══════════════════════════════════════
-  /audit-loop — Dispatching
-  Mode: <PLAN_AUDIT | CODE_AUDIT | FULL_CYCLE | PLAN_CYCLE>
-  Delegate: /audit-<plan|code>
-═══════════════════════════════════════
-```
-
----
-
-## FULL_CYCLE flow
-
-1. Invoke `/audit-plan <task>` — generate plan, audit iteratively, converge.
-2. On success (Step 6 of audit-plan emits APPROVE), prompt the user to begin
-   implementation against the converged plan.
-3. Once code exists for the plan, invoke `/audit-code <plan-file>`.
-
-If `/audit-plan` does not converge within max-3 rounds, halt and present
-findings — the user decides whether to proceed with implementation despite
-unresolved plan concerns.
-
----
-
-## Why this is a thin orchestrator
-
-The audit-plan and audit-code skills have distinct concerns:
-
-- Plan audits have infinite refinement surface; max 3 rounds with
-  rigor-pressure early stop.
-- Code audits use multi-pass parallelism, R2+ ledger suppression, debt
-  capture, and 6-round 2-stable convergence.
-
-Splitting them gives Claude clearer routing, lower per-invocation token
-cost (~30% reduction on direct sub-skill invocations), and prevents drift
-between mode-specific instructions. This orchestrator preserves muscle
-memory and consumer-repo hooks that reference `/audit-loop` directly.
-
----
-
-## See also
-
-- `/audit-plan` — plan-only audits (max 3 rounds, rigor-pressure stop)
-- `/audit-code` — code-only audits (5 passes, R2+ suppression, debt capture)
+→ See [skills/cycle/SKILL.md](../cycle/SKILL.md), [skills/audit-plan/SKILL.md](../audit-plan/SKILL.md), [skills/audit-code/SKILL.md](../audit-code/SKILL.md) for the active flows.

@@ -1,8 +1,8 @@
 # Claude Engineering Skills
 
-A bundle of **6 AI-pair-programming skills** for planning, auditing, testing, and shipping code. Works with Claude Code, VS Code Copilot, Cursor, Windsurf, and any terminal.
+A bundle of **AI-pair-programming skills** for planning, auditing, testing, and shipping code. Works with Claude Code, VS Code Copilot, Cursor, Windsurf, and any terminal.
 
-Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Gemini 3.1 Pro does independent final review — with adaptive learning that improves both auditor and reviewer prompts over time. A **persona-test** skill closes the loop with real-user UX simulation against live URLs.
+Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Gemini 3.1 Pro does independent final review — with adaptive learning that improves both auditor and reviewer prompts over time. A **persona-test** skill closes the loop with real-user UX simulation against live URLs. An **architectural-memory** layer indexes every symbol in the repo with embeddings so AI agents catch duplicate-function drift before code gets written.
 
 > Renamed from `claude-audit-loop`. GitHub auto-redirects old URLs.
 
@@ -10,38 +10,48 @@ Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Ge
 
 | Skill | Purpose | Invoke |
 |-------|---------|--------|
-| **[audit-loop](skills/audit-loop/SKILL.md)** | Self-driving plan-audit-fix loop with 3 models + adaptive learning | `/audit-loop code docs/plans/X.md` |
-| **[plan-backend](skills/plan-backend/SKILL.md)** | Backend architecture planning with 20 engineering principles | `/plan-backend` |
-| **[plan-frontend](skills/plan-frontend/SKILL.md)** | Frontend UX + implementation planning with Gestalt principles | `/plan-frontend` |
-| **[ux-lock](skills/ux-lock/SKILL.md)** | Generate Playwright e2e regression specs that lock in a fix's public DOM contract | `/ux-lock <commit-or-description>` |
+| **[plan](skills/plan/SKILL.md)** | Unified planner — auto-detects backend/frontend/full-stack scope; one consolidated plan output | `/plan <task>` |
+| **[audit-plan](skills/audit-plan/SKILL.md)** | Iteratively audit a plan with GPT-5.4 + Gemini final gate (max 3 rounds) | `/audit-plan docs/plans/X.md` |
+| **[audit-code](skills/audit-code/SKILL.md)** | Multi-pass code audit against a plan with R2+ ledger suppression + Gemini final review | `/audit-code docs/plans/X.md` |
+| **[cycle](skills/cycle/SKILL.md)** | End-to-end orchestrator — chains plan → audit-plan → impl gate → audit-code → persona-test → ux-lock → ship | `/cycle <task>` |
+| **[explain](skills/explain/SKILL.md)** | "Why is this code shaped this way?" — synthesises arch-memory + git history + AGENTS.md principles | `/explain <file:line>` |
+| **[ux-lock](skills/ux-lock/SKILL.md)** | Generate Playwright e2e regression specs that lock in a fix's public DOM contract; verify-mode grades a plan against live impl | `/ux-lock <commit-or-description>` |
 | **[persona-test](skills/persona-test/SKILL.md)** | Persona-driven exploratory browser testing with Plan→Act→Reflect, P0–P3 findings, qualitative debrief, Supabase session memory | `/persona-test "first-time user" https://myapp.com` |
 | **[ship](skills/ship/SKILL.md)** | Pre-push quality gate: test, lint, format, commit, push (warns on open persona-test P0s + missing regression specs) | `/ship` |
+| **[ai-context-management](skills/ai-context-management/SKILL.md)** | Manages AGENTS.md / CLAUDE.md alignment across AI agents (Claude, Copilot, Cursor, Windsurf) | `/ai-context-management audit` |
+
+**Deprecated aliases** (kept for muscle memory): `/plan-backend` and `/plan-frontend` delegate to `/plan` with a scope hint; `/audit-loop` delegates to `/cycle` (chained mode) or atomic `/audit-plan` / `/audit-code`.
 
 All skills support **JavaScript/TypeScript** and **Python** (FastAPI, Django, Flask) with automatic stack detection.
 
 ## Skill Lifecycle Chain
 
-The 6 skills form a complete code-to-production loop:
+The skills form a complete code-to-production loop, orchestrated by `/cycle`:
 
 ```
-/plan-backend + /plan-frontend   ← Design with 20+ engineering + UX principles
+/plan                            ← Design with 20 eng + 26 UX + 17 technical principles (lazy-loaded by scope)
         |
         v
-/audit-loop                      ← GPT-5.4 audit → Claude triage → Gemini final gate
+/audit-plan                      ← Iterative plan refinement with GPT-5.4 + Gemini final gate
+        |
+        v  (human implementation gate)
+        |
+/audit-code                      ← Multi-pass code audit + R2+ ledger suppression + Gemini final
         |
         v
-/ux-lock                         ← Playwright e2e spec locks the fix's public DOM contract
-        |
-        v
-/ship                            ← Quality gate (test, lint, format, commit, push)
-        |                          ↑ blocks on open P0s from persona-test
-        v                          ↑ warns if recent fixes lack a /ux-lock regression spec
 /persona-test                    ← Real-user simulation against live URL (P0–P3)
         |
-        └──► feeds back into /plan-backend + /plan-frontend as "Known user-visible issues"
-             into /audit-loop as "Known code fragilities from user testing"
-             and triggers /ux-lock for every P0 fix, so it never regresses
+        v
+/ux-lock                         ← Playwright e2e spec locks every fix's public DOM contract
+        |
+        v
+/ship                            ← Quality gate + commit + push (warns on open P0s, missing specs)
+
+/cycle                           ← Orchestrates the whole chain end-to-end
+/explain                         ← "Why is this here?" — read-only synthesis from arch-memory + git
 ```
+
+**Architectural-memory hook** (`UserPromptSubmit`) auto-fires before any ad-hoc code change — when your prompt contains "fix", "add", "implement", "create", etc., it queries the symbol-index for near-duplicates and prepends a "consider reuse" callout to Claude's context. Catches drift that bypasses planning entirely.
 
 Each skill reads the outputs of previous skills:
 - **plan-backend / plan-frontend** query persona-test session history for recurring user pain points before designing
@@ -69,10 +79,18 @@ The setup wizard configures API keys (including optional persona-test Supabase),
 Once installed, the typical workflow is:
 
 ```bash
-/plan-backend add a wine recommendation endpoint   # design with principles
-/audit-loop code docs/plans/my-feature.md          # audit → fix → converge
-/ship                                               # quality gate + push
-/persona-test "first-time user" https://myapp.com  # UX simulation on live URL
+/plan add a wine recommendation endpoint            # design with principles (auto-detects scope)
+/audit-plan docs/plans/my-feature.md                # iterative plan refinement
+# (implement)
+/audit-code docs/plans/my-feature.md                # multi-pass code audit
+/ship                                                # quality gate + push
+/persona-test "first-time user" https://myapp.com   # UX simulation on live URL
+
+# OR run the whole chain in one command:
+/cycle add a wine recommendation endpoint           # plan → audit-plan → impl gate → audit-code → persona-test → ux-lock → ship
+
+# At any time, ask "why is this code shaped this way?":
+/explain scripts/openai-audit.mjs:412               # arch-memory + git history + principles
 ```
 
 ### Install skills into a specific repo
@@ -297,6 +315,37 @@ Each planning skill auto-detects your repo's stack:
 - **Mixed**: both present -- routes to the profile matching the task's cited files
 
 Python framework detection: **FastAPI**, **Django**, **Flask** (falls back to generic Python principles).
+
+## Architectural Memory
+
+Per-repo symbol-index stored in Supabase (with embeddings) catches duplicate-function drift before code gets written.
+
+**What it indexes**: every function, class, component, hook, route, method, and exported constant in the repo. For each: name, file path, signature, body checksum, LLM-generated 1-line purpose summary, embedding vector. Snapshot-isolated per refresh; `audit_repos.active_refresh_id` points at the published snapshot readers consume.
+
+**How it catches drift**:
+
+1. **Plan-time** — `/plan` (and the deprecated `/plan-backend` / `/plan-frontend` aliases) consult the index in Phase 0.5 with the user's intent description; near-duplicates appear as a "Neighbourhood considered" callout in the plan output.
+2. **Ad-hoc-fix time** — `.claude/hooks/arch-memory-check.sh` (a `UserPromptSubmit` hook) auto-fires when prompts contain intent verbs (`fix`, `add`, `implement`, `create`, `build`, `write`, `refactor`, `make`, `wire`, `hook`, `introduce`, `replace`, `extend`). The result is prepended to Claude's context as a `> **Architectural-memory consultation**` callout. Catches the casual "fix the X bug" path that bypasses planning entirely.
+3. **Audit-time** — `/audit-code --scope=full` inlines the full symbol catalogue so the auditor can spot cross-file duplication.
+4. **Drift sweep** — weekly GH workflow (`.github/workflows/architectural-drift.yml`) computes a drift score and opens a sticky issue if cosine-similar symbol pairs cluster.
+5. **Render** — `npm run arch:render` produces a committed `docs/architecture-map.md` with Mermaid C4-style diagrams + a flat table per domain (regenerated on `/ship`).
+
+**Setup per consumer repo**:
+
+```bash
+# 1. Add SUPABASE_AUDIT_SERVICE_ROLE_KEY to .env (writes use service role; reads use anon)
+# 2. Populate the index:
+npm run arch:refresh:full
+# 3. Commit the artefacts:
+git add .audit-loop/repo-id docs/architecture-map.md package.json
+git commit -m "feat(arch-memory): initial index"
+```
+
+**Cost**: ~$0.50 for the first full refresh of a 1000-symbol repo (Haiku purpose summaries + Gemini text-embedding-004). Steady-state ~$0 thanks to signature-hash caching. Per-prompt hook consultation: ~$0.0003.
+
+**Files committed in consumer repos**: `.audit-loop/repo-id` (stable per-repo UUID), `docs/architecture-map.md` (rendered map), `package.json` (new `arch:*` scripts + `ts-morph` + `dependency-cruiser` deps), AGENTS.md (the "Pre-fix Consultation" section). Synced runtime files (`scripts/lib/symbol-index.mjs` etc., `scripts/symbol-index/*`, `.claude/hooks/arch-memory-check.sh`, `.audit-loop/cache/`) are gitignored — they're managed by `npm run sync` from the source repo.
+
+Full plan: [docs/plans/architectural-memory.md](docs/plans/architectural-memory.md) (audited via 3-round GPT + 2-round Gemini cycle).
 
 ## Security
 

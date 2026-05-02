@@ -220,6 +220,28 @@ export const modelPricing = Object.freeze({
   'gemini-3.1':        { input: 1.25, output: 5   },
 });
 
+// ── Architectural Memory Config ─────────────────────────────────────────────
+// Per docs/plans/architectural-memory.md §5 file-level plan.
+
+export const symbolIndexConfig = Object.freeze({
+  summariseModel:        resolveModel(process.env.ARCH_INDEX_SUMMARY_MODEL || 'latest-haiku'),
+  // embedModel default kept loose — concrete provider id resolved + persisted at refresh time (Gemini G2)
+  // text-embedding-004 was retired (404 on v1beta as of 2026-05). gemini-embedding-001 is its
+  // successor, supports `outputDimensionality` so we can keep VECTOR(768) schema compatibility.
+  embedModel:            process.env.ARCH_INDEX_EMBED_MODEL || 'gemini-embedding-001',
+  embedDim:              safeInt(process.env.ARCH_INDEX_EMBED_DIM, 768),
+  llmConcurrency:        safeInt(process.env.ARCH_INDEX_LLM_CONCURRENCY, 4),
+  batchSize:             safeInt(process.env.ARCH_INDEX_BATCH_SIZE, 50),
+  driftThreshold:        Number.parseFloat(process.env.ARCH_DRIFT_SCORE_THRESHOLD || '20'),
+  driftSimDup:           Number.parseFloat(process.env.ARCH_DRIFT_SIM_DUP || '0.85'),
+  driftSimName:          Number.parseFloat(process.env.ARCH_DRIFT_SIM_NAME || '0.90'),
+  driftNameLev:          Number.parseFloat(process.env.ARCH_DRIFT_NAME_LEVENSHTEIN || '0.50'),
+  auditFullTopN:         safeInt(process.env.ARCH_AUDIT_FULL_TOPN, 200),
+  serviceRoleKey:        process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY || null,
+  intentEmbedCacheTtlMs: safeInt(process.env.ARCH_INTENT_EMBED_CACHE_TTL_MS, 24 * 60 * 60 * 1000),
+  refreshIncrementalDefault: process.env.ARCH_REFRESH_INCREMENTAL_DEFAULT !== 'false',
+});
+
 // ── Predictive Strategy Config ──────────────────────────────────────────────
 
 export const predictiveConfig = Object.freeze({
