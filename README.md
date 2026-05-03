@@ -6,6 +6,51 @@ Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Ge
 
 > Renamed from `claude-audit-loop`. GitHub auto-redirects old URLs.
 
+## Quick Reference
+
+**Core skills** (Claude Code / Copilot / Cursor — type the slash command):
+
+| When you want to… | Command |
+|---|---|
+| Design a feature (auto-detects backend / frontend / full-stack) | `/plan <task>` |
+| Run the whole feature flow on autopilot (plan → audit-plan → impl gate → audit-code → persona-test → ux-lock → ship) | `/cycle <task>` |
+| Iterate on a draft plan with GPT-5.4 + Gemini (max 3 rounds, rigor-pressure stop) | `/audit-plan <plan-file>` |
+| Audit code you just wrote against its plan (multi-pass + Gemini final gate) | `/audit-code <plan-file>` |
+| QA a deployed app as a persona (Playwright + P0–P3 findings) | `/persona-test "<persona>" <url>` |
+| Lock a fix's behaviour with a Playwright spec | `/ux-lock <commit-or-description>` |
+| Pre-push quality gate (tests + lint + commit + push, warns on open P0s) | `/ship` |
+| "Why is this code shaped this way?" — git + arch-memory + principles | `/explain <file:line>` |
+| Brainstorm with multiple LLMs (you drive convergence) | `/brainstorm <topic>` ·  add `--with-gemini` |
+| Sync AGENTS.md / CLAUDE.md across all AI agents | `/ai-context-management audit` |
+
+**Architectural-memory commands** (terminal — `npm run …`):
+
+| Command | What it does |
+|---|---|
+| `npm run arch:refresh` | Incremental: re-extract symbols for changed files, copy-forward the rest |
+| `npm run arch:refresh:full` | Full rebuild from scratch |
+| `npm run arch:render` | Generate `docs/architecture-map.md` (Mermaid + flat tables, drift score embedded) |
+| `npm run arch:drift` | Compute drift score for the active snapshot (sub-2s) |
+| `npm run arch:duplicates` | List top cross-file duplicate clusters (refactor targets) |
+
+**Two main workflows**:
+
+```
+Full cycle (one command):       /cycle <task>
+                                  └─ runs everything end-to-end
+
+Atomic (when you want control):
+  /plan → /audit-plan → (you implement) → /audit-code → /persona-test → /ux-lock → /ship
+
+Anytime side-channels:
+  /brainstorm    — second opinion with OpenAI/Gemini, manual convergence
+  /explain       — read-only context synthesis from arch-memory + git
+  Arch-memory    — auto-fires on UserPromptSubmit when prompt contains "fix"
+  consult hook     / "add" / "implement" etc. — catches drift before it lands
+```
+
+See [Skills](#skills) below for full descriptions; [Skill Lifecycle Chain](#skill-lifecycle-chain) for the data flow between them.
+
 <!-- arch-map-discoverability:start -->
 ## Architecture
 
