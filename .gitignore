@@ -53,3 +53,6 @@ node_modules/
 
 # .env backups from rearrangement scripts (may contain secrets).
 .env.bak.*
+
+# Brainstorm temp files: topic stdin + malformed-payload debug JSONs (0o600).
+.claude/tmp/

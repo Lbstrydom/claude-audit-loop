@@ -5,6 +5,13 @@
 > Claude users — see [CLAUDE.md](./CLAUDE.md) for Claude Code-specific
 > addenda; everything below is shared.
 
+<!-- arch-map-discoverability:start -->
+> **Architecture map**: [`docs/architecture-map.md`](docs/architecture-map.md)
+> is the live, generated index of every symbol in this repo. Start there
+> when you need to find an existing function, class, or component before
+> writing a new one.
+<!-- arch-map-discoverability:end -->
+
 ## Project Overview
 
 **Purpose**: A bundle of 6 AI-pair-programming skills covering the full development quality lifecycle — from planning through code audit to live UX testing and shipping.

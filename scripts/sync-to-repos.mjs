@@ -83,6 +83,13 @@ const CORE_SCRIPTS = [
   'scripts/lib/owner-resolver.mjs',
   'scripts/lib/rule-metadata.mjs',
   'scripts/lib/file-store.mjs',
+  // Brainstorm helper (concept-level multi-LLM rounds — see /brainstorm)
+  'scripts/brainstorm-round.mjs',
+  'scripts/lib/brainstorm/prompt.mjs',
+  'scripts/lib/brainstorm/schemas.mjs',
+  'scripts/lib/brainstorm/pricing.mjs',
+  'scripts/lib/brainstorm/openai-adapter.mjs',
+  'scripts/lib/brainstorm/gemini-adapter.mjs',
 ];
 
 /**

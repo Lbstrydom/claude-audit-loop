@@ -6,6 +6,14 @@ Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Ge
 
 > Renamed from `claude-audit-loop`. GitHub auto-redirects old URLs.
 
+<!-- arch-map-discoverability:start -->
+## Architecture
+
+See [`docs/architecture-map.md`](docs/architecture-map.md) — a generated
+index of every symbol in this repo, grouped by domain, with Mermaid
+diagrams. Regenerated on `/ship` or via `npm run arch:render`.
+<!-- arch-map-discoverability:end -->
+
 ## Skills
 
 | Skill | Purpose | Invoke |
@@ -19,6 +27,7 @@ Includes a **multi-model audit loop** — Claude plans/codes, GPT-5.4 audits, Ge
 | **[persona-test](skills/persona-test/SKILL.md)** | Persona-driven exploratory browser testing with Plan→Act→Reflect, P0–P3 findings, qualitative debrief, Supabase session memory | `/persona-test "first-time user" https://myapp.com` |
 | **[ship](skills/ship/SKILL.md)** | Pre-push quality gate: test, lint, format, commit, push (warns on open persona-test P0s + missing regression specs) | `/ship` |
 | **[ai-context-management](skills/ai-context-management/SKILL.md)** | Manages AGENTS.md / CLAUDE.md alignment across AI agents (Claude, Copilot, Cursor, Windsurf) | `/ai-context-management audit` |
+| **[brainstorm](skills/brainstorm/SKILL.md)** | Concept-level multi-LLM thinking partner — calls OpenAI (and optionally Gemini) for independent perspectives; user-driven manual convergence | `/brainstorm <topic>` |
 
 **Deprecated aliases** (kept for muscle memory): `/plan-backend` and `/plan-frontend` delegate to `/plan` with a scope hint; `/audit-loop` delegates to `/cycle` (chained mode) or atomic `/audit-plan` / `/audit-code`.
 

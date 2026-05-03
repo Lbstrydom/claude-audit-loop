@@ -79,6 +79,11 @@ export const SKILL_ENTRY_SCRIPTS = Object.freeze({
     cli: 'node .audit-loop/scripts/ux-lock.mjs ${input:mode_and_args}',
     summary: 'Generate Playwright e2e specs that lock fixed behaviour or grade a plan.',
   },
+  'brainstorm': {
+    script: 'brainstorm-round.mjs',
+    cli: 'node .audit-loop/scripts/brainstorm-round.mjs --topic-stdin ${input:flags}',
+    summary: 'Concept-level multi-LLM brainstorming — calls OpenAI (and optionally Gemini) for independent perspectives; user-driven manual convergence.',
+  },
   'ship': {
     script: 'ship.mjs',
     cli: 'node .audit-loop/scripts/ship.mjs ${input:args}',

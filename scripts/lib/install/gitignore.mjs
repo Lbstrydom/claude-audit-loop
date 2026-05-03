@@ -41,6 +41,10 @@ const OPERATIONAL_PATTERNS = [
   '.audit/meta-assessments.jsonl',
   '.audit-loop-install-receipt.json',
   '.audit-loop-install-txn.json',
+  // Brainstorm temp files (topic stdin + malformed-payload debug JSONs).
+  // Files are 0o600 inside the repo (Plan brainstorm-and-arch-discoverability v6,
+  // Gemini-G3); contents are ephemeral session data.
+  '.claude/tmp/',
 ];
 
 const BUNDLE_PATTERNS = [
@@ -68,6 +72,7 @@ const BUNDLE_PATTERNS = [
   'scripts/evolve-prompts.mjs',
   'scripts/meta-assess.mjs',
   'scripts/audit-loop.mjs',
+  'scripts/brainstorm-round.mjs',
   'scripts/debt-auto-capture.mjs',
   'scripts/debt-backfill.mjs',
   'scripts/debt-budget-check.mjs',
