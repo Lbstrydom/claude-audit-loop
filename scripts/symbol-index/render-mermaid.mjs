@@ -84,15 +84,30 @@ async function main() {
     process.exit(0);
   }
 
-  // Page through all symbols (rendering needs them all; bound at 5000 for sanity)
+  // Page through all symbols. Default cap raised from 5000 → 50000 (was
+  // silently truncating wine-cellar at 5377). Configurable via env var
+  // for huge monorepos; loud warning to stderr if the cap is hit so the
+  // user knows the rendered map is incomplete.
+  const cap = symbolIndexConfig.renderMaxSymbols;
   const allSymbols = [];
   let offset = 0;
-  while (allSymbols.length < 5000) {
-    const page = await listSymbolsForSnapshot({ refreshId: snap.refreshId, limit: 500, offset });
+  let truncatedAtCap = false;
+  while (allSymbols.length < cap) {
+    const remaining = cap - allSymbols.length;
+    const pageLimit = Math.min(500, remaining);
+    const page = await listSymbolsForSnapshot({ refreshId: snap.refreshId, limit: pageLimit, offset });
     if (!page || page.length === 0) break;
     allSymbols.push(...page);
-    if (page.length < 500) break;
-    offset += 500;
+    if (page.length < pageLimit) break;
+    offset += pageLimit;
+  }
+  // Probe whether more rows exist beyond our cap so we can warn.
+  if (allSymbols.length === cap) {
+    const probe = await listSymbolsForSnapshot({ refreshId: snap.refreshId, limit: 1, offset: cap });
+    if (probe && probe.length > 0) {
+      truncatedAtCap = true;
+      process.stderr.write(`arch:render: WARN — symbol cap of ${cap} hit; some symbols not rendered. Raise ARCH_RENDER_MAX_SYMBOLS env var to include more.\n`);
+    }
   }
 
   const violations = await listLayeringViolationsForSnapshot(snap.refreshId);
@@ -126,6 +141,7 @@ async function main() {
     symbols: allSymbols,
     violations,
     dupSymbolIds: new Set(),
+    renderedSymbolCap: truncatedAtCap ? cap : null,
   });
 
   atomicWriteFileSync(outPath, markdown);

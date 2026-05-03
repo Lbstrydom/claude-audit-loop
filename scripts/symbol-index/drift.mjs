@@ -23,6 +23,7 @@ import {
   getRepoIdByUuid,
   getActiveSnapshot,
   computeDriftScore,
+  getTopDuplicateClusters,
 } from '../learning-store.mjs';
 import { resolveRepoIdentity } from '../lib/repo-identity.mjs';
 import { symbolIndexConfig } from '../lib/config.mjs';
@@ -55,7 +56,7 @@ function classify(driftScore, threshold) {
 // renderDriftIssue() so all three human surfaces (architecture-map.md,
 // drift sticky issue, neighbourhood callout) share one renderer. Local
 // renderMarkdown() removed.
-function renderMarkdownViaShared(drift, threshold, status, identity) {
+function renderMarkdownViaShared(drift, threshold, status, identity, clusters) {
   const { markdown } = renderDriftIssue({
     drift,
     threshold,
@@ -64,7 +65,7 @@ function renderMarkdownViaShared(drift, threshold, status, identity) {
     commitSha: drift.refresh_id, // best-available identifier without git lookup
     refreshId: drift.refresh_id,
     repoName: identity.name,
-    clusters: [],   // RPC v1 doesn't surface clusters yet — populated in v2
+    clusters,
     violations: [], // listed elsewhere; map references it
   });
   return markdown + '\n';
@@ -102,7 +103,34 @@ async function main() {
   }
   const threshold = symbolIndexConfig.driftThreshold;
   const status = classify(Number(drift.score) || 0, threshold);
-  const md = renderMarkdownViaShared(drift, threshold, status, identity);
+
+  // Surface the top duplicate clusters for the issue body. Best-effort —
+  // if the RPC fails (e.g. older Supabase without the migration applied),
+  // render still proceeds with empty clusters.
+  let rawClusters = [];
+  try {
+    rawClusters = await getTopDuplicateClusters({
+      repoId: repo.id, refreshId: snap.refreshId, limit: 20,
+    });
+  } catch (err) {
+    process.stderr.write(`arch:drift: top_duplicate_clusters failed (continuing without): ${err.message}\n`);
+  }
+
+  // Adapt to the shape renderDriftIssue expects: {label, similarity,
+  // members:[{symbolName, filePath, purposeSummary}]}. similarity is 1.0
+  // because these are EXACT signature_hash matches.
+  const clusters = rawClusters.map(c => ({
+    label: `${c.symbolNames.join(' / ')} (${c.kind})`,
+    similarity: 1.0,
+    firstSeen: null,
+    members: c.filePaths.map((fp, i) => ({
+      symbolName: c.symbolNames[Math.min(i, c.symbolNames.length - 1)],
+      filePath: fp,
+      purposeSummary: c.examplePurpose,
+    })),
+  }));
+
+  const md = renderMarkdownViaShared(drift, threshold, status, identity, clusters);
 
   if (args.json) process.stdout.write(JSON.stringify({ drift, threshold, status }, null, 2) + '\n');
   else process.stdout.write(md);

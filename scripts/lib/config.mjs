@@ -240,6 +240,12 @@ export const symbolIndexConfig = Object.freeze({
   serviceRoleKey:        process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY || null,
   intentEmbedCacheTtlMs: safeInt(process.env.ARCH_INTENT_EMBED_CACHE_TTL_MS, 24 * 60 * 60 * 1000),
   refreshIncrementalDefault: process.env.ARCH_REFRESH_INCREMENTAL_DEFAULT !== 'false',
+  // Renderer page cap — total symbols pulled into one architecture-map.md.
+  // The original 5000 was a "sanity" cap that silently truncated wine-cellar
+  // (5377 symbols). Raised to 50000 by default; configurable for huge repos.
+  // Per-domain Mermaid diagrams still cap their visual nodes at 50→15 for
+  // readability, but flat tables and totals respect this cap.
+  renderMaxSymbols:      safeInt(process.env.ARCH_RENDER_MAX_SYMBOLS, 50000),
 });
 
 // ── Predictive Strategy Config ──────────────────────────────────────────────

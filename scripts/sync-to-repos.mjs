@@ -130,6 +130,7 @@ const ARCH_MEMORY_SCRIPTS = [
   'scripts/symbol-index/refresh.mjs',
   'scripts/symbol-index/render-mermaid.mjs',
   'scripts/symbol-index/drift.mjs',
+  'scripts/symbol-index/duplicates.mjs',
   'scripts/symbol-index/prune.mjs',
   'scripts/symbol-index/spike-extract.mjs',
   // Domain tagger — path-based mapping into .audit-loop/domain-map.json,

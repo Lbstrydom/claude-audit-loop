@@ -1843,6 +1843,36 @@ export async function computeDriftScore({ repoId, refreshId, simDup, simName }) 
 }
 
 /**
+ * Surface the top-N cross-file exact-duplicate clusters in a snapshot.
+ * Companion to computeDriftScore — drift returns the count, this returns
+ * which symbols are actually duplicated so triage is one query away.
+ *
+ * @returns {Promise<Array<{signatureHash:string,kind:string,fileCount:number,
+ *   symbolNames:string[],filePaths:string[],examplePurpose:string|null}>>}
+ */
+export async function getTopDuplicateClusters({ repoId, refreshId, limit = 20 }) {
+  if (!_supabase) return [];
+  const { data, error } = await _supabase.rpc('top_duplicate_clusters', {
+    p_repo_id: repoId,
+    p_refresh_id: refreshId,
+    p_limit: limit,
+  });
+  if (error) {
+    const e = new Error(`top_duplicate_clusters RPC failed: ${error.message}`);
+    e.code = 'RPC_ERROR';
+    throw e;
+  }
+  return (data || []).map(r => ({
+    signatureHash: r.signature_hash,
+    kind: r.kind,
+    fileCount: r.file_count,
+    symbolNames: r.symbol_names,
+    filePaths: r.file_paths,
+    examplePurpose: r.example_purpose,
+  }));
+}
+
+/**
  * Read symbols for a snapshot with paginated filters (R3 H9).
  * Reads via anon.
  */

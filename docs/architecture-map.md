@@ -1,7 +1,7 @@
 <!-- audit-loop:architectural-map -->
 # Architecture Map — Lbstrydom/claude-engineering-skills
 
-- Generated: 2026-05-03T15:22:40.157Z   commit: 7b2a986b3a3a   refresh_id: 734c05de-ba1a-4e1b-bf49-8350569205e6
+- Generated: 2026-05-03T16:04:39.398Z   commit: 99d8622b03a0   refresh_id: 734c05de-ba1a-4e1b-bf49-8350569205e6
 - Drift score: 11 / threshold 20   status: `AMBER`
 - Domains: 16   Symbols: 837   Layering violations: 0
 

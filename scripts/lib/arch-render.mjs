@@ -137,6 +137,9 @@ export function renderArchitectureMap({
   drift, threshold, status,
   symbols, violations,
   dupSymbolIds = new Set(),
+  // When non-null, indicates the renderer hit ARCH_RENDER_MAX_SYMBOLS and
+  // the document is incomplete (some symbols not pulled from the snapshot).
+  renderedSymbolCap = null,
 }) {
   const grouped = groupByDomain(symbols);
   const domainCount = grouped.size;
@@ -147,6 +150,12 @@ export function renderArchitectureMap({
     drift, threshold, status,
     domainCount, symbolCount: symbols.length, violationCount,
   })];
+
+  if (renderedSymbolCap != null) {
+    out.push('');
+    out.push(`> ⚠ **Truncated** — this snapshot has more symbols than the renderer's cap of ${renderedSymbolCap}. Only the first ${renderedSymbolCap} are listed below; raise \`ARCH_RENDER_MAX_SYMBOLS\` and re-run \`npm run arch:render\` to include the rest.`);
+    out.push('');
+  }
 
   // Table of contents
   out.push('## Contents');
