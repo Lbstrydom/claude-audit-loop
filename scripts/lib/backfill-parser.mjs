@@ -1,7 +1,7 @@
 /**
  * @fileoverview Phase D.7 — audit-summary parser.
  *
- * Extracts deferred debt entries from `docs/complete/*-audit-summary.md`
+ * Extracts deferred debt entries from `docs/completed/*-audit-summary.md`
  * files (and docs/plans/*-audit-summary.md). Produces StagingRecord[] with
  * explicit per-field `parseConfidence` markers. Staged records NEVER auto-
  * promote to the live ledger — a human reviews + promotes via --promote.

@@ -71,7 +71,7 @@ Shared:
   --owner <name>           Default owner for promoted records (if absent)
 
 To review staged records before promoting:
-  1. node scripts/debt-backfill.mjs --source "docs/complete/phase-*-audit-summary.md"
+  1. node scripts/debt-backfill.mjs --source "docs/completed/phase-*-audit-summary.md"
   2. Open .audit/staging/debt-staging.json, review each record, set approved:true
   3. Fill in affectedFiles, deferredRationale (≥20 chars) if missing
   4. node scripts/debt-backfill.mjs --promote .audit/staging/debt-staging.json
