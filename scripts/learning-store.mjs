@@ -1975,24 +1975,34 @@ export async function getImportGraphPopulated(refreshId) {
  * Plan §2.6 — alphabetical sort (R1-L1) so the rendered "File imported by"
  * column is stable across renders.
  *
+ * Chunked at IN_CHUNK to stay under Supabase REST URL+body limits.
+ * Found live: wine-cellar (5433 paths) and ai-organiser (2449 paths)
+ * exceeded the limit on a single IN — the renderer's fail-safe (Gemini-G3)
+ * caught it but omitted the column entirely. Chunking preserves
+ * index-served lookup while staying under the limit. Each chunk is
+ * indexed by `idx_sfi_imported` so total work is O(N) regardless of chunk
+ * size.
+ *
  * @param {{refreshId:string, paths:string[]}} args
  * @returns {Promise<Map<string, string[]>>}
  */
+const IN_CHUNK = 200; // safe under Supabase REST `?in=(p1,p2,...)` URL cap
 export async function getImportersForFiles({ refreshId, paths }) {
   const out = new Map();
   if (!_supabase || !refreshId || !Array.isArray(paths) || paths.length === 0) return out;
-  // Single IN-list query — index-served via idx_sfi_imported.
-  const { data, error } = await _supabase
-    .from('symbol_file_imports')
-    .select('imported_path, importer_path')
-    .eq('refresh_id', refreshId)
-    .in('imported_path', paths);
-  if (error) throw new Error(`getImportersForFiles failed: ${error.message}`);
-  for (const row of (data || [])) {
-    if (!out.has(row.imported_path)) out.set(row.imported_path, []);
-    out.get(row.imported_path).push(row.importer_path);
+  for (const batch of chunk(paths, IN_CHUNK)) {
+    const { data, error } = await _supabase
+      .from('symbol_file_imports')
+      .select('imported_path, importer_path')
+      .eq('refresh_id', refreshId)
+      .in('imported_path', batch);
+    if (error) throw new Error(`getImportersForFiles failed: ${error.message}`);
+    for (const row of (data || [])) {
+      if (!out.has(row.imported_path)) out.set(row.imported_path, []);
+      out.get(row.imported_path).push(row.importer_path);
+    }
   }
-  // Stable alphabetical sort (R1-L1)
+  // Stable alphabetical sort (R1-L1) — applied once over merged results.
   for (const list of out.values()) list.sort();
   return out;
 }
