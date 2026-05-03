@@ -82,7 +82,8 @@ const BUNDLE_PATTERNS = [
   'scripts/write-ledger-r1.mjs',
   'scripts/write-plan-outcomes.mjs',
   'scripts/setup-permissions.mjs',
-  // Shared lib — entire directory; consumers read it, never edit
+  // Shared lib — entire directory; consumers read it, never edit.
+  // Includes scripts/lib/symbol-index/ (domain-tagger.mjs etc).
   'scripts/lib/',
   // Generated manifest
   'skills.manifest.json',

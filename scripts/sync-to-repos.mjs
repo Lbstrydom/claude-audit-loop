@@ -132,6 +132,9 @@ const ARCH_MEMORY_SCRIPTS = [
   'scripts/symbol-index/drift.mjs',
   'scripts/symbol-index/prune.mjs',
   'scripts/symbol-index/spike-extract.mjs',
+  // Domain tagger — path-based mapping into .audit-loop/domain-map.json,
+  // wired into refresh.mjs to populate domainTag instead of leaving null.
+  'scripts/lib/symbol-index/domain-tagger.mjs',
 ];
 
 /**

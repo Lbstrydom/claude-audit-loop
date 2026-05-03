@@ -1901,8 +1901,15 @@ export async function listLayeringViolationsForSnapshot(refreshId) {
  * Bulk-copy untouched-file symbols from prior snapshot into new refresh_id.
  * Implemented as INSERT ... SELECT via RPC for atomicity + speed.
  * Touched file set is the union of A/M/D/R/U from git diff.
+ *
+ * Optional `retagDomain(filePath)`: callback to re-derive `domain_tag` per
+ * row during copy. When provided (typically `tagDomain.bind(null, rules)`),
+ * a return value of `null` falls back to the prior snapshot's tag so we
+ * never regress existing labels. When omitted, the prior tag is copied
+ * verbatim. This keeps domain-map.json edits effective on incremental
+ * refreshes without requiring a full rebuild.
  */
-export async function copyForwardUntouchedFiles({ repoId, fromRefreshId, toRefreshId, touchedFileSet }) {
+export async function copyForwardUntouchedFiles({ repoId, fromRefreshId, toRefreshId, touchedFileSet, retagDomain = null }) {
   const w = await getWriteClient();
   // Read prior rows in pages, filter out touched, bulk insert. Simple
   // pagination keeps memory bounded for large repos.
@@ -1920,17 +1927,26 @@ export async function copyForwardUntouchedFiles({ repoId, fromRefreshId, toRefre
     if (!rows || rows.length === 0) break;
     const keep = rows.filter(r => !touchedFileSet.has(r.file_path));
     if (keep.length > 0) {
-      const payload = keep.map(r => ({
-        refresh_id: toRefreshId,
-        repo_id: repoId,
-        definition_id: r.definition_id,
-        file_path: r.file_path,
-        start_line: r.start_line,
-        end_line: r.end_line,
-        signature_hash: r.signature_hash,
-        purpose_summary: r.purpose_summary,
-        domain_tag: r.domain_tag,
-      }));
+      const payload = keep.map(r => {
+        let domainTag = r.domain_tag;
+        if (typeof retagDomain === 'function') {
+          const fresh = retagDomain(r.file_path);
+          // Only overwrite if retagger produced a non-null result; preserves
+          // prior tags when the rule set has gaps.
+          if (fresh) domainTag = fresh;
+        }
+        return {
+          refresh_id: toRefreshId,
+          repo_id: repoId,
+          definition_id: r.definition_id,
+          file_path: r.file_path,
+          start_line: r.start_line,
+          end_line: r.end_line,
+          signature_hash: r.signature_hash,
+          purpose_summary: r.purpose_summary,
+          domain_tag: domainTag,
+        };
+      });
       const { error: insErr } = await w.from('symbol_index').insert(payload);
       if (insErr) throw new Error(`copyForward insert failed: ${insErr.message}`);
       copied += payload.length;

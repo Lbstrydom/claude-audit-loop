@@ -49,6 +49,7 @@ import { resolveRepoIdentity, persistRepoIdentity } from '../lib/repo-identity.m
 import { resolveModel } from '../lib/model-resolver.mjs';
 import { symbolIndexConfig } from '../lib/config.mjs';
 import { detectRepoStack } from '../lib/repo-stack.mjs';
+import { tagDomain, loadDomainRules } from '../lib/symbol-index/domain-tagger.mjs';
 
 function parseArgs(argv) {
   const args = { full: false, sinceCommit: null, force: false };
@@ -156,6 +157,12 @@ async function runWithHeartbeat(refreshId, intervalMs, fn) {
 async function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(process.cwd());
+  const domainRules = loadDomainRules(repoRoot);
+  if (domainRules.length === 0) {
+    process.stderr.write(`  [refresh] no domain rules found at .audit-loop/domain-map.json — symbols will all tag as _other\n`);
+  } else {
+    process.stderr.write(`  [refresh] loaded ${domainRules.length} domain rules from .audit-loop/domain-map.json\n`);
+  }
   await initLearningStore();
 
   if (!isCloudEnabled()) {
@@ -304,7 +311,7 @@ async function main() {
         endLine: s.endLine,
         signatureHash: s.signatureHash,
         purposeSummary: s.purposeSummary,
-        domainTag: null, // domain tagging is v2
+        domainTag: tagDomain(s.filePath, domainRules),
       })).filter(r => r.definitionId);
       await recordSymbolIndex(refreshId, repoId, indexRows);
 
@@ -336,6 +343,9 @@ async function main() {
             fromRefreshId: prior.refreshId,
             toRefreshId: refreshId,
             touchedFileSet: touchedSet,
+            // Re-apply current domain rules to copied rows so domain-map.json
+            // edits take effect on incremental refresh, not just full rebuild.
+            retagDomain: domainRules.length > 0 ? (filePath => tagDomain(filePath, domainRules)) : null,
           });
           logOk(`copy-forward ${copied} untouched-file symbols from ${prior.refreshId}`);
         }
