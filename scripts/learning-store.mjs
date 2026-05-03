@@ -1627,10 +1627,24 @@ export async function getActiveSnapshot(repoId) {
     .eq('id', repoId)
     .maybeSingle();
   if (error || !data) return null;
+  // Read provenance flag from refresh_runs (added by migration
+  // 20260503170000). Existing snapshots default to false → renderer +
+  // /explain treat as "pre-feature" and skip caller-domain analysis
+  // (chain-of-trust rule per plan §2.6.1).
+  let importGraphPopulated = false;
+  if (data.active_refresh_id) {
+    const { data: rr } = await _supabase
+      .from('refresh_runs')
+      .select('import_graph_populated')
+      .eq('id', data.active_refresh_id)
+      .maybeSingle();
+    if (rr && rr.import_graph_populated === true) importGraphPopulated = true;
+  }
   return {
     refreshId: data.active_refresh_id,
     activeEmbeddingModel: data.active_embedding_model,
     activeEmbeddingDim: data.active_embedding_dim,
+    importGraphPopulated,
   };
 }
 
@@ -1840,6 +1854,197 @@ export async function computeDriftScore({ repoId, refreshId, simDup, simName }) 
     throw e;
   }
   return data;
+}
+
+/**
+ * Bulk-insert file-level import edges into symbol_file_imports for a
+ * snapshot. Plan §2.6 — keyed by importer_path so copy-forward works
+ * correctly (R1-H1).
+ *
+ * @param {string} refreshId
+ * @param {Array<{importer:string, imported:string}>} edges
+ * @returns {Promise<{inserted:number}>}
+ */
+export async function recordSymbolFileImports(refreshId, edges) {
+  if (!_supabase || !Array.isArray(edges) || edges.length === 0) {
+    return { inserted: 0 };
+  }
+  const w = await getWriteClient();
+  let inserted = 0;
+  for (const batch of chunk(edges, UPSERT_CHUNK_SIZE)) {
+    const payload = batch.map(e => ({
+      refresh_id: refreshId,
+      importer_path: e.importer,
+      imported_path: e.imported,
+    }));
+    const { error } = await w
+      .from('symbol_file_imports')
+      .upsert(payload, { onConflict: 'refresh_id,importer_path,imported_path' });
+    if (error) throw new Error(`recordSymbolFileImports failed: ${error.message}`);
+    inserted += payload.length;
+  }
+  return { inserted };
+}
+
+/**
+ * Copy-forward symbol_file_imports rows for untouched importer files.
+ * Plan §2.6 (R1-H1) — keyed on importer_path, NOT imported_path. If
+ * a touched file `a.js` drops its import of untouched `b.js`, the
+ * dropped edge stays absent because `a.js` re-emits its current edges
+ * during this refresh.
+ *
+ * @param {{fromRefreshId:string, toRefreshId:string, touchedFileSet:Set<string>}} args
+ * @returns {Promise<{copied:number}>}
+ */
+export async function copyForwardImports({ fromRefreshId, toRefreshId, touchedFileSet }) {
+  if (!_supabase || !fromRefreshId || !toRefreshId) return { copied: 0 };
+  const w = await getWriteClient();
+  let copied = 0;
+  const pageSize = 500;
+  let offset = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data: rows, error } = await w
+      .from('symbol_file_imports')
+      .select('importer_path, imported_path')
+      .eq('refresh_id', fromRefreshId)
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error(`copyForwardImports read failed: ${error.message}`);
+    if (!rows || rows.length === 0) break;
+    // Filter on importer_path — edges owned by importer side
+    const keep = rows.filter(r => !touchedFileSet.has(r.importer_path));
+    if (keep.length > 0) {
+      const payload = keep.map(r => ({
+        refresh_id: toRefreshId,
+        importer_path: r.importer_path,
+        imported_path: r.imported_path,
+      }));
+      const { error: insErr } = await w
+        .from('symbol_file_imports')
+        .upsert(payload, { onConflict: 'refresh_id,importer_path,imported_path' });
+      if (insErr) throw new Error(`copyForwardImports insert failed: ${insErr.message}`);
+      copied += payload.length;
+    }
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+  return { copied };
+}
+
+/**
+ * Mark a snapshot as having a fully populated import graph. Set after
+ * recordSymbolFileImports completes successfully on a full refresh OR
+ * an incremental from a prior snapshot that was already populated
+ * (chain-of-trust rule, plan §2.6.1, R2-H1).
+ *
+ * @param {string} refreshId
+ * @returns {Promise<void>}
+ */
+export async function markImportGraphPopulated(refreshId) {
+  if (!_supabase) return;
+  const w = await getWriteClient();
+  const { error } = await w
+    .from('refresh_runs')
+    .update({ import_graph_populated: true })
+    .eq('id', refreshId);
+  if (error) throw new Error(`markImportGraphPopulated failed: ${error.message}`);
+}
+
+/**
+ * Get the import_graph_populated flag for a specific refresh.
+ * Used by refresh.mjs to compute the chain-of-trust value for a new
+ * snapshot derived from a prior one.
+ *
+ * @param {string} refreshId
+ * @returns {Promise<boolean>} false when missing or row doesn't exist
+ */
+export async function getImportGraphPopulated(refreshId) {
+  if (!_supabase || !refreshId) return false;
+  const { data } = await _supabase
+    .from('refresh_runs')
+    .select('import_graph_populated')
+    .eq('id', refreshId)
+    .maybeSingle();
+  return data?.import_graph_populated === true;
+}
+
+/**
+ * Look up the file-level importers for a set of imported_path values
+ * within a snapshot. Returns Map<imported_path, sorted importer_paths[]>.
+ *
+ * Plan §2.6 — alphabetical sort (R1-L1) so the rendered "File imported by"
+ * column is stable across renders.
+ *
+ * @param {{refreshId:string, paths:string[]}} args
+ * @returns {Promise<Map<string, string[]>>}
+ */
+export async function getImportersForFiles({ refreshId, paths }) {
+  const out = new Map();
+  if (!_supabase || !refreshId || !Array.isArray(paths) || paths.length === 0) return out;
+  // Single IN-list query — index-served via idx_sfi_imported.
+  const { data, error } = await _supabase
+    .from('symbol_file_imports')
+    .select('imported_path, importer_path')
+    .eq('refresh_id', refreshId)
+    .in('imported_path', paths);
+  if (error) throw new Error(`getImportersForFiles failed: ${error.message}`);
+  for (const row of (data || [])) {
+    if (!out.has(row.imported_path)) out.set(row.imported_path, []);
+    out.get(row.imported_path).push(row.importer_path);
+  }
+  // Stable alphabetical sort (R1-L1)
+  for (const list of out.values()) list.sort();
+  return out;
+}
+
+/**
+ * Repo-scoped permanent UPSERT for per-domain summary cache.
+ * Plan §2.5 (R1-M1: not refresh-scoped, no copy-forward — the row is
+ * permanent until a cache invariant changes).
+ */
+export async function upsertDomainSummary({ repoId, domainTag, summary, compositionHash, symbolCount, promptTemplateVersion, generatedModel }) {
+  if (!_supabase) return;
+  const w = await getWriteClient();
+  const { error } = await w
+    .from('domain_summaries')
+    .upsert({
+      repo_id: repoId,
+      domain_tag: domainTag,
+      summary,
+      composition_hash: compositionHash,
+      symbol_count: symbolCount,
+      prompt_template_version: promptTemplateVersion,
+      generated_model: generatedModel,
+      generated_at: new Date().toISOString(),
+    }, { onConflict: 'repo_id,domain_tag' });
+  if (error) throw new Error(`upsertDomainSummary failed: ${error.message}`);
+}
+
+/**
+ * Read all cached domain summaries for a repo.
+ * Used by render-mermaid to embed summaries below domain headings.
+ *
+ * @param {string} repoId
+ * @returns {Promise<Map<string, {summary:string, compositionHash:string, symbolCount:number, promptTemplateVersion:number, generatedModel:string}>>}
+ */
+export async function getDomainSummaries(repoId) {
+  const out = new Map();
+  if (!_supabase || !repoId) return out;
+  const { data, error } = await _supabase
+    .from('domain_summaries')
+    .select('domain_tag, summary, composition_hash, symbol_count, prompt_template_version, generated_model')
+    .eq('repo_id', repoId);
+  if (error) throw new Error(`getDomainSummaries failed: ${error.message}`);
+  for (const r of (data || [])) {
+    out.set(r.domain_tag, {
+      summary: r.summary,
+      compositionHash: r.composition_hash,
+      symbolCount: r.symbol_count,
+      promptTemplateVersion: r.prompt_template_version,
+      generatedModel: r.generated_model,
+    });
+  }
+  return out;
 }
 
 /**

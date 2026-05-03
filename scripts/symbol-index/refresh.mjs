@@ -40,6 +40,10 @@ import {
   recordSymbolIndex,
   recordSymbolEmbedding,
   recordLayeringViolations,
+  recordSymbolFileImports,
+  copyForwardImports,
+  markImportGraphPopulated,
+  getImportGraphPopulated,
   setActiveEmbeddingModel,
   copyForwardUntouchedFiles,
   getActiveSnapshot,
@@ -278,7 +282,8 @@ async function main() {
       const extracted = runJsonLines('node', extractArgs);
       const symbolsRaw = extracted.filter(r => r.type === 'symbol');
       const violations = extracted.filter(r => r.type === 'violation');
-      logOk(`extracted ${symbolsRaw.length} symbols, ${violations.length} violations`);
+      const importEdges = extracted.filter(r => r.type === 'import');
+      logOk(`extracted ${symbolsRaw.length} symbols, ${violations.length} violations, ${importEdges.length} internal import edges`);
 
       // 7. Summarise (only non-redacted)
       logOk(`summarising...`);
@@ -334,7 +339,23 @@ async function main() {
       // 12. Upsert layering violations (always full repo per R2 H8)
       await recordLayeringViolations(refreshId, repoId, violations);
 
-      // 13. Incremental: copy-forward untouched-file symbols from prior snapshot
+      // 12b. Persist file-level import edges for "Where used" + /explain
+      // (Plan §2.6). Edges are filtered to internal modules in extract.mjs
+      // (Gemini-R1-G3 / Gemini-R2-G1) so we never persist node_modules
+      // or core-module edges.
+      if (importEdges.length > 0) {
+        const r = await recordSymbolFileImports(
+          refreshId,
+          importEdges.map(e => ({ importer: e.importer, imported: e.imported })),
+        );
+        logOk(`recorded ${r.inserted} file-import edges`);
+      }
+
+      // 13. Incremental: copy-forward untouched-file symbols + imports
+      // from prior snapshot. Symbol copy-forward already proven; imports
+      // copy-forward keys on importer_path (R1-H1) so dropped edges from
+      // touched files correctly disappear.
+      let priorImportGraphPopulated = false;
       if (mode === 'incremental' && touchedSet) {
         const prior = await getActiveSnapshot(repoId);
         if (prior?.refreshId) {
@@ -348,7 +369,27 @@ async function main() {
             retagDomain: domainRules.length > 0 ? (filePath => tagDomain(filePath, domainRules)) : null,
           });
           logOk(`copy-forward ${copied} untouched-file symbols from ${prior.refreshId}`);
+          // Also carry forward the import edges
+          const imp = await copyForwardImports({
+            fromRefreshId: prior.refreshId,
+            toRefreshId: refreshId,
+            touchedFileSet: touchedSet,
+          });
+          if (imp.copied > 0) logOk(`copy-forward ${imp.copied} untouched-file import edges`);
+          priorImportGraphPopulated = await getImportGraphPopulated(prior.refreshId);
         }
+      }
+
+      // 13b. Chain-of-trust for import_graph_populated (Plan §2.6.1, R2-H1):
+      //   - Full refresh → true (every file re-extracted)
+      //   - Incremental from populated → true (carry-forward + new edges = full)
+      //   - Incremental from un-populated → false (untouched files have no edges)
+      const populated = (mode === 'full') || (mode === 'incremental' && priorImportGraphPopulated);
+      if (populated) {
+        await markImportGraphPopulated(refreshId);
+        logOk(`import_graph_populated=true (mode=${mode}, prior=${priorImportGraphPopulated})`);
+      } else {
+        logOk(`import_graph_populated=false (mode=${mode}, prior=${priorImportGraphPopulated}); run \`npm run arch:refresh:full\` to flip`);
       }
 
       // 14. Atomic publish (server-side RPC per Gemini G1).

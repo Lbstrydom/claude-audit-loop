@@ -446,6 +446,85 @@ async function cmdGetActiveRefreshId() {
   });
 }
 
+async function cmdComputeTargetDomains() {
+  const p = parsePayload();
+  if (!p.targetPaths || !Array.isArray(p.targetPaths)) {
+    return emitError('BAD_INPUT', 'targetPaths array required', {}, 1);
+  }
+  // Lazy import — keeps cross-skill cold-start cheap
+  const { tagDomain, loadDomainRules, computeTargetDomains } =
+    await import('./lib/symbol-index/domain-tagger.mjs');
+  void tagDomain;
+  const rules = loadDomainRules(process.cwd());
+  const result = computeTargetDomains(p.targetPaths, rules);
+  emit({ ok: true, ...result, ruleCount: rules.length });
+}
+
+async function cmdGetCallersForFile() {
+  const p = parsePayload();
+  if (typeof p.path !== 'string' || p.path.length === 0) {
+    return emitError('BAD_INPUT', 'path required', {}, 1);
+  }
+  await initLearningStore();
+  if (!isCloudEnabled()) {
+    return emit({
+      ok: true, cloud: false, callers: [], callerDomains: [],
+      snapshotProvenance: 'cloud-disabled',
+    });
+  }
+  const repoUuid = resolveRepoIdentity(process.cwd()).repoUuid;
+  const repo = await getRepoIdByUuid(repoUuid);
+  if (!repo) {
+    return emit({
+      ok: true, cloud: true, callers: [], callerDomains: [],
+      snapshotProvenance: 'repo-not-indexed',
+    });
+  }
+  const snap = await getActiveSnapshot(repo.id);
+  if (!snap?.refreshId) {
+    return emit({
+      ok: true, cloud: true, callers: [], callerDomains: [],
+      snapshotProvenance: 'no-active-snapshot',
+    });
+  }
+  // Provenance check (R1-H2 / R2-H1) — only emit caller data when the
+  // snapshot's import graph is fully populated; otherwise zero-importers
+  // is ambiguous and /explain should skip cross-domain reach analysis.
+  const populated = snap.importGraphPopulated === true;
+  if (!populated) {
+    return emit({
+      ok: true, cloud: true, callers: [], callerDomains: [],
+      snapshotProvenance: 'pre-feature-snapshot',
+    });
+  }
+  // Reuse loadDomainRules per R2-M3 (no inline rule reading)
+  const { tagDomain, loadDomainRules } =
+    await import('./lib/symbol-index/domain-tagger.mjs');
+  const rules = loadDomainRules(process.cwd());
+
+  let importers;
+  try {
+    const { getImportersForFiles } = await import('./learning-store.mjs');
+    importers = await getImportersForFiles({
+      refreshId: snap.refreshId, paths: [p.path],
+    });
+  } catch (err) {
+    return emitError('RPC_ERROR', `getImportersForFiles failed: ${err.message}`);
+  }
+  const importerPaths = importers.get(p.path) || [];
+  const callers = importerPaths.map(ip => ({
+    importer_path: ip,
+    domain: tagDomain(ip, rules),
+  }));
+  const callerDomains = Array.from(new Set(
+    callers.map(c => c.domain).filter(d => d != null)
+  )).sort();
+  emit({
+    ok: true, cloud: true, callers, callerDomains,
+    snapshotProvenance: 'import-graph-populated',
+  });
+}
+
 async function cmdGetNeighbourhood() {
   const p = parsePayload();
   await initLearningStore();
@@ -656,6 +735,8 @@ const commands = {
   'resolve-repo-identity':            cmdResolveRepoIdentity,
   'get-active-refresh-id':            cmdGetActiveRefreshId,
   'get-neighbourhood':                cmdGetNeighbourhood,
+  'compute-target-domains':           cmdComputeTargetDomains,
+  'get-callers-for-file':             cmdGetCallersForFile,
   'open-refresh-run':                 cmdOpenRefreshRun,
   'publish-refresh-run':              cmdPublishRefreshRun,
   'abort-refresh-run':                cmdAbortRefreshRun,

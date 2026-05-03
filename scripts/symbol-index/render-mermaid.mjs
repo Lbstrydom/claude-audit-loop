@@ -2,9 +2,11 @@
 /**
  * @fileoverview Phase E — architecture-map.md renderer.
  *
- * Reads symbol_index for the active snapshot via cross-skill.mjs read APIs,
- * renders the architecture-map.md document via lib/arch-render.mjs, and
- * atomically writes to docs/architecture-map.md (or --out path).
+ * Reads symbol_index + symbol_file_imports + domain_summaries for the
+ * active snapshot via direct learning-store imports (this script is part
+ * of the symbol-index pipeline, not a downstream skill). Composes the
+ * rendered map via lib/arch-render.mjs and atomically writes to
+ * docs/architecture-map.md (or --out path).
  *
  * Cloud-off: writes a stub file noting the cloud is disabled.
  *
@@ -23,6 +25,7 @@ import {
   listSymbolsForSnapshot,
   listLayeringViolationsForSnapshot,
   computeDriftScore,
+  getImportersForFiles,
 } from '../learning-store.mjs';
 import { resolveRepoIdentity } from '../lib/repo-identity.mjs';
 import { renderArchitectureMap } from '../lib/arch-render.mjs';
@@ -130,6 +133,38 @@ async function main() {
   }
   const status = driftStatus;
 
+  // Plan v6 §2.5 — generate (or reuse cached) per-domain summaries
+  // before render. Best-effort — if Haiku/Anthropic key is missing
+  // OR Supabase write fails, render proceeds with empty summaries.
+  let domainSummaries = new Map();
+  try {
+    const { summariseDomains } = await import('./summarise-domains.mjs');
+    const r = await summariseDomains({ repoId: repo.id, refreshId: snap.refreshId });
+    for (const [d, v] of r.summaries) domainSummaries.set(d, v.summary);
+    process.stderr.write(`arch:render: domain summaries — total=${r.stats.total} cached=${r.stats.cacheHits} fresh=${r.stats.fresh} failed=${r.stats.failed}\n`);
+  } catch (err) {
+    process.stderr.write(`arch:render: domain summaries skipped — ${err.message}\n`);
+  }
+
+  // Plan v6 §2.6 — fetch file-level importers for "Where used" column.
+  // Best-effort — if symbol_file_imports is empty (pre-feature snapshot)
+  // the map is empty; renderer falls back to "(unknown)" markers via
+  // importGraphPopulated flag.
+  //
+  // Audit-Gemini-G3: initialize to null (NOT new Map()). On RPC failure
+  // the renderer must OMIT the column entirely, not render every symbol
+  // as "(internal)" which would silently lie about all importer data.
+  let importerMap = null;
+  try {
+    const allFilePaths = Array.from(new Set(allSymbols.map(s => s.filePath)));
+    importerMap = await getImportersForFiles({
+      refreshId: snap.refreshId, paths: allFilePaths,
+    });
+  } catch (err) {
+    importerMap = null;  // explicit — fail-safe to omit column
+    process.stderr.write(`arch:render: importers fetch failed — ${err.message}; column omitted to avoid false-leaf labels\n`);
+  }
+
   const { markdown, bytesWritten } = renderArchitectureMap({
     repoName: identity.name,
     generatedAt: new Date().toISOString(),
@@ -142,6 +177,9 @@ async function main() {
     violations,
     dupSymbolIds: new Set(),
     renderedSymbolCap: truncatedAtCap ? cap : null,
+    domainSummaries,
+    importerMap,
+    importGraphPopulated: snap.importGraphPopulated === true,
   });
 
   atomicWriteFileSync(outPath, markdown);

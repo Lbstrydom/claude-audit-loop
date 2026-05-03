@@ -102,19 +102,55 @@ export function renderMermaidContainer(domain, symbols, dupSymbolIds = new Set()
   return lines.join('\n');
 }
 
-/** Render a flat symbols table for a domain. */
-export function renderSymbolTable(symbols, dupSymbolIds = new Set()) {
-  const lines = ['| Symbol | Kind | Path | Lines | Purpose |', '|---|---|---|---|---|'];
+/**
+ * Render a flat symbols table for a domain.
+ *
+ * @param {Array} symbols
+ * @param {Set} dupSymbolIds
+ * @param {{importerMap?: Map<string,string[]>, importGraphPopulated?: boolean}} [opts]
+ *   - importerMap:           file_path → sorted importer paths (top 3 + "+N more" suffix)
+ *   - importGraphPopulated:  if false, "0 importers" renders as "(unknown — pre-feature)"
+ */
+export function renderSymbolTable(symbols, dupSymbolIds = new Set(), opts = {}) {
+  const { importerMap = null, importGraphPopulated = false } = opts;
+  const showWhereUsed = importerMap !== null;
+  const headers = showWhereUsed
+    ? '| Symbol | Kind | Path | Lines | Purpose | File imported by |'
+    : '| Symbol | Kind | Path | Lines | Purpose |';
+  const sep = showWhereUsed
+    ? '|---|---|---|---|---|---|'
+    : '|---|---|---|---|---|';
+  const lines = [headers, sep];
   for (const s of symbols) {
     const dupTag = dupSymbolIds.has(s.id) ? ' [DUP]' : '';
     const link = s.startLine
       ? `[\`${escapeMarkdown(s.symbolName)}\`](../${s.filePath}#L${s.startLine})`
       : `\`${escapeMarkdown(s.symbolName)}\``;
-    lines.push(
-      `| ${link}${dupTag} | ${escapeMarkdown(s.kind)} | \`${escapeMarkdown(s.filePath)}\` | ${s.startLine ?? ''}-${s.endLine ?? ''} | ${escapeMarkdown(s.purposeSummary || '')} |`
-    );
+    let row = `| ${link}${dupTag} | ${escapeMarkdown(s.kind)} | \`${escapeMarkdown(s.filePath)}\` | ${s.startLine ?? ''}-${s.endLine ?? ''} | ${escapeMarkdown(s.purposeSummary || '')} |`;
+    if (showWhereUsed) {
+      // Plan §2.6 — file-level "Where used" column. All symbols sharing
+      // a file see the same list (file-level data, R2-M1 by-design).
+      row += ' ' + renderWhereUsed(s.filePath, importerMap, importGraphPopulated) + ' |';
+    }
+    lines.push(row);
   }
   return lines.join('\n');
+}
+
+function renderWhereUsed(filePath, importerMap, importGraphPopulated) {
+  const list = importerMap.get(filePath) || [];
+  if (list.length === 0) {
+    return importGraphPopulated
+      ? '_(internal)_'
+      : '_(unknown — run `npm run arch:refresh:full`)_';
+  }
+  // Defensive alphabetical sort (R1-L1) — caller may pass any order.
+  // Always-sort here keeps the rendered output stable across callers.
+  const sorted = [...list].sort();
+  const top = sorted.slice(0, 3);
+  const rendered = top.map(p => `\`${escapeMarkdown(p)}\``).join(', ');
+  const more = sorted.length > 3 ? `, +${sorted.length - 3} more` : '';
+  return rendered + more;
 }
 
 /** Top-of-file header. */
@@ -140,6 +176,16 @@ export function renderArchitectureMap({
   // When non-null, indicates the renderer hit ARCH_RENDER_MAX_SYMBOLS and
   // the document is incomplete (some symbols not pulled from the snapshot).
   renderedSymbolCap = null,
+  // Plan §2.5 — Map<domain, summaryText> for per-domain LLM summary
+  // rendered below the `## <domain>` heading. Empty Map → no summaries
+  // rendered (no failure, just less context).
+  domainSummaries = new Map(),
+  // Plan §2.6 — Map<filePath, sortedImporterPaths[]> for the
+  // "File imported by" column. null/empty → column omitted entirely.
+  importerMap = null,
+  // Plan §2.6.1 (R1-H2 / R2-H1) — when false, "0 importers" renders as
+  // "(unknown — run arch:refresh:full)" to distinguish leaf from missing.
+  importGraphPopulated = false,
 }) {
   const grouped = groupByDomain(symbols);
   const domainCount = grouped.size;
@@ -171,11 +217,19 @@ export function renderArchitectureMap({
     out.push('');
     out.push(`## ${domain}`);
     out.push('');
+    // Plan §2.5 — embed Haiku-generated per-domain summary below heading
+    // when available. Renders as a blockquote so it's visually distinct
+    // from the symbol content.
+    const summary = domainSummaries.get(domain);
+    if (summary) {
+      out.push(`> ${summary}`);
+      out.push('');
+    }
     out.push(renderMermaidContainer(domain, syms, dupSymbolIds));
     out.push('');
     out.push('### Symbols in this domain');
     out.push('');
-    out.push(renderSymbolTable(syms, dupSymbolIds));
+    out.push(renderSymbolTable(syms, dupSymbolIds, { importerMap, importGraphPopulated }));
     out.push('');
   }
 
@@ -211,6 +265,20 @@ export function renderArchitectureMap({
   out.push('- **Duplication clusters** appear with `[DUP]` in the table and the `dup` class in Mermaid.');
   out.push('- Layering violations appear in the dedicated section above.');
   out.push('- Anchor links remain stable across regenerations as long as symbol names don\'t change.');
+  if (importerMap !== null) {
+    out.push('- The "File imported by" column lists the top files that import the file each symbol lives in (alphabetical, top 3, suffix `, +N more` if more exist). All symbols in the same file share the same list — the data is **file-level, not per-symbol** (Plan v6 §2.6).');
+  }
+  out.push('');
+
+  // Plan §2.7 — footer link back to /plan
+  out.push('---');
+  out.push('');
+  out.push('## Plan a change in this area');
+  out.push('');
+  out.push('- **Quick**: `/plan <task description>` — auto-detects scope + consults this index for near-duplicates');
+  out.push('- **Onboarding / refactor safety**: `/explain <file:line>` — shows domain + git history + principles');
+  out.push('- **Drift triage**: `npm run arch:duplicates` — top cross-file duplicate clusters worth refactoring');
+  out.push('- **Full cycle**: `/cycle <task>` — runs plan → audit-plan → impl gate → audit-code → ship end-to-end');
   out.push('');
 
   const markdown = out.join('\n');
@@ -249,16 +317,20 @@ export function renderNeighbourhoodCallout({ records, targetPaths, totalCandidat
   }
   const TOP_N = 5;
   const top = records.slice(0, TOP_N);
+  // Plan v6 §2.1 — Domain column added so planners can see "the candidate
+  // is in domain X" for every neighbourhood record. Empty domain renders
+  // as em-dash (—) so column stays aligned.
   const rows = [
     '> **Neighbourhood considered** (' + top.length + ' of ' + totalCandidatesConsidered + ' candidates from symbol-index)',
     '>',
-    '> | Symbol | Path | Sim | Recommendation | Purpose |',
-    '> |---|---|---|---|---|',
+    '> | Symbol | Path | Domain | Sim | Recommendation | Purpose |',
+    '> |---|---|---|---|---|---|',
   ];
   for (const r of top) {
     const path = r.startLine ? `${r.filePath}:${r.startLine}` : r.filePath;
+    const domain = r.domainTag ? `\`${escapeMarkdown(r.domainTag)}\`` : '—';
     rows.push(
-      `> | \`${escapeMarkdown(r.symbolName)}\` | \`${escapeMarkdown(path)}\` | ${(r.similarityScore || 0).toFixed(2)} | **${r.recommendation}** | ${escapeMarkdown(r.purposeSummary || '')} |`
+      `> | \`${escapeMarkdown(r.symbolName)}\` | \`${escapeMarkdown(path)}\` | ${domain} | ${(r.similarityScore || 0).toFixed(2)} | **${r.recommendation}** | ${escapeMarkdown(r.purposeSummary || '')} |`
     );
   }
   if (records.length > TOP_N) {
@@ -269,11 +341,12 @@ export function renderNeighbourhoodCallout({ records, targetPaths, totalCandidat
   const appendix = [
     '## Full neighbourhood considered',
     '',
-    '| Symbol | Path | Sim | Hop | Score | Recommendation | Purpose |',
-    '|---|---|---|---|---|---|---|',
+    '| Symbol | Path | Domain | Sim | Hop | Score | Recommendation | Purpose |',
+    '|---|---|---|---|---|---|---|---|',
     ...records.map(r => {
       const path = r.startLine ? `${r.filePath}:${r.startLine}` : r.filePath;
-      return `| \`${escapeMarkdown(r.symbolName)}\` | \`${escapeMarkdown(path)}\` | ${(r.similarityScore || 0).toFixed(2)} | ${(r.hopScore || 0).toFixed(2)} | ${(r.score || 0).toFixed(2)} | **${r.recommendation}** | ${escapeMarkdown(r.purposeSummary || '')} |`;
+      const domain = r.domainTag ? `\`${escapeMarkdown(r.domainTag)}\`` : '—';
+      return `| \`${escapeMarkdown(r.symbolName)}\` | \`${escapeMarkdown(path)}\` | ${domain} | ${(r.similarityScore || 0).toFixed(2)} | ${(r.hopScore || 0).toFixed(2)} | ${(r.score || 0).toFixed(2)} | **${r.recommendation}** | ${escapeMarkdown(r.purposeSummary || '')} |`;
     }),
   ].join('\n');
   return {

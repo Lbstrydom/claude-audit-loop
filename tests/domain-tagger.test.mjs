@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { matchGlob, tagDomain, loadDomainRules } from '../scripts/lib/symbol-index/domain-tagger.mjs';
+import { matchGlob, tagDomain, loadDomainRules, computeTargetDomains } from '../scripts/lib/symbol-index/domain-tagger.mjs';
 
 describe('matchGlob', () => {
   it('matches exact path', () => {
@@ -108,6 +108,72 @@ describe('tagDomain', () => {
       { pattern: 'scripts/foo.mjs', domain: 'foo' },
     ];
     assert.equal(tagDomain('scripts/foo.mjs', mixed), 'foo');
+  });
+});
+
+describe('computeTargetDomains', () => {
+  const rules = [
+    { pattern: 'scripts/lib/brainstorm/**', domain: 'brainstorm' },
+    { pattern: 'scripts/symbol-index/**', domain: 'arch-memory' },
+    { pattern: 'tests/**', domain: 'tests' },
+  ];
+
+  it('single path, single domain → ["X"]', () => {
+    const r = computeTargetDomains(['scripts/lib/brainstorm/openai-adapter.mjs'], rules);
+    assert.deepEqual(r.domains, ['brainstorm']);
+    assert.deepEqual(r.untaggedPaths, []);
+    assert.equal(r.crossDomain, false);
+  });
+
+  it('multiple paths, all same domain → single-domain result', () => {
+    const r = computeTargetDomains(
+      ['scripts/lib/brainstorm/openai-adapter.mjs', 'scripts/lib/brainstorm/schemas.mjs'],
+      rules,
+    );
+    assert.deepEqual(r.domains, ['brainstorm']);
+    assert.equal(r.crossDomain, false);
+  });
+
+  it('multiple paths, multiple domains → sorted', () => {
+    const r = computeTargetDomains(
+      ['scripts/lib/brainstorm/x.mjs', 'scripts/symbol-index/y.mjs', 'tests/z.test.mjs'],
+      rules,
+    );
+    assert.deepEqual(r.domains, ['arch-memory', 'brainstorm', 'tests']);
+    assert.equal(r.crossDomain, true);
+  });
+
+  it('all paths unmatched → empty domains, all paths in untaggedPaths', () => {
+    const r = computeTargetDomains(['random.js', 'another.js'], rules);
+    assert.deepEqual(r.domains, []);
+    assert.deepEqual(r.untaggedPaths, ['random.js', 'another.js']);
+    assert.equal(r.crossDomain, false);
+  });
+
+  it('mix matched + unmatched → both surfaced (R2-M4)', () => {
+    const r = computeTargetDomains(
+      ['scripts/lib/brainstorm/x.mjs', 'random-utility.js'],
+      rules,
+    );
+    assert.deepEqual(r.domains, ['brainstorm']);
+    assert.deepEqual(r.untaggedPaths, ['random-utility.js']);
+    assert.equal(r.crossDomain, false, 'single tagged domain — no cross-domain');
+  });
+
+  it('untagged path does NOT trigger cross-domain even alongside one tagged', () => {
+    const r = computeTargetDomains(['scripts/lib/brainstorm/x.mjs', 'random.js'], rules);
+    assert.equal(r.crossDomain, false);
+    assert.equal(r.untaggedPaths.length, 1);
+  });
+
+  it('non-array input → empty result', () => {
+    assert.deepEqual(computeTargetDomains(null, rules), { domains: [], untaggedPaths: [], crossDomain: false });
+    assert.deepEqual(computeTargetDomains(undefined, rules), { domains: [], untaggedPaths: [], crossDomain: false });
+  });
+
+  it('skips non-string entries in targetPaths', () => {
+    const r = computeTargetDomains(['scripts/lib/brainstorm/x.mjs', 42, null], rules);
+    assert.deepEqual(r.domains, ['brainstorm']);
   });
 });
 

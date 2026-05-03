@@ -249,7 +249,56 @@ async function extractGraphAndViolations(repoRoot) {
     });
   }
 
-  return { violationCount: violations.length };
+  // Plan §2.6 — emit file-level import edges for "Where used" rendering
+  // and /explain caller-domain analysis. Filter out external deps via
+  // cruiser-emitted metadata (Gemini-R1-G3, Gemini-R2-G1).
+  const modules = result.output?.modules || [];
+  let importCount = 0;
+  for (const m of modules) {
+    if (!m.source) continue;
+    const importer = path.relative(repoRoot, m.source).replace(/\\/g, '/');
+    for (const d of (m.dependencies || [])) {
+      if (!isInternalEdge(d)) continue;
+      const imported = path.relative(repoRoot, d.resolved).replace(/\\/g, '/');
+      // Skip self-edges and edges that escape the repo (..)
+      if (imported === importer) continue;
+      if (imported.startsWith('..')) continue;
+      emit({ type: 'import', importer, imported });
+      importCount++;
+    }
+  }
+
+  return { violationCount: violations.length, importCount };
+}
+
+/**
+ * Determine whether a dep-cruiser dependency edge points at an internal
+ * file (worth persisting) versus an external dep (node_modules, Node
+ * builtin) we should skip.
+ *
+ * Plan v6 §2.6 — uses dep-cruiser's `coreModule` flag and
+ * `dependencyTypes` array as primary signals (Gemini-R2-G1: string
+ * matching alone misses `fs/promises`, `util/types`, `stream/web` —
+ * core modules with slashes). String checks are defence-in-depth.
+ *
+ * Exported for unit testing.
+ */
+export function isInternalEdge(dep) {
+  if (!dep || typeof dep.resolved !== 'string') return false;
+  // Authoritative dep-cruiser metadata
+  if (dep.coreModule === true) return false;
+  const types = dep.dependencyTypes || [];
+  if (types.includes('core')) return false;
+  if (types.includes('npm')) return false;
+  if (types.includes('npm-dev')) return false;
+  if (types.includes('npm-optional')) return false;
+  if (types.includes('npm-peer')) return false;
+  if (types.includes('npm-bundled')) return false;
+  // Defence-in-depth string checks
+  const r = dep.resolved;
+  if (r.includes('node_modules/') || r.includes('node_modules\\')) return false;
+  if (r.startsWith('node:')) return false;
+  return true;
 }
 
 /**

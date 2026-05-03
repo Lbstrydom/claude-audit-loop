@@ -96,6 +96,39 @@ export function tagDomain(filePath, rules) {
 }
 
 /**
+ * Compute the distinct domain tags for a list of target paths.
+ * Used by /plan to anchor planning in the architecture map and surface
+ * cross-domain work + untagged paths.
+ *
+ * Plan: docs/plans/arch-memory-planning-anchor.md §2.2 (R2-M4: untagged
+ * paths surfaced rather than silently dropped).
+ *
+ * @param {string[]} targetPaths
+ * @param {Array<{pattern: string, domain: string}>} rules
+ * @returns {{
+ *   domains: string[],         // tagged domains, sorted alphabetically
+ *   untaggedPaths: string[],   // paths with no matching rule
+ *   crossDomain: boolean       // true when domains.length > 1
+ * }}
+ */
+export function computeTargetDomains(targetPaths, rules) {
+  const tagged = new Set();
+  const untagged = [];
+  const paths = Array.isArray(targetPaths) ? targetPaths : [];
+  for (const p of paths) {
+    if (typeof p !== 'string') continue;
+    const d = tagDomain(p, rules);
+    if (d) tagged.add(d);
+    else untagged.push(p);
+  }
+  return {
+    domains: Array.from(tagged).sort(),
+    untaggedPaths: untagged,
+    crossDomain: tagged.size > 1,
+  };
+}
+
+/**
  * Load + validate domain rules from a repo's .audit-loop/domain-map.json.
  * Missing file or unreadable JSON is treated as "no rules" (returns []).
  * Invalid rule entries are dropped silently (with a stderr warning).
