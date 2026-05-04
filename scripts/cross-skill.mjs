@@ -446,6 +446,38 @@ async function cmdGetActiveRefreshId() {
   });
 }
 
+async function cmdGetIncidentNeighbourhood() {
+  const p = parsePayload();
+  await initLearningStore();
+  if (!isCloudEnabled()) {
+    return emit({
+      ok: true, cloud: false, records: [], totalCandidatesConsidered: 0,
+      freshnessWarning: null,
+      hint: 'cloud disabled — security memory unavailable',
+    });
+  }
+  // Resolve repoUuid: explicit takes precedence; else derive from cwd
+  let repoUuid = p.repoUuid;
+  if (!repoUuid) repoUuid = resolveRepoIdentity(process.cwd()).repoUuid;
+  try {
+    const { getIncidentNeighbourhoodForIntent } = await import('./lib/neighbourhood-query.mjs');
+    const { callIncidentNeighbourhoodRpc, getMaxIncidentRefreshAt } = await import('./learning-store.mjs');
+    const wrapped = await getIncidentNeighbourhoodForIntent(
+      {
+        getRepoIdByUuid,
+        getActiveSnapshot,
+        callIncidentNeighbourhoodRpc: (args) => callIncidentNeighbourhoodRpc(args),
+        getMaxIncidentRefreshAt: (repoId) => getMaxIncidentRefreshAt(repoId),
+      },
+      { ...p, repoUuid },
+    );
+    // R-Gemini-G4: unwrap .result for flat CLI JSON shape
+    emit({ ok: true, cloud: true, ...wrapped.result, _usage: wrapped.usage, _latencyMs: wrapped.latencyMs });
+  } catch (err) {
+    emitError(err.code || 'EXCEPTION', err.message, { issues: err.issues });
+  }
+}
+
 async function cmdComputeTargetDomains() {
   const p = parsePayload();
   if (!p.targetPaths || !Array.isArray(p.targetPaths)) {
@@ -735,6 +767,7 @@ const commands = {
   'resolve-repo-identity':            cmdResolveRepoIdentity,
   'get-active-refresh-id':            cmdGetActiveRefreshId,
   'get-neighbourhood':                cmdGetNeighbourhood,
+  'get-incident-neighbourhood':       cmdGetIncidentNeighbourhood,
   'compute-target-domains':           cmdComputeTargetDomains,
   'get-callers-for-file':             cmdGetCallersForFile,
   'open-refresh-run':                 cmdOpenRefreshRun,

@@ -131,6 +131,54 @@ block):
 Both warnings are heads-ups, not blocks. They surface architectural
 decisions the planner should make explicitly.
 
+### Phase 0.5c — Security incident neighbourhood (proactive memory)
+
+Run alongside the arch-memory + target-domains queries:
+
+```bash
+node scripts/cross-skill.mjs get-incident-neighbourhood --json '{
+  "targetPaths": ["<paths/being/touched>"],
+  "intentDescription": "<one-line task summary>",
+  "k": 3
+}'
+```
+
+Returns `{records, totalCandidatesConsidered, freshnessWarning}`. Render
+**only when `records.length > 0`** (don't add a "no incidents — proceed"
+line on every plan; that creates noise).
+
+```markdown
+> **Past incidents to verify against** (3 shown of 5 total)
+>
+> | Incident | Affected paths | Status | Lessons |
+> |---|---|---|---|
+> | **INC-001** — Debug log leaked credit-card numbers | `src/billing/**` | `manual-verification-required` | Route payment logs through redact.mjs; never log raw payloads. |
+> | **INC-007** — Stripe webhook accepted unverified payloads | `src/checkout/stripe.js` | `mitigation-passing` (semgrep) | Always verify the signature header before parsing body. |
+```
+
+When `freshnessWarning` is non-null (markdown edited since last refresh),
+add the warning ABOVE the table:
+
+```markdown
+> ⚠ `docs/security-strategy.md` edited since last refresh — run
+> `npm run security:refresh` to bring the security index current.
+```
+
+When `docs/security-strategy.md` doesn't exist (response will have
+`hint` containing the bootstrap suggestion), add a soft warning at the
+top of the plan output:
+
+```markdown
+> _No security strategy document found. Run `/security-strategy bootstrap`
+> to seed one and unlock proactive security memory consultation._
+```
+
+Soft warning only — never blocks plan generation.
+
+For any plan that crosses a trust boundary surfaced in the incidents
+callout, add a required **"Security Considerations"** section in the
+plan output addressing each relevant invariant.
+
 ### Phase 0.6 — Read the rendered architecture map for the target domain(s)
 
 If `docs/architecture-map.md` exists AND target domains are non-empty:

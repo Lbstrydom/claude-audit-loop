@@ -22,6 +22,7 @@ import {
 } from './symbol-index-contracts.mjs';
 import { recommendationFromSimilarity } from './symbol-index.mjs';
 import { symbolIndexConfig } from './config.mjs';
+import { redactSecrets } from './secret-patterns.mjs';
 
 const CACHE_REL = '.audit-loop/cache/intent-embeddings.json';
 const CACHE_TTL_MS_DEFAULT = 24 * 60 * 60 * 1000;
@@ -95,13 +96,18 @@ export async function generateIntentEmbedding(intentDescription, activeModel, ac
     err.code = 'EMBED_FAILED';
     throw err;
   }
+  // R-Gemini-G1 + plan AC12: redaction at the function boundary —
+  // defense-in-depth so callers that forget to pre-redact (the older
+  // arch-memory caller did) cannot leak secrets to the Gemini endpoint.
+  // Applying it twice is idempotent.
+  const safeText = redactSecrets(intentDescription).text;
   const start = Date.now();
   // Pin outputDimensionality so gemini-embedding-001 (and friends) return the
   // exact dim stored in audit_repos.active_embedding_dim — otherwise the
   // length check below will reject the response.
   const res = await client.models.embedContent({
     model: activeModel,
-    contents: intentDescription,
+    contents: safeText,
     config: { outputDimensionality: activeDim },
   });
   const latencyMs = Date.now() - start;
@@ -232,4 +238,181 @@ export async function getNeighbourhoodForIntent(adapters, args, repoRoot = proce
     truncated: false,
     hint: null,
   });
+}
+
+// ── Incident neighbourhood (Plan: docs/plans/security-memory-v1.md) ─────────
+
+/**
+ * Sister fn for security incidents. Mirrors getNeighbourhoodForIntent's
+ * embedding + cache shell but calls a different RPC and applies a
+ * client-side weighted composite score (R1-M3 — weights env-tunable).
+ *
+ * Returns the project-standard {result, usage, latencyMs} contract; the
+ * cross-skill bridge unwraps `.result` before emitting on stdout
+ * (R-Gemini-G4 — preserves flat JSON shape for /plan callers).
+ *
+ * @param {{getRepoIdByUuid: Function, getActiveSnapshot: Function,
+ *          callIncidentNeighbourhoodRpc: Function,
+ *          getMaxIncidentRefreshAt: Function}} adapters
+ * @param {{repoUuid: string, targetPaths: string[],
+ *          intentDescription: string, k?: number}} args
+ * @param {string} repoRoot
+ */
+
+const SEC_W = {
+  cosine:     Number(process.env.SEC_SCORE_W_COSINE     ?? 0.65),
+  pathBonus:  Number(process.env.SEC_SCORE_W_PATH       ?? 0.20),
+  mitigation: Number(process.env.SEC_SCORE_W_MITIGATION ?? 0.10),
+  recency:    Number(process.env.SEC_SCORE_W_RECENCY    ?? 0.05),
+};
+
+export async function getIncidentNeighbourhoodForIntent(adapters, args, repoRoot = process.cwd()) {
+  const startMs = Date.now();
+  const usage = { embeddingCalls: 0, haikuCalls: 0 };
+
+  if (!args || typeof args !== 'object') {
+    throw Object.assign(new Error('Invalid args'), { code: 'BAD_INPUT' });
+  }
+  const { repoUuid, targetPaths, intentDescription } = args;
+  const k = args.k ?? 3;
+
+  if (!repoUuid || !Array.isArray(targetPaths) || typeof intentDescription !== 'string') {
+    throw Object.assign(new Error('repoUuid, targetPaths, intentDescription required'), { code: 'BAD_INPUT' });
+  }
+
+  // 1. Resolve repo + active snapshot (for embedding model contract)
+  const repoRow = await adapters.getRepoIdByUuid(repoUuid);
+  if (!repoRow) {
+    return {
+      result: { records: [], totalCandidatesConsidered: 0, freshnessWarning: null,
+                hint: 'repo not found in cloud store; run `npm run security:refresh`' },
+      usage, latencyMs: Date.now() - startMs,
+    };
+  }
+  const active = await adapters.getActiveSnapshot(repoRow.id);
+  if (!active?.activeEmbeddingModel || !active.activeEmbeddingDim) {
+    return {
+      result: { records: [], totalCandidatesConsidered: 0, freshnessWarning: null,
+                hint: 'repo has no active embedding model; run `npm run arch:refresh:full`' },
+      usage, latencyMs: Date.now() - startMs,
+    };
+  }
+
+  // 2. Freshness check (R2-H2 + R-Gemini-r2-G1: try/catch on statSync)
+  let mdMtime = 0;
+  try {
+    const { statSync } = await import('node:fs');
+    mdMtime = statSync('docs/security-strategy.md').mtimeMs;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  let freshnessWarning = null;
+  if (mdMtime > 0) {
+    const lastRefresh = await adapters.getMaxIncidentRefreshAt(repoRow.id);
+    if (lastRefresh != null) {
+      const lastMs = new Date(lastRefresh).getTime();
+      if (mdMtime > lastMs + 5_000) {
+        freshnessWarning = '`docs/security-strategy.md` edited since last refresh — run `npm run security:refresh` to bring index current.';
+      }
+    }
+  }
+
+  // 3. Embed intent (with redaction — R3-H1)
+  const ttlMs = symbolIndexConfig?.intentEmbedCacheTtlMs ?? CACHE_TTL_MS_DEFAULT;
+  const redacted = redactSecrets(intentDescription).text;
+  const key = cacheKey(redacted, active.activeEmbeddingModel, active.activeEmbeddingDim);
+  let intentEmbedding = getCached(repoRoot, key, ttlMs);
+  if (!intentEmbedding) {
+    const emb = await generateIntentEmbedding(
+      redacted,
+      active.activeEmbeddingModel,
+      active.activeEmbeddingDim,
+    );
+    intentEmbedding = emb.result;
+    putCached(repoRoot, key, intentEmbedding);
+    usage.embeddingCalls++;
+  }
+
+  // 4. Call RPC, apply client-side composite weighting (R1-M3)
+  let candidates = await adapters.callIncidentNeighbourhoodRpc({
+    repoId: repoRow.id,
+    targetPaths,
+    intentEmbedding,
+    k,
+  });
+
+  // 5. Intent-rephrasing fallback (R-Gemini-G2): only when length > 0
+  //    AND no path-overlap AND every cosine < 0.5
+  const noOverlap = candidates.every(c => !c.pathOverlap);
+  const allLowCosine = candidates.length > 0 && candidates.every(c => c.cosineScore < 0.5);
+  if (candidates.length > 0 && noOverlap && allLowCosine) {
+    // Single Haiku rephrase attempt (R3-M3 spec — Zod schema)
+    // Best-effort: wrapped in try so a failure here doesn't kill /plan.
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const { z } = await import('zod');
+      const FailureModesSchema = z.object({
+        failureModes: z.array(z.string().min(20).max(200)).min(1).max(3),
+      });
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      if (process.env.ANTHROPIC_API_KEY) {
+        const { resolveModel } = await import('./model-resolver.mjs');
+        const haikuModel = resolveModel('latest-haiku');
+        const prompt = redactSecrets(
+          `Given intent: "${intentDescription}", list 1-3 hypothetical security failure modes that might apply. Each: one sentence, concrete (mention attack vector + asset). Return ONLY JSON: {"failureModes": ["...", "..."]}`
+        ).text;
+        const resp = await client.messages.create({
+          model: haikuModel,
+          max_tokens: 400,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        usage.haikuCalls++;
+        const text = resp?.content?.[0]?.text?.trim() || '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = FailureModesSchema.safeParse(JSON.parse(jsonMatch[0]));
+          if (parsed.success) {
+            const augmented = redactSecrets(intentDescription + ' ' + parsed.data.failureModes.join(' ')).text;
+            const augKey = cacheKey(augmented, active.activeEmbeddingModel, active.activeEmbeddingDim);
+            const augEmb = await generateIntentEmbedding(augmented, active.activeEmbeddingModel, active.activeEmbeddingDim);
+            putCached(repoRoot, augKey, augEmb.result);
+            usage.embeddingCalls++;
+            candidates = await adapters.callIncidentNeighbourhoodRpc({
+              repoId: repoRow.id, targetPaths, intentEmbedding: augEmb.result, k,
+            });
+          }
+        }
+      }
+    } catch {
+      // Swallow — fallback is best-effort
+    }
+  }
+
+  // 6. Client-side weighted composite + final top-k
+  const ranked = candidates
+    .map(r => ({
+      ...r,
+      compositeScore:
+          SEC_W.cosine     * r.cosineScore
+        + SEC_W.pathBonus  * (r.pathOverlap ? 1 : 0)
+        + SEC_W.mitigation * r.mitigationBonus
+        + SEC_W.recency    * r.recencyDecay,
+    }))
+    .sort((a, b) =>
+      a.pathOverlap === b.pathOverlap
+        ? b.compositeScore - a.compositeScore
+        : (b.pathOverlap ? 1 : -1)
+    )
+    .slice(0, k);
+
+  return {
+    result: {
+      records: ranked,
+      totalCandidatesConsidered: candidates.length,
+      freshnessWarning,
+      hint: null,
+    },
+    usage,
+    latencyMs: Date.now() - startMs,
+  };
 }

@@ -1856,6 +1856,109 @@ export async function computeDriftScore({ repoId, refreshId, simDup, simName }) 
   return data;
 }
 
+// ── security_incidents helpers (Plan: docs/plans/security-memory-v1.md) ─────
+
+/**
+ * UPSERT a batch of parsed incidents from docs/security-strategy.md.
+ * Mirrors the chunked recordSymbolIndex pattern.
+ */
+export async function recordSecurityIncidents(repoId, incidents) {
+  if (!_supabase || !Array.isArray(incidents) || incidents.length === 0) return { upserted: 0 };
+  const w = await getWriteClient();
+  let upserted = 0;
+  for (const batch of chunk(incidents, UPSERT_CHUNK_SIZE)) {
+    const payload = batch.map(i => ({
+      repo_id: repoId,
+      incident_id: i.incident_id,
+      description: i.description,
+      affected_paths: i.affected_paths,
+      mitigation_ref: i.mitigation_ref,
+      mitigation_kind: i.mitigation_kind,
+      lessons_learned: i.lessons_learned,
+      embedding: i.embedding,
+      embedding_model: i.embedding_model,
+      embedding_dim: i.embedding_dim,
+      source_fingerprint: i.source_fingerprint,
+      status: i.status,
+      status_check_at: i.status_check_at,
+    }));
+    const { error } = await w
+      .from('security_incidents')
+      .upsert(payload, { onConflict: 'repo_id,incident_id' });
+    if (error) throw new Error(`recordSecurityIncidents failed: ${error.message}`);
+    upserted += payload.length;
+  }
+  return { upserted };
+}
+
+/** Read existing incidents for cache-hit comparison during refresh. */
+export async function getSecurityIncidentsByRepo(repoId) {
+  if (!_supabase || !repoId) return [];
+  const { data, error } = await _supabase
+    .from('security_incidents')
+    .select('id, incident_id, source_fingerprint, embedding_model, embedding_dim, status, mitigation_ref, mitigation_kind')
+    .eq('repo_id', repoId);
+  if (error) throw new Error(`getSecurityIncidentsByRepo failed: ${error.message}`);
+  return data || [];
+}
+
+/** R-Gemini-r2-G2: sweep — mark removed-from-markdown incidents as historical. */
+export async function markIncidentsHistorical(repoId, incidentIds) {
+  if (!_supabase || !Array.isArray(incidentIds) || incidentIds.length === 0) return { marked: 0 };
+  const w = await getWriteClient();
+  const { error } = await w
+    .from('security_incidents')
+    .update({ status: 'historical', status_check_at: new Date().toISOString() })
+    .eq('repo_id', repoId)
+    .in('incident_id', incidentIds);
+  if (error) throw new Error(`markIncidentsHistorical failed: ${error.message}`);
+  return { marked: incidentIds.length };
+}
+
+/** R2-H2: freshness check — what's the most recent updated_at for this repo? */
+export async function getMaxIncidentRefreshAt(repoId) {
+  if (!_supabase || !repoId) return null;
+  const { data, error } = await _supabase
+    .from('security_incidents')
+    .select('updated_at')
+    .eq('repo_id', repoId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
+  return data?.updated_at ?? null;
+}
+
+/** Composite RPC: returns raw signals; client weights + re-sorts. */
+export async function callIncidentNeighbourhoodRpc({ repoId, targetPaths, intentEmbedding, k }) {
+  if (!_supabase) return [];
+  // R1-H1: incident_neighbourhood is service_role only — must use write client
+  const w = await getWriteClient();
+  const { data, error } = await w.rpc('incident_neighbourhood', {
+    p_repo_id: repoId,
+    p_target_paths: targetPaths,
+    p_intent_embedding: intentEmbedding,
+    p_k: k,
+  });
+  if (error) {
+    const e = new Error(`incident_neighbourhood RPC failed: ${error.message}`);
+    e.code = 'RPC_ERROR';
+    throw e;
+  }
+  return (data || []).map(r => ({
+    incidentId: r.incident_id,
+    description: r.description,
+    affectedPaths: r.affected_paths,
+    mitigationRef: r.mitigation_ref,
+    status: r.status,
+    lessonsLearned: r.lessons_learned,
+    cosineScore: Number(r.cosine_score),
+    pathOverlap: r.path_overlap === true,
+    mitigationBonus: Number(r.mitigation_bonus),
+    recencyDecay: Number(r.recency_decay),
+  }));
+}
+
 /**
  * Bulk-insert file-level import edges into symbol_file_imports for a
  * snapshot. Plan §2.6 — keyed by importer_path so copy-forward works

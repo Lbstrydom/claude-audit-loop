@@ -391,6 +391,38 @@ hook's own tests): set `ARCH_MEMORY_HOOK_DISABLE=1` in env.
 RPC (~50–200ms). Cached on disk by `(intentDescription, model, dim)`
 so repeats within 24h are free.
 
+## Security incident memory — Mandatory consultation
+
+Companion to architectural memory. The `/plan` skill auto-fires
+`get-incident-neighbourhood` in Phase 0.5b — for ad-hoc fixes outside
+`/plan`, manually consult before writing security-relevant code:
+
+```bash
+node scripts/cross-skill.mjs get-incident-neighbourhood --json '{
+  "targetPaths": ["<files you intend to touch>"],
+  "intentDescription": "<one-line summary>",
+  "k": 3
+}'
+```
+
+**When to consult**: any change to auth flows, payment handling, input
+parsing, log statements that might carry sensitive data, external API
+calls with credentials, file uploads, or anything in a domain previously
+mentioned in `docs/security-strategy.md` incidents.
+
+**When NOT to consult**: pure UI tweaks, type-only refactors, test
+fixtures, doc-only changes, cosmetic edits.
+
+If the response includes incidents with `mitigation-failing` or
+`manual-verification-required` status that match your target paths,
+explicitly address them in the design before proposing code.
+
+If `docs/security-strategy.md` doesn't exist for this repo, run
+`/security-strategy bootstrap` once to seed it. Single-line
+post-push reminders surface security-relevant commits via `/ship`.
+
+---
+
 **Empirical effectiveness test** (run once per repo when deploying, and
 after major prompt changes — the recipe is also embedded as comments at
 the bottom of `tests/hook-arch-memory-check.test.mjs`):

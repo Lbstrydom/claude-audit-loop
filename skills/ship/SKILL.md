@@ -255,6 +255,32 @@ fix. Do NOT force push.
 
 ---
 
+## Step 6.5 — Security Memory Refresh + Capture Hint (after successful push)
+
+If push succeeded AND `docs/security-strategy.md` exists in the repo,
+run `npm run security:refresh` to keep the Supabase index in sync with
+markdown (only ever publishes pushed state — R3-H3 design constraint).
+Surface the result line briefly.
+
+After refresh, regex-match the HEAD commit subject against
+`/fix.*security|cve|vuln|leak|injection|auth|xss|csrf|rce/i`. If matched,
+emit a single passive log line (NOT an interactive prompt — `/ship` is
+`disable-model-invocation: true`):
+
+```
+⚠ Security-relevant commit detected: "<subject>".
+  Run `/security-strategy add-incident from-commit <sha>` to draft an
+  incident memory entry from this fix.
+```
+
+The user reads this and decides whether to invoke `/security-strategy`
+themselves. No blocking, no prompt, no input.
+
+If `docs/security-strategy.md` doesn't exist → no-op (don't suggest
+bootstrap on every push; that's noise).
+
+---
+
 ## Step 7 — Emit Ship Event (always)
 
 After commit + push completes (or is blocked), record the outcome:

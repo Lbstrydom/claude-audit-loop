@@ -46,19 +46,54 @@ narrow the query (try `<file>:<line>`)."
 If `cross-skill.mjs` exists in the repo and Supabase is configured:
 
 ```bash
+# 1. Near-duplicates and similar symbols
 node scripts/cross-skill.mjs get-neighbourhood --json '{
   "targetPaths": ["<file>"],
   "intentDescription": "Understand the purpose and shape of <symbol-or-file>",
   "k": 6
 }'
+
+# 2. Domain assignment (Plan v6 §2.4 — anchors the explanation in
+#    the architecture map's domain structure)
+node scripts/cross-skill.mjs compute-target-domains --json '{
+  "targetPaths": ["<file>"]
+}'
+
+# 3. Caller domains (cross-domain reach detection — Plan v6 §2.4)
+node scripts/cross-skill.mjs get-callers-for-file --json '{
+  "path": "<file>"
+}'
 ```
 
 Use the result to:
 - Identify **what this symbol does** (the `purposeSummary` of the matching record)
-- Identify **near-duplicates** — sibling symbols solving similar problems (this is critical context: "you might think this is unique but here are 3 similar ones")
+- Identify **near-duplicates** — sibling symbols solving similar problems
 - Identify **recommended uses** — if the matched record's recommendation is `reuse`, that's a signal this is the canonical version of a pattern
+- Identify **the file's home domain** (from `compute-target-domains.domains[0]`) — emit as `**Domain**: \`<X>\`` in the output
+- Identify **cross-domain reach** (from `get-callers-for-file`) — see deterministic spec below
 
-If Supabase is offline → skip this step and note `[arch-memory: unavailable]` in the output.
+### Cross-domain reach detection (deterministic — Gemini-R2-G3)
+
+Let `homeDomain = compute-target-domains.domains[0]` and `callerDomains
+= get-callers-for-file.callerDomains`. Trigger the "Cross-domain reach
+detected" finding **if and only if all of**:
+
+1. `callerDomains.length > 0` (importers exist)
+2. `nonSelfCallerDomains = callerDomains.filter(d => d !== homeDomain)` has length **> 0** (any external-domain caller is the leak)
+3. `homeDomain` is NOT `null`/`"unknown"` AND is NOT in the cross-cutting allowlist: `["shared-lib", "shared-frontend", "core", "utils", "scripts"]` (Audit-Gemini-G4: untagged files would otherwise spam false-positive cross-domain warnings on every importer — skip the check entirely when the file's home domain is unknown)
+4. `get-callers-for-file.snapshotProvenance === "import-graph-populated"` (skip silently if "pre-feature-snapshot" / "no-active-snapshot" / "cloud-disabled" — false signal otherwise)
+
+When triggered, render exactly:
+
+```markdown
+**Cross-domain reach detected**: `<homeDomain>` file called from
+`<nonSelfCallerDomains[0]>`, `<nonSelfCallerDomains[1]>` (etc) — explain whether this is intentional shared API vs leaked internal.
+```
+
+Omit the section entirely when not triggered.
+
+If Supabase is offline → skip all three subcommands and note
+`[arch-memory: unavailable]` in the output.
 
 ---
 
@@ -72,7 +107,10 @@ git blame -L <line>,<line>+5 <file>
 git log --oneline -10 -- <file>
 
 # Recent commits that touched the symbol (if line known)
-git log -L <line>,<line>+10:<file> --oneline | head -10
+# NOTE: use git's native +offset syntax — git does NOT evaluate "<line>+10"
+# arithmetic in -L. Pass +10 directly so git computes line + 10 internally
+# (Gemini-R1-G4 fix).
+git log -L <line>,+10:<file> --oneline | head -10
 
 # PR context (if gh CLI available)
 LAST_COMMIT=$(git log -1 --format=%H -- <file>)

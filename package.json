@@ -42,6 +42,7 @@
     "arch:drift": "node scripts/symbol-index/drift.mjs",
     "arch:duplicates": "node scripts/symbol-index/duplicates.mjs",
     "arch:prune": "node scripts/symbol-index/prune.mjs",
+    "security:refresh": "node scripts/security-memory/refresh-incidents.mjs",
     "arch:spike": "node scripts/symbol-index/spike-extract.mjs"
   },
   "keywords": [

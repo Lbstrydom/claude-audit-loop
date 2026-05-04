@@ -94,6 +94,11 @@ export const SKILL_ENTRY_SCRIPTS = Object.freeze({
     cli: 'node .audit-loop/scripts/check-context-drift.mjs',
     summary: 'Manage AGENTS.md / CLAUDE.md alignment; generate Copilot prompt shims.',
   },
+  'security-strategy': {
+    script: 'security-memory/refresh-incidents.mjs',
+    cli: 'node .audit-loop/scripts/security-memory/refresh-incidents.mjs',
+    summary: 'Refresh security_incidents from docs/security-strategy.md (interview/edit modes are skill-driven; CLI runs the refresh).',
+  },
 });
 
 /**

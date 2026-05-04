@@ -69,18 +69,20 @@ risks (Plan v6 §2.1, Gemini-G1 v1+v2).
 2. Use `Write` (Claude tool) to create the file:
    - Path: `.claude/tmp/brainstorm-<SID>.txt`
    - Content: the topic verbatim (no escaping, no transformation)
-3. Run the helper with stdin redirected from the file:
+3. Run the helper with stdin redirected from the file. Both topic and
+   output JSON live in repo-local `.claude/tmp/` (gitignored, 0o600 — not
+   the world-readable OS `/tmp`):
    ```bash
    node scripts/brainstorm-round.mjs \
      --topic-stdin \
      --models openai[,gemini] \
      [--openai-model <id>] [--gemini-model <id>] \
-     --out /tmp/brainstorm-<SID>.json \
+     --out .claude/tmp/brainstorm-<SID>.json \
      < .claude/tmp/brainstorm-<SID>.txt
    ```
-4. Always clean up:
+4. Always clean up after rendering (Step 3) finishes — both files:
    ```bash
-   rm -f .claude/tmp/brainstorm-<SID>.txt
+   rm -f .claude/tmp/brainstorm-<SID>.txt .claude/tmp/brainstorm-<SID>.json
    ```
 
 The helper exits 0 even when providers fail or are misconfigured — read the

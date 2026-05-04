@@ -20,6 +20,7 @@ Three-model audit loop (Claude plans/codes, GPT-5.4 audits, Gemini 3.1 Pro revie
 | "Why is this code shaped this way?" | `/explain <file:line>` |
 | Brainstorm with multiple LLMs (you drive convergence) | `/brainstorm <topic>` (add `--with-gemini`) |
 | Sync AGENTS.md / CLAUDE.md across all AI agents | `/ai-context-management audit` |
+| Bootstrap or add to per-repo security memory (incident log) | `/security-strategy bootstrap` · `/security-strategy add-incident` |
 
 **Architectural-memory** (terminal):
 
@@ -30,6 +31,7 @@ Three-model audit loop (Claude plans/codes, GPT-5.4 audits, Gemini 3.1 Pro revie
 | `npm run arch:render` | Generate `docs/architecture-map.md` (Mermaid + flat tables) |
 | `npm run arch:drift` | Compute drift score for active snapshot |
 | `npm run arch:duplicates` | List top cross-file duplicate clusters (refactor targets) |
+| `npm run security:refresh` | Re-parse `docs/security-strategy.md` and refresh the security_incidents Supabase index (auto-runs post-push from `/ship`) |
 
 **Workflow**:
 

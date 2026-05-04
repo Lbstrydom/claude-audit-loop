@@ -137,6 +137,12 @@ const ARCH_MEMORY_SCRIPTS = [
   // Domain tagger — path-based mapping into .audit-loop/domain-map.json,
   // wired into refresh.mjs to populate domainTag instead of leaving null.
   'scripts/lib/symbol-index/domain-tagger.mjs',
+  // Security memory v1 — incident-log-driven proactive memory.
+  // Markdown SoT in consumer's docs/security-strategy.md (consumer-owned,
+  // committed by user). These scripts are the synced runtime.
+  'scripts/security-memory/parse-strategy.mjs',
+  'scripts/security-memory/incident-status.mjs',
+  'scripts/security-memory/refresh-incidents.mjs',
 ];
 
 /**
