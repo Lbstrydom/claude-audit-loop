@@ -54,6 +54,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/quickfix-scan.mjs",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

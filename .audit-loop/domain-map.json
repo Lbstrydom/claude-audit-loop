@@ -1,6 +1,8 @@
 {
   "_comment": "Domain rules for the architectural-memory symbol index. First match wins. Most-specific patterns first; broad catch-alls last. Domains must match /^[a-z][a-z0-9_-]{0,49}$/.",
   "rules": [
+    { "pattern": ".claude/hooks/**", "domain": "claude-hooks" },
+    { "pattern": "scripts/lib/quickfix-patterns.mjs", "domain": "claude-hooks" },
     { "pattern": "scripts/lib/brainstorm/**", "domain": "brainstorm" },
     { "pattern": "scripts/lib/install/**", "domain": "install" },
     { "pattern": "scripts/lib/stores/**", "domain": "stores" },

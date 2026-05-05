@@ -11,13 +11,19 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { resolveModel, refreshModelCatalog } from './lib/model-resolver.mjs';
 import { redactSecrets } from './lib/secret-patterns.mjs';
 import { atomicWriteFileSync } from './lib/file-io.mjs';
-import { BrainstormOutputSchema } from './lib/brainstorm/schemas.mjs';
+import { BrainstormEnvelopeWriteSchema } from './lib/brainstorm/schemas.mjs';
 import { callOpenAI } from './lib/brainstorm/openai-adapter.mjs';
 import { callGemini } from './lib/brainstorm/gemini-adapter.mjs';
 import { preflightEstimateUsd } from './lib/brainstorm/pricing.mjs';
+import { resolveDepth, DEPTH_TOKENS } from './lib/brainstorm/depth-config.mjs';
+import { assembleResumeContext } from './lib/brainstorm/resume-context.mjs';
+import { buildDebatePrompt } from './lib/brainstorm/debate-prompt.mjs';
+import { appendSession, pruneOldSessions, loadSession } from './lib/brainstorm/session-store.mjs';
+import { saveInsight } from './lib/brainstorm/insight-store.mjs';
 
 // Repo-local debug dir for malformed-payload artefacts (Plan v6 Gemini-G3).
 // Lives inside the repo so file ACLs are governed by repo ownership, not
@@ -27,35 +33,80 @@ const DEBUG_DIR_RELATIVE = '.claude/tmp';
 
 const HELP_TEXT = `brainstorm-round — call multiple LLMs concurrently for concept-level brainstorming
 
-USAGE
+USAGE — brainstorm round (default mode)
   node scripts/brainstorm-round.mjs --topic "<text>" [flags]
   echo "<text>" | node scripts/brainstorm-round.mjs --topic-stdin [flags]
-  node scripts/brainstorm-round.mjs --topic-stdin [flags] < topic.txt
 
-FLAGS
-  --topic <text>         User topic (provide either this OR --topic-stdin, not both)
+USAGE — save mode (positional 'save' first arg)
+  node scripts/brainstorm-round.mjs save --sid <sid> --round <n> --topic "<text>" --insight "<text>" [--tags <csv>]
+  node scripts/brainstorm-round.mjs save --sid <sid> --round <n> --topic-stdin --insight-stdin [--tags <csv>] < combined.txt
+    (combined.txt = topic, then "---END-TOPIC---" line, then insight)
+
+FLAGS — brainstorm-round mode
+  --topic <text>         User topic
   --topic-stdin          Read topic from stdin
   --models <csv>         Providers to call (default: openai). Options: openai, gemini
+  --with-gemini          Convenience: add gemini to --models (equivalent to --models openai,gemini)
   --openai-model <id>    OpenAI model sentinel or concrete ID (default: latest-gpt)
   --gemini-model <id>    Gemini model sentinel or concrete ID (default: latest-pro)
-  --max-tokens <n>       Per-provider output cap (default: 1500)
+  --max-tokens <n>       Per-provider output cap (overrides --depth if both given)
+  --depth <tier>         shallow|standard|deep — maps to maxTokens (default: standard=1500)
+  --debate               Run a second round where each model reacts to the other's response
+  --continue-from <sid>  Resume from prior session id (loads prior rounds as context)
+  --with-context "<txt>" Additional context (repeatable, max 8000 chars per flag, 24000 total)
   --out <path>           Write JSON output to file (default: stdout)
   --timeout-ms <n>       Per-provider timeout (default: 60000)
+  --sid <sid>            Override session id (default: auto-generated)
   --help                 Show this message
 
+FLAGS — save mode (only valid after positional 'save')
+  --sid <sid>            REQUIRED — session id from a brainstorm round
+  --round <n>            REQUIRED — round number to attach the insight to
+  --topic <text>         REQUIRED — topic text (use --topic-stdin for safety with shell-special chars)
+  --topic-stdin          Read topic from stdin
+  --insight <text>       Insight body
+  --insight-stdin        Read insight body from stdin (with --topic-stdin uses ---END-TOPIC--- delimiter)
+  --tags <csv>           Optional comma-separated tags
+
 OUTPUT
-  Schema-valid JSON document (per scripts/lib/brainstorm/schemas.mjs).
-  Exit 0 = helper ran. Exit 1 = argv error or schema-validation bug.
+  Brainstorm-round mode → schema-valid envelope JSON to stdout/--out (V2 schema with sid/round/debate?)
+  Save mode → {ok:true, path, slugUsed} JSON to stdout
+  Exit 0 = helper ran. Exit 1 = argv/runtime error. Exit 2 = BUDGET_EXCEEDED.
 `;
 
+const WITH_CONTEXT_PER_FLAG_MAX = 8_000;
+const WITH_CONTEXT_TOTAL_MAX = 24_000;
+
 function parseArgs(argv) {
+  // Detect save mode: first non-flag argv = 'save'
+  let mode = 'brainstorm';
+  let startIdx = 0;
+  if (argv[0] === 'save') {
+    mode = 'save';
+    startIdx = 1;
+  }
+
+  if (mode === 'save') {
+    return parseSaveArgs(argv.slice(startIdx));
+  }
+  return parseBrainstormArgs(argv);
+}
+
+function parseBrainstormArgs(argv) {
   const args = {
+    mode: 'brainstorm',
     topic: null,
     topicStdin: false,
     models: ['openai'],
     openaiModel: 'latest-gpt',
     geminiModel: 'latest-pro',
-    maxTokens: 1500,
+    maxTokens: null,         // null = derived from --depth (or default standard)
+    explicitMaxTokens: false,
+    depth: null,             // null = auto-resolve via topic (autoPromote) or default standard
+    debate: false,
+    continueFrom: null,
+    withContext: [],         // collected per-flag, validated below
+    sid: null,               // explicit override (else auto-generated)
     out: null,
     timeoutMs: 60000,
     help: false,
@@ -71,9 +122,19 @@ function parseArgs(argv) {
       case '--topic': args.topic = requireValue(); break;
       case '--topic-stdin': args.topicStdin = true; break;
       case '--models': args.models = requireValue().split(',').map(s => s.trim()).filter(Boolean); break;
+      case '--with-gemini':
+        // Audit R1-H16: convenience shortcut for --models openai,gemini
+        // (documented in SKILL.md). Last-flag-wins if --models also passed.
+        if (!args.models.includes('gemini')) args.models = [...new Set([...args.models, 'gemini'])];
+        break;
       case '--openai-model': args.openaiModel = requireValue(); break;
       case '--gemini-model': args.geminiModel = requireValue(); break;
-      case '--max-tokens': args.maxTokens = Number(requireValue()); break;
+      case '--max-tokens': args.maxTokens = Number(requireValue()); args.explicitMaxTokens = true; break;
+      case '--depth': args.depth = requireValue(); break;
+      case '--debate': args.debate = true; break;
+      case '--continue-from': args.continueFrom = requireValue(); break;
+      case '--with-context': args.withContext.push(requireValue()); break;
+      case '--sid': args.sid = requireValue(); break;
       case '--out': args.out = requireValue(); break;
       case '--timeout-ms': args.timeoutMs = Number(requireValue()); break;
       case '--help':
@@ -89,17 +150,87 @@ function parseArgs(argv) {
   if (args.topic === null && !args.topicStdin) {
     throw new ArgvError('Missing --topic or --topic-stdin');
   }
+  // Audit R3-M8: --models "" or --models , leaves args.models empty
+  if (args.models.length === 0) {
+    throw new ArgvError(`--models requires at least one provider (allowed: openai, gemini)`);
+  }
   for (const m of args.models) {
     if (!['openai', 'gemini'].includes(m)) {
       throw new ArgvError(`Unknown model provider: ${m} (allowed: openai, gemini)`);
     }
   }
-  if (!Number.isFinite(args.maxTokens) || args.maxTokens <= 0 || !Number.isInteger(args.maxTokens)) {
-    throw new ArgvError(`--max-tokens must be a positive integer`);
+  // Audit R4-M7: Object.hasOwn guards against prototype-chain bypass
+  if (args.depth !== null && !Object.hasOwn(DEPTH_TOKENS, args.depth)) {
+    throw new ArgvError(`--depth must be one of: ${Object.keys(DEPTH_TOKENS).join(', ')}`);
+  }
+  if (args.explicitMaxTokens) {
+    if (!Number.isFinite(args.maxTokens) || args.maxTokens <= 0 || !Number.isInteger(args.maxTokens)) {
+      throw new ArgvError(`--max-tokens must be a positive integer`);
+    }
   }
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0 || !Number.isInteger(args.timeoutMs)) {
     throw new ArgvError(`--timeout-ms must be a positive integer`);
   }
+  // Validate --with-context sizes
+  let totalWithContext = 0;
+  for (const wc of args.withContext) {
+    if (wc.length > WITH_CONTEXT_PER_FLAG_MAX) {
+      throw new ArgvError(`--with-context value (${wc.length} chars) exceeds per-flag max ${WITH_CONTEXT_PER_FLAG_MAX}`);
+    }
+    totalWithContext += wc.length;
+  }
+  if (totalWithContext > WITH_CONTEXT_TOTAL_MAX) {
+    throw new ArgvError(`--with-context combined (${totalWithContext} chars) exceeds total max ${WITH_CONTEXT_TOTAL_MAX}`);
+  }
+  return args;
+}
+
+function parseSaveArgs(argv) {
+  const args = {
+    mode: 'save',
+    sid: null,
+    round: null,
+    topic: null,
+    topicStdin: false,
+    insight: null,
+    insightStdin: false,
+    tags: [],
+    help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const requireValue = () => {
+      const v = argv[++i];
+      if (v === undefined) throw new ArgvError(`Flag ${a} requires a value`);
+      return v;
+    };
+    switch (a) {
+      case '--sid': args.sid = requireValue(); break;
+      case '--round': args.round = Number(requireValue()); break;
+      case '--topic': args.topic = requireValue(); break;
+      case '--topic-stdin': args.topicStdin = true; break;
+      case '--insight': args.insight = requireValue(); break;
+      case '--insight-stdin': args.insightStdin = true; break;
+      case '--tags': args.tags = requireValue().split(',').map(s => s.trim()).filter(Boolean); break;
+      case '--help':
+      case '-h': args.help = true; break;
+      default:
+        throw new ArgvError(`Unknown save-mode flag: ${a}`);
+    }
+  }
+  if (args.help) return args;
+  if (!args.sid) throw new ArgvError('save mode requires --sid');
+  if (args.round === null || !Number.isInteger(args.round) || args.round < 0) {
+    throw new ArgvError('save mode requires --round (non-negative integer)');
+  }
+  if (args.topic !== null && args.topicStdin) {
+    throw new ArgvError('Provide either --topic OR --topic-stdin, not both');
+  }
+  if (args.insight !== null && args.insightStdin) {
+    throw new ArgvError('Provide either --insight OR --insight-stdin, not both');
+  }
+  if (args.topic === null && !args.topicStdin) throw new ArgvError('save mode requires --topic or --topic-stdin');
+  if (args.insight === null && !args.insightStdin) throw new ArgvError('save mode requires --insight or --insight-stdin');
   return args;
 }
 
@@ -130,11 +261,22 @@ async function main() {
     process.exit(0);
   }
 
-  // Load topic
-  let rawTopic = args.topic;
-  if (args.topicStdin) {
-    rawTopic = await readStdin();
+  // Best-effort prune at startup (§16.D — never fail the invocation)
+  try {
+    const pruned = await pruneOldSessions(30);
+    if (pruned > 0) process.stderr.write(`  [brainstorm] pruned ${pruned} old session(s)\n`);
+  } catch (err) {
+    process.stderr.write(`  [brainstorm] WARN: prune skipped — ${err.code || err.message}\n`);
   }
+
+  if (args.mode === 'save') return runSaveMode(args);
+  return runBrainstormMode(args);
+}
+
+async function runBrainstormMode(args) {
+  // Load topic — supports stdin
+  let rawTopic = args.topic;
+  if (args.topicStdin) rawTopic = await readStdin();
   if (!rawTopic || rawTopic.trim().length === 0) {
     process.stderr.write(`Error: empty topic\n`);
     process.exit(1);
@@ -148,8 +290,7 @@ async function main() {
     process.stderr.write(`  [brainstorm] ⚠ Redacted ${redactionCount} secret pattern(s) before sending: ${redaction.redacted.join(', ')}\n`);
   }
 
-  // Resolve model sentinels — best-effort live catalog refresh; surface
-  // failure to stderr so operators see stale-catalog conditions (audit-code R1-L1).
+  // Resolve model sentinels
   await refreshModelCatalog().catch(err => {
     process.stderr.write(`  [brainstorm] WARN: model catalog refresh failed (${err?.message ?? 'unknown'}); using static pool\n`);
   });
@@ -157,56 +298,266 @@ async function main() {
   if (args.models.includes('openai')) resolvedModels.openai = resolveModel(args.openaiModel);
   if (args.models.includes('gemini')) resolvedModels.gemini = resolveModel(args.geminiModel);
 
-  // Pre-call cost estimate (Gemini-G2 v2 — includes input cost)
-  const inputChars = topic.length;
-  const preflightTotal = args.models.reduce((sum, p) => {
-    return sum + preflightEstimateUsd({
-      modelId: resolvedModels[p],
-      inputChars,
-      maxOutputTokens: args.maxTokens,
-    });
-  }, 0);
-  process.stderr.write(`  [brainstorm] Calling: ${args.models.join(', ')} | Resolved: ${JSON.stringify(resolvedModels)}\n`);
-  process.stderr.write(`  [brainstorm] Pre-call cost ceiling: ~$${preflightTotal.toFixed(4)} (input=${inputChars} chars, max-out=${args.maxTokens})\n`);
+  // Resolve maxTokens — explicit --max-tokens wins over --depth (with WARN)
+  let maxTokens;
+  if (args.explicitMaxTokens) {
+    maxTokens = args.maxTokens;
+    if (args.depth) {
+      process.stderr.write(`  [brainstorm] WARN: --max-tokens overrides --depth (used max=${maxTokens}, ignored depth=${args.depth})\n`);
+    }
+  } else {
+    const dep = resolveDepth({ explicitDepth: args.depth, topic });
+    maxTokens = dep.maxTokens;
+    if (dep.autoPromoted) {
+      process.stderr.write(`  [brainstorm] auto-promoted depth → ${dep.depth} (${maxTokens} tokens)\n`);
+    }
+  }
 
-  // Dispatch — preserve --models argv order in output (R3-M2)
-  const tasks = args.models.map(p => ({
+  // Assemble resume context + --with-context (BEFORE preflight per §13.C)
+  const providersForBudget = args.models.map(p => ({
     provider: p,
-    promise: dispatchProvider({ provider: p, topic, args, resolvedModels }),
+    model: p === 'openai' ? args.openaiModel : args.geminiModel,
   }));
-  const settled = await Promise.all(tasks.map(t => t.promise));
+  const wcCombined = args.withContext.length > 0
+    ? args.withContext.join('\n\n---\n\n')
+    : '';
+  let assembledContext = { systemPreface: '', userPrefix: '', withContextEffective: '', includedRounds: [], droppedRounds: [], estimatedTokens: 0 };
+  try {
+    assembledContext = assembleResumeContext({
+      sid: args.continueFrom,
+      withContextText: wcCombined,
+      providers: providersForBudget,
+    });
+  } catch (err) {
+    if (err.code === 'BUDGET_EXCEEDED') {
+      process.stderr.write(`  [brainstorm] ERROR: ${err.message}\n`);
+      const out = { ok: false, code: 'BUDGET_EXCEEDED', estimatedTokens: err.estimatedTokens, budgetTokens: err.budgetTokens };
+      process.stdout.write(JSON.stringify(out) + '\n');
+      process.exit(2);
+    }
+    throw err;
+  }
+  if (args.continueFrom && assembledContext.includedRounds.length === 0) {
+    process.stderr.write(`  [brainstorm] WARN: session ${args.continueFrom} not found or empty — proceeding without resume context\n`);
+  }
+  if (assembledContext.includedRounds.length > 0 || assembledContext.droppedRounds.length > 0) {
+    process.stderr.write(`  [brainstorm] resume: included ${assembledContext.includedRounds.length}; dropped ${assembledContext.droppedRounds.length}; tokens ${assembledContext.estimatedTokens}\n`);
+  }
 
-  // Build output document
-  const totalCostUsd = settled.reduce((s, p) => s + (p.estimatedCostUsd ?? 0), 0);
-  const output = {
+  // Pre-call cost estimate — uses ASSEMBLED context (§13.C) AND debate (§14.C)
+  const totalInputChars = topic.length + (assembledContext.systemPreface || '').length + (assembledContext.userPrefix || '').length + (assembledContext.withContextEffective || '').length;
+  const round1Cost = args.models.reduce((sum, p) => sum + preflightEstimateUsd({
+    modelId: resolvedModels[p],
+    inputChars: totalInputChars,
+    maxOutputTokens: maxTokens,
+  }), 0);
+  const debateRunsForBudget = (args.debate && args.models.length === 2) ? 2 : 0;
+  const debateCost = debateRunsForBudget > 0
+    ? args.models.reduce((sum, p) => sum + preflightEstimateUsd({
+        modelId: resolvedModels[p],
+        inputChars: totalInputChars + maxTokens * 4,  // peer's response added to input
+        maxOutputTokens: maxTokens,
+      }), 0)
+    : 0;
+  const preflightTotal = round1Cost + debateCost;
+  process.stderr.write(`  [brainstorm] Calling: ${args.models.join(', ')} | Resolved: ${JSON.stringify(resolvedModels)}\n`);
+  process.stderr.write(`  [brainstorm] Pre-call cost ceiling: ~$${preflightTotal.toFixed(4)} (${args.models.length} round-1${args.debate && args.models.length === 2 ? ' + 2 debate' : ''} calls; total input ~${totalInputChars} chars; max-out=${maxTokens})\n`);
+
+  // Dispatch round 1
+  const composedSystemPreface = assembledContext.systemPreface;
+  const composedTopic = assembledContext.withContextEffective
+    ? `${topic}\n\nAdditional context:\n${assembledContext.withContextEffective}`
+    : topic;
+  const tasks = args.models.map(p => dispatchProvider({
+    provider: p,
+    topic: composedTopic,
+    systemPreface: composedSystemPreface,
+    args: { ...args, maxTokens },
+    resolvedModels,
+  }));
+  const settled = await Promise.all(tasks);
+
+  // Optional debate round (§12.A canonical 4-case state machine)
+  let debateResults = [];
+  if (args.debate) {
+    debateResults = await runDebateRound({
+      providers: args.models,
+      round1: settled,
+      args: { ...args, maxTokens },
+      resolvedModels,
+      assembledContext,
+      withContextText: assembledContext.withContextEffective,
+      originalTopic: topic,
+    });
+  }
+
+  // Build envelope (V2)
+  const round1CostFinal = settled.reduce((s, p) => s + (p.estimatedCostUsd ?? 0), 0);
+  const debateCostFinal = debateResults.reduce((s, d) => s + (d.estimatedCostUsd ?? 0), 0);
+  const totalCostUsd = round1CostFinal + debateCostFinal;
+  const sid = args.sid || generateSid();
+  const envelope = {
     topic,
     redactionCount,
     resolvedModels,
     providers: settled,
     totalCostUsd: Number(totalCostUsd.toFixed(6)),
+    sid,
+    capturedAt: new Date().toISOString(),
+    schemaVersion: 2,
+    ...(debateResults.length > 0 ? { debate: debateResults } : { debate: [] }),
   };
 
-  // Validate our own output before emitting (catches helper bugs)
-  const parsed = BrainstormOutputSchema.safeParse(output);
+  // Both providers failed — DO NOT append to session ledger (§10.F)
+  const successCount = settled.filter(p => p.state === 'success').length;
+  let appendResult = null;
+  if (successCount === 0) {
+    process.stderr.write(`  [brainstorm] ERROR: both providers failed in round 1; not appending to session ledger\n`);
+    // Still emit envelope so caller can see error states; round=0 placeholder
+    envelope.round = 0;
+  } else {
+    try {
+      appendResult = await appendSession({ sid, envelope: { ...envelope, round: undefined } });
+      envelope.round = appendResult.round;
+    } catch (err) {
+      process.stderr.write(`  [brainstorm] WARN: appendSession failed — ${err.code || err.message}\n`);
+      envelope.round = 0;
+    }
+  }
+
+  // Validate envelope
+  const parsed = BrainstormEnvelopeWriteSchema.safeParse(envelope);
   if (!parsed.success) {
-    process.stderr.write(`  [brainstorm] code: SCHEMA_INVALID — helper produced an invalid document\n`);
+    process.stderr.write(`  [brainstorm] code: SCHEMA_INVALID — helper produced invalid envelope\n`);
     process.stderr.write(`  ${JSON.stringify(parsed.error.issues, null, 2)}\n`);
     process.exit(1);
   }
 
   const json = JSON.stringify(parsed.data, null, 2);
   if (args.out) {
-    // Atomic write — temp-file + rename, crash-safe per repo standard
-    // (audit-code R1-M4).
     atomicWriteFileSync(args.out, json);
-    process.stderr.write(`  [brainstorm] Output: ${args.out}\n`);
+    process.stderr.write(`  [brainstorm] Output: ${args.out} | Session: ${sid} round ${envelope.round}\n`);
   } else {
     process.stdout.write(json + '\n');
   }
   process.exit(0);
 }
 
-async function dispatchProvider({ provider, topic, args, resolvedModels }) {
+async function runSaveMode(args) {
+  // Load topic + insight (handles stdin variants per §16.A)
+  let topic = args.topic;
+  let insight = args.insight;
+  if (args.topicStdin && args.insightStdin) {
+    const raw = await readStdin();
+    const idx = raw.indexOf('\n---END-TOPIC---\n');
+    if (idx < 0) {
+      process.stderr.write('Error: --topic-stdin + --insight-stdin require "---END-TOPIC---" delimiter on its own line\n');
+      process.exit(1);
+    }
+    topic = raw.slice(0, idx);
+    insight = raw.slice(idx + '\n---END-TOPIC---\n'.length);
+  } else if (args.topicStdin) {
+    topic = await readStdin();
+  } else if (args.insightStdin) {
+    insight = await readStdin();
+  }
+  topic = (topic || '').trim();
+  insight = (insight || '').trim();
+
+  // Validate sid + round exist in ledger (§10.H + §16.B)
+  const session = loadSession(args.sid);
+  if (!session) {
+    process.stderr.write(`Error: session ${args.sid} not found in .brainstorm/sessions/\n`);
+    process.exit(1);
+  }
+  const matchingRound = session.rounds.find(r => r.round === args.round);
+  if (!matchingRound) {
+    process.stderr.write(`Error: round ${args.round} not found in session ${args.sid} (session has rounds ${session.rounds.map(r => r.round).join(',')})\n`);
+    process.exit(1);
+  }
+  if (topic !== matchingRound.topic) {
+    process.stderr.write(`  [brainstorm] WARN: --topic does not match round's recorded topic (insight saved with provided topic)\n`);
+  }
+
+  try {
+    const result = await saveInsight({ sid: args.sid, round: args.round, topic, insightText: insight, tags: args.tags });
+    process.stdout.write(JSON.stringify({ ok: true, ...result }) + '\n');
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
+function generateSid() {
+  // Short, sortable, unique-enough for local sessions: timestamp + random suffix
+  return `${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+async function runDebateRound({ providers, round1, args, resolvedModels, assembledContext, withContextText, originalTopic }) {
+  // §12.A canonical state machine — entries only when both providers succeeded
+  const successByProvider = {};
+  for (const r of round1) successByProvider[r.provider] = r.state === 'success' ? r : null;
+  if (providers.length !== 2 || providers.some(p => !successByProvider[p])) {
+    if (providers.length === 2) {
+      process.stderr.write(`  [brainstorm] WARN: debate skipped — only ${providers.filter(p => successByProvider[p]).length}/2 providers succeeded in round 1, no peer-response pair available\n`);
+    }
+    return [];
+  }
+
+  const tasks = providers.map(speaker => {
+    const peer = providers.find(p => p !== speaker);
+    const peerResp = successByProvider[peer];
+    const { systemPrompt, userMessage } = buildDebatePrompt({
+      otherProvider: peer,
+      otherResponse: peerResp.text,
+      originalTopic,
+      assembledContext: { systemPreface: assembledContext.systemPreface || '', userPrefix: assembledContext.userPrefix || '' },
+      withContextText: withContextText || '',
+    });
+    return dispatchDebateCall({
+      provider: speaker,
+      reactingTo: peer,
+      systemPrompt,
+      userMessage,
+      args,
+      resolvedModels,
+    });
+  });
+  return await Promise.all(tasks);
+}
+
+async function dispatchDebateCall({ provider, reactingTo, systemPrompt, userMessage, args, resolvedModels }) {
+  const requiredEnv = provider === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY';
+  const baseEntry = {
+    provider, reactingTo,
+    state: 'http_error', text: null, errorMessage: null,
+    httpStatus: null, usage: null, latencyMs: 0, estimatedCostUsd: null,
+  };
+  if (!process.env[requiredEnv]) {
+    return { ...baseEntry, state: 'http_error', errorMessage: `${requiredEnv} not set` };
+  }
+  const model = resolvedModels[provider];
+  // Reuse round-1 adapters but pass the debate prompts via the topic argument
+  // and inject the system preface inline. The adapters take a single `topic`
+  // string today — we concatenate system+user for compatibility.
+  const fn = provider === 'openai' ? callOpenAI : callGemini;
+  const debateTopic = `${systemPrompt}\n\n---\n\n${userMessage}`;
+  const r1 = await fn({ topic: debateTopic, model, maxTokens: args.maxTokens, timeoutMs: args.timeoutMs });
+  // r1 has the ProviderResultSchema shape; project the fields the DebateRoundSchema expects
+  return {
+    provider, reactingTo,
+    state: r1.state === 'success' ? 'success' : (r1.state === 'malformed' || r1.state === 'timeout' || r1.state === 'http_error' || r1.state === 'empty' ? r1.state : 'http_error'),
+    text: r1.text ?? null,
+    errorMessage: r1.errorMessage ?? null,
+    httpStatus: r1.httpStatus ?? null,
+    usage: r1.usage ?? null,
+    latencyMs: r1.latencyMs ?? 0,
+    estimatedCostUsd: r1.estimatedCostUsd ?? null,
+  };
+}
+
+async function dispatchProvider({ provider, topic, systemPreface = '', args, resolvedModels }) {
   const requiredEnv = provider === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY';
   if (!process.env[requiredEnv]) {
     return {
@@ -223,8 +574,13 @@ async function dispatchProvider({ provider, topic, args, resolvedModels }) {
 
   const model = resolvedModels[provider];
   const fn = provider === 'openai' ? callOpenAI : callGemini;
+  // The adapters take a single `topic` string. We prepend the resume
+  // context inline so the round-1 prompt = preface + topic + with-context.
+  const composedTopic = systemPreface
+    ? `${systemPreface}\n\n---\n\nNew topic for this round:\n${topic}`
+    : topic;
   const result = await fn({
-    topic,
+    topic: composedTopic,
     model,
     maxTokens: args.maxTokens,
     timeoutMs: args.timeoutMs,

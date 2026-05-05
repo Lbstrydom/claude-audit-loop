@@ -25,6 +25,10 @@ node_modules/
 .audit/session-ledger.json
 .audit/meta-assessments.jsonl
 .audit/session-audit-*.json
+.audit/quickfix-hits.jsonl
+
+# Brainstorm session ledger + saved insights (per-machine state)
+.brainstorm/
 
 # Per-run audit artifacts (results, transcripts, rebuttals)
 .audit/*-result.json

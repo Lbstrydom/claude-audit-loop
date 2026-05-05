@@ -28,7 +28,10 @@ skill.
 
 ## Step 0 — Parse Arguments
 
-Flags:
+**Mode detection**: if the first non-flag argv is `save`, switch to
+SAVE MODE (jump to §Step 5 below). Otherwise BRAINSTORM-ROUND mode.
+
+### Brainstorm-round flags
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -36,22 +39,45 @@ Flags:
 | `--models <csv>` | `openai` | Explicit list (e.g. `openai,gemini`); overrides `--with-gemini` |
 | `--openai-model <id>` | `latest-gpt` | OpenAI sentinel or concrete ID |
 | `--gemini-model <id>` | `latest-pro` | Gemini sentinel or concrete ID |
+| `--debate` | off | Run a SECOND round where each model reacts to the other's response. Doubles cost (~$0.05) and ~10s. Only meaningful when 2 providers AND both succeed in round 1. |
+| `--depth <tier>` | auto | `shallow` (~500 tok) / `standard` (~1500) / `deep` (~4000). Auto-promote to `deep` when topic mentions architecture/schema/migration/refactor/design/"how should we structure"/"what's the best approach". |
+| `--continue-from <sid>` | — | Resume from prior session id (assembles prior rounds as context per token budget). |
+| `--with-context "<text>"` | — | Additional context (repeatable; max 8000 chars per flag, 24000 total). |
 
-Strip flags; remainder is the **topic**. If empty, ask the user what they
-want to brainstorm and stop.
+### Save mode (§Step 5)
+
+`/brainstorm save <sid> <round> "<insight-text>"` — record a keeper insight
+from a prior round into `.brainstorm/insights/<topic-slug>/`. Required:
+sid + round (which the skill prints in §Step 3). Implementation: invokes
+the helper's `save` subcommand with `--topic-stdin` + `--insight-stdin`
+via the `---END-TOPIC---` delimiter pattern (shell-safety per §16.A).
+
+Strip flags; in brainstorm-round mode the remainder is the **topic**. If
+empty, ask the user what they want to brainstorm and stop.
+
+### Implicit synthesis triggers (Step 4)
+
+Don't restrict yourself to literal keyword matches. **Judge synthesis-
+readiness from conversation cues** — questions about value/decision/
+direction (`is it worth`, `should we`, `what's your call`, `ok let's
+continue`, `is there more value here`) all qualify, plus the explicit
+keywords. The literal keyword list is examples, not exhaustive.
 
 ---
 
 ## Step 1 — Kickoff
 
 Print a single-line kickoff (no resolution lookup — the helper resolves
-sentinels and reports back):
+sentinels and reports back). Include the SID — the user will need it for
+`--continue-from` and `save` later.
 
 ```
 ═══════════════════════════════════════
   /brainstorm — Calling: openai[, gemini]
   Sentinels: openai=latest-gpt | gemini=latest-pro
+  Session: <sid>            ← print so the user can resume / save later
   Topic: <first 80 chars>...
+  Mode: round-1[ + debate][ continuing from <prev-sid>]
   Calling providers…
 ═══════════════════════════════════════
 ```
@@ -75,11 +101,19 @@ risks (Plan v6 §2.1, Gemini-G1 v1+v2).
    ```bash
    node scripts/brainstorm-round.mjs \
      --topic-stdin \
+     --sid <SID> \
      --models openai[,gemini] \
      [--openai-model <id>] [--gemini-model <id>] \
+     [--depth shallow|standard|deep] \
+     [--debate] \
+     [--continue-from <prev-sid>] \
+     [--with-context "<text>"]   # repeatable \
      --out .claude/tmp/brainstorm-<SID>.json \
      < .claude/tmp/brainstorm-<SID>.txt
    ```
+   Pass through user-supplied `--debate` / `--depth` / `--continue-from` /
+   `--with-context` flags; the helper validates them. Always pass `--sid <SID>`
+   so the helper writes to a session ledger you can resume from.
 4. Always clean up after rendering (Step 3) finishes — both files:
    ```bash
    rm -f .claude/tmp/brainstorm-<SID>.txt .claude/tmp/brainstorm-<SID>.json
@@ -114,31 +148,67 @@ provider):
 If the JSON's `redactionCount > 0`, prepend a single line above the blocks:
 > ⚠ Redacted N secret pattern(s) from your topic before sending.
 
-After all provider blocks, render a separator and your own take:
+**Error UX rule (§A8)**: when one provider fails (`misconfigured` /
+`timeout` / `http_error` / `empty` / `malformed` / `blocked`), surface the
+failure as a SINGLE LINE ABOVE the views — not as a peer-shaped block.
+Example:
+
+> ⚠ Gemini errored: HTTP 404 unknown-model — proceeding with OpenAI only.
+
+Then render only the providers that returned `success`. If BOTH failed,
+render the two error lines and STOP (no Claude take, no synthesis prompt).
+
+### Debate block (only when JSON has non-empty `debate` array)
+
+If `--debate` was passed AND both providers succeeded in round 1, the
+helper output includes a `debate: [...]` array of 2 entries. Render
+between the parallel views and Claude's take:
+
+```markdown
+---
+
+### Debate round
+
+**OpenAI reacting to Gemini**:
+<text from debate[?].text where provider='openai', reactingTo='gemini'>
+
+**Gemini reacting to OpenAI**:
+<text from debate[?].text where provider='gemini', reactingTo='openai'>
+```
+
+After all blocks (parallel + debate?), render a separator and your own take:
 
 ```markdown
 ---
 
 ### Claude (my take)
-<your independent perspective — 200–400 words. Don't recap what the others
+<your independent perspective — 200–400 words. **DIFFER from theirs in
+substance, not be 'better'**. Look for what BOTH models missed. You're
+a peer in this round, not a synthesiser. Don't recap what the others
 said; add what they missed or where you disagree.>
 ```
 
-End with this single line:
+End with these lines:
 
-> **Your call** — push back, refine the topic, ask me to synthesise, or
-> just let the divergence sit. Say `/brainstorm done` (or just stop
-> invoking) when you've heard enough.
+> **Session**: `<sid>` round `<N>`. Resume with
+> `/brainstorm <new-topic-or-refinement> --continue-from <sid>`.
+> **Save an insight from this round**: `/brainstorm save <sid> <N> "<insight>"`.
+>
+> **Your call** — push back, refine, ask me to synthesise, or just let
+> the divergence sit. Say `/brainstorm done` (or stop invoking) when done.
 
 Then **STOP**. No follow-up actions, no "shall I implement this?", no
 proactive synthesis. The user drives.
 
 ---
 
-## Step 4 — Synthesis (Only When Asked)
+## Step 4 — Synthesis (When Asked OR When Implicit)
 
-The user will explicitly ask: "synthesise", "converge", "what should I
-do", "sum it up", or `/brainstorm done`. When they do:
+**Don't restrict to literal keywords**. Judge synthesis-readiness from
+conversation cues. Examples that qualify (non-exhaustive): "synthesise",
+"converge", "what should I do", "sum it up", `/brainstorm done`, "is it
+worth", "should we", "what's your call", "ok let's continue", "is there
+more value here", any clear question about value/decision/direction.
 
 ```markdown
 ## Synthesis
@@ -149,6 +219,37 @@ do", "sum it up", or `/brainstorm done`. When they do:
 **My recommendation**: <one paragraph, opinionated>
 **Next concrete step**: <one sentence>
 ```
+
+---
+
+## Step 5 — Save Mode (`/brainstorm save <sid> <round> "<insight>"`)
+
+User wants to capture a keeper insight from a prior round. Validate the
+sid and round exist (the helper checks too) then invoke the helper's
+`save` subcommand using the same stdin-file pattern as Step 2 (per
+§16.A — never interpolate user-supplied content into the bash command):
+
+1. `SID=$(date +%s%3N)` — fresh tmp ID for the save invocation files
+2. Use `Write` to create three files in `.claude/tmp/`:
+   - `save-<SID>-topic.txt` — the original topic from the round you're saving from (look it up in the rendered-history or pass through verbatim)
+   - `save-<SID>-insight.txt` — the user's insight text verbatim
+3. Build the combined stdin file with the `---END-TOPIC---` delimiter:
+   ```bash
+   cat .claude/tmp/save-<SID>-topic.txt > .claude/tmp/save-<SID>-combined.txt
+   echo "---END-TOPIC---" >> .claude/tmp/save-<SID>-combined.txt
+   cat .claude/tmp/save-<SID>-insight.txt >> .claude/tmp/save-<SID>-combined.txt
+   ```
+4. Invoke the helper:
+   ```bash
+   node scripts/brainstorm-round.mjs save \
+     --sid <user-provided-sid> --round <user-provided-round> \
+     --topic-stdin --insight-stdin \
+     [--tags <csv>] \
+     < .claude/tmp/save-<SID>-combined.txt
+   ```
+5. Clean up: `rm -f .claude/tmp/save-<SID>-*`
+6. Report the result path to the user (`{ok:true, path, slugUsed}` JSON
+   from the helper) — include the slug so they know where the file lives.
 
 ---
 

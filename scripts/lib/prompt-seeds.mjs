@@ -67,6 +67,28 @@ SEVERITY:
 export const PASS_SUSTAINABILITY_SYSTEM = PASS_SUSTAINABILITY_OBJECTIVE_R1 + '\n\n' + PASS_SUSTAINABILITY_RUBRIC;
 export { PASS_SUSTAINABILITY_RUBRIC };
 
+const PASS_QUICKFIX_OBJECTIVE_R1 = `You are auditing for DESIGN-LEVEL SHORTCUTS that bypass root-cause investigation.
+The goal is catching what the prospective regex hook cannot see — semantic shortcuts, not syntactic ones.`;
+
+const PASS_QUICKFIX_RUBRIC = `FOCUS on:
+- Stub functions returning constants where the spec implied real logic (e.g. fn() returns null/[]/{} or a fixed value when the contract requires computed output)
+- Tests that assert non-failure rather than correctness — e.g. expect(x).toBeDefined() / expect(x).not.toThrow() / expect(arr.length).toBeGreaterThan(0) for a function whose contract specifies a particular value or shape
+- Hardcoded sample data inlined where a fixture file would be cleaner (especially in non-test code)
+- Side-issue fixes that mask root causes — catching at boundary instead of fixing source of bad data; coalescing nulls instead of debugging why nulls arrive; retrying instead of fixing the flaky upstream
+- Disabled-but-unmarked tests (e.g. it.skip without an issue link or explanation)
+- Fallback values that hide config errors (process.env.X || 'localhost' for production-required config)
+- Logging-as-error-handling — console.error and continue when the operation should have failed loudly
+
+For each finding, set is_quick_fix=true.
+
+SEVERITY:
+- HIGH = ships a shortcut to production that masks a real bug or data correctness issue
+- MEDIUM = degrades long-term maintainability or testability
+- LOW = stylistic / discoverable shortcut`;
+
+export const PASS_QUICKFIX_SYSTEM = PASS_QUICKFIX_OBJECTIVE_R1 + '\n\n' + PASS_QUICKFIX_RUBRIC;
+export { PASS_QUICKFIX_RUBRIC };
+
 // ── Classification Rubric (Phase B) ─────────────────────────────────────────
 
 /**
@@ -108,5 +130,6 @@ export const PASS_PROMPTS = Object.freeze({
   wiring: PASS_WIRING_SYSTEM,
   backend: PASS_BACKEND_SYSTEM,
   frontend: PASS_FRONTEND_SYSTEM,
-  sustainability: PASS_SUSTAINABILITY_SYSTEM
+  sustainability: PASS_SUSTAINABILITY_SYSTEM,
+  quickfix: PASS_QUICKFIX_SYSTEM,
 });

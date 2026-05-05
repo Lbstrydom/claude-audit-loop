@@ -90,6 +90,17 @@ const CORE_SCRIPTS = [
   'scripts/lib/brainstorm/pricing.mjs',
   'scripts/lib/brainstorm/openai-adapter.mjs',
   'scripts/lib/brainstorm/gemini-adapter.mjs',
+  // Brainstorm v1.x extensions (debate / depth / continue-from / save / session-store)
+  'scripts/lib/brainstorm/depth-config.mjs',
+  'scripts/lib/brainstorm/provider-limits.mjs',
+  'scripts/lib/brainstorm/file-lock.mjs',
+  'scripts/lib/brainstorm/session-store.mjs',
+  'scripts/lib/brainstorm/insight-store.mjs',
+  'scripts/lib/brainstorm/resume-context.mjs',
+  'scripts/lib/brainstorm/debate-prompt.mjs',
+  // Quickfix detection — prospective hook + retrospective audit pass
+  'scripts/lib/quickfix-patterns.mjs',
+  '.claude/hooks/quickfix-scan.mjs',
 ];
 
 /**

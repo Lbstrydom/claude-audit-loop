@@ -239,6 +239,12 @@ const SustainabilityPassSchema = z.object({
   summary: z.string().max(500)
 });
 
+const QuickfixPassSchema = z.object({
+  pass_name: z.literal('quickfix'),
+  findings: z.array(ProducerFindingSchema).max(15),
+  summary: z.string().max(500)
+});
+
 // ── Merged Code Audit Result (assembled from passes) ───────────────────────────
 
 const CodeAuditResultSchema = z.object({
@@ -1263,9 +1269,42 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
 
   cachePassResult('sustainability', sustainResult);
 
+  // 4.5 Wave 4: Quickfix design-shortcut detector (reasoning: low — pattern match, not deep semantic)
+  // Plan: docs/plans/brainstorm-quickfix-v1.md §B2.
+  let quickfixResult;
+  const EMPTY_QUICKFIX = { pass_name: 'quickfix', findings: [], summary: 'Pass skipped.' };
+  if (shouldRunPass('quickfix')) {
+    const qfFiles = fileFilter ? found.filter(f => fileFilter.some(ff => f.includes(ff) || ff.includes(f))) : found;
+    process.stderr.write(`\n── Wave 4: Quickfix design-shortcuts (reasoning: low) ──\n`);
+    const PASS_QUICKFIX_SYSTEM_LOCAL = getPassPrompt('quickfix');
+    const qfRubric = PASS_QUICKFIX_SYSTEM_LOCAL;  // pass full prompt for low-reasoning consistency
+    const qfContextChars = baseContextChars + measureContextChars(qfFiles, 4000);
+    const qfLimits = computePassLimits(qfContextChars, 'low');
+    process.stderr.write(`  ${qfFiles.length} files → ${qfLimits.maxTokens} tok / ${(qfLimits.timeoutMs/1000).toFixed(0)}s\n`);
+    quickfixResult = await safeCallGPT(openai, {
+      systemPrompt: (isR2Plus
+        ? buildR2SystemPrompt(qfRubric, buildRulingsBlock(ledgerFile, 'quickfix', impactSet))
+        : PASS_QUICKFIX_SYSTEM_LOCAL) + focusBlock,
+      userPrompt: `## Project Context\n${readProjectContextForPass('quickfix')}\n${historyBlock}\n## Plan\n${extractPlanForPass(planContent, 'quickfix')}\n\n## All Implementation Files\n${isR2Plus && diffMap ? readFilesAsAnnotatedContext(qfFiles, diffMap, { maxPerFile: 4000, maxTotal: 60000 }) : readFilesAsContext(qfFiles, { maxPerFile: 4000, maxTotal: 60000 })}`,
+      schema: QuickfixPassSchema,
+      schemaName: 'quickfix_pass',
+      reasoning: 'low',
+      ...qfLimits,
+      passName: 'quickfix'
+    }, EMPTY_QUICKFIX);
+    // Force is_quick_fix:true on every finding from this pass (defence — prompt asks but model may forget)
+    if (quickfixResult?.result?.findings) {
+      quickfixResult.result.findings = quickfixResult.result.findings.map(f => ({ ...f, is_quick_fix: true }));
+    }
+  } else {
+    process.stderr.write(`\n── Quickfix SKIPPED (--passes) ──\n`);
+    quickfixResult = { result: EMPTY_QUICKFIX, usage: { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, latency_ms: 0 }, latencyMs: 0 };
+  }
+  cachePassResult('quickfix', quickfixResult);
+
   // 5. Merge all pass results with semantic dedup
   const totalLatency = Date.now() - totalStart;
-  const allResults = [structureResult, wiringResult, ...backendResults, frontendResult, sustainResult];
+  const allResults = [structureResult, wiringResult, ...backendResults, frontendResult, sustainResult, quickfixResult];
   const failedPasses = allResults.filter(r => r.failed).map(r => r.error);
 
   process.stderr.write(`\n── Merge (${allResults.length} passes, ${failedPasses.length} failed) ──\n`);
@@ -1624,6 +1663,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
   }
   passTimings.frontend = `${(frontendResult.latencyMs / 1000).toFixed(1)}s`;
   passTimings.sustainability = `${(sustainResult.latencyMs / 1000).toFixed(1)}s`;
+  passTimings.quickfix = `${(quickfixResult.latencyMs / 1000).toFixed(1)}s`;
   passTimings.total = `${(totalLatency / 1000).toFixed(1)}s`;
 
   // Build overall reasoning from pass summaries
@@ -1708,7 +1748,8 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
       { name: 'wiring', result: wiringResult },
       ...backendResults.map((r, i) => ({ name: backendPassNames[i] ?? 'backend', result: r })),
       { name: 'frontend', result: frontendResult },
-      { name: 'sustainability', result: sustainResult }
+      { name: 'sustainability', result: sustainResult },
+      { name: 'quickfix', result: quickfixResult }
     ];
     for (const pr of passResults) {
       const findings = pr.result?.result?.findings ?? [];
@@ -1720,7 +1761,7 @@ async function runMultiPassCodeAudit(openai, planContent, projectContext, jsonMo
         inputTokens: pr.result?.usage?.input_tokens,
         outputTokens: pr.result?.usage?.output_tokens,
         latencyMs: pr.result?.latencyMs,
-        reasoning: pr.name === 'sustainability' ? 'medium' : 'high'
+        reasoning: pr.name === 'sustainability' ? 'medium' : pr.name === 'quickfix' ? 'low' : 'high'
       }).catch(e => process.stderr.write(`  [learning] ${e.message}\n`));
     }
 

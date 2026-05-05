@@ -435,6 +435,60 @@ the bottom of `tests/hook-arch-memory-check.test.mjs`):
 4. Hook is "effective" if treatment reuses-or-mentions in ≥60% of cases
    vs control's baseline. Run on 5–10 representative prompts.
 
+## Quick-fix detection — two-layer architecture
+
+Plan: `docs/plans/brainstorm-quickfix-v1.md` Feature B.
+
+**Philosophy**: nudge, not gate. Root cause beats shortcut, but explicit
+acceptance beats silent shortcut. The system surfaces shortcuts so the
+author can decide whether they're warranted, not so they're automatically
+blocked.
+
+### Layer 1 — Prospective hook (`.claude/hooks/quickfix-scan.mjs`)
+
+Fires on every Edit / Write via the PostToolUse hook in
+`.claude/settings.json`. Pattern-scans the new content for ~12 mechanical
+shortcut signatures (empty catch, TODO/FIXME, `@ts-ignore` without
+justification, magic numbers in conditionals, masked errors, disabled
+assertions, hardcoded localhost/http URLs, …). Pure regex — no LLM, no
+network, <200ms target.
+
+When a pattern matches the hook emits a `<system-reminder>` callout
+listing the file, snippet (redacted via `redactSecrets()` BEFORE
+truncation), and a suggestion. It NEVER blocks the tool call. The
+matched line is also appended to `.audit/quickfix-hits.jsonl`
+(gitignored) for retrospective analysis.
+
+**Disable mechanisms**:
+- `QUICKFIX_HOOK_DISABLE=1` env (whole-session opt-out, e.g. rapid prototyping)
+- `// quickfix-hook:ignore` on the same line (per-line opt-out — uses
+  language-correct comment syntax: `//` for JS/TS/SCSS, `#` for Python/Bash/Ruby,
+  `<!-- ... -->` for HTML, `/* ... */` for CSS)
+- Auto-bail on diffs > 80,000 chars (signal drowns in noise on large refactors)
+- Sensitive-path short-circuit — files matching `.env`, `secrets/`, `.aws/`,
+  `.ssh/`, `*.pem`, `*.key`, etc. are never scanned (path normalised first
+  so `C:\repo\.env` and `/Users/.../repo/.env` both match)
+
+Pattern matrix lives in `scripts/lib/quickfix-patterns.mjs` — adding a
+new pattern is one entry in the `PATTERNS` array.
+
+### Layer 2 — Retrospective audit pass (`quickfix` in /audit-code)
+
+Wave 4 in `scripts/openai-audit.mjs`. Low-reasoning GPT pass that
+catches DESIGN-level shortcuts the regex hook can't see — stub
+functions returning constants, tests asserting non-failure rather than
+correctness, hardcoded sample data inline where a fixture would be
+cleaner, side-issue fixes that mask root causes. Findings emit
+`is_quick_fix: true` and the existing `quickFix == 0` convergence
+threshold gates them so /audit-code naturally fails until they're
+addressed (or accepted via debt-capture).
+
+Why two layers: the hook catches mechanical patterns at edit time
+(immediate feedback, low cost). The audit pass catches semantic
+shortcuts during PR review (deeper analysis, higher cost). Neither
+covers the other's domain; together they cover both axes. See
+`docs/plans/brainstorm-quickfix-v1.md` §B for the full spec.
+
 ## Code Style
 
 - ESM modules (`import`/`export`, not `require`)

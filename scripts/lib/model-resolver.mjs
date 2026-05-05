@@ -220,8 +220,11 @@ const _remapWarned = new Set();
  */
 export function deprecatedRemap(modelId, { silent = false } = {}) {
   if (!modelId || typeof modelId !== 'string') return modelId;
+  // Audit Gemini-G-M1: Object.hasOwn so 'toString'/'constructor' don't
+  // return Object.prototype function references via DEPRECATED_REMAP.
+  if (!Object.hasOwn(DEPRECATED_REMAP, modelId)) return modelId;
   const remapped = DEPRECATED_REMAP[modelId];
-  if (!remapped) return modelId;
+  if (!remapped || typeof remapped !== 'string') return modelId;
   if (!silent && !_remapWarned.has(modelId)) {
     _remapWarned.add(modelId);
     process.stderr.write(
