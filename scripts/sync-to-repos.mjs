@@ -98,9 +98,14 @@ const CORE_SCRIPTS = [
   'scripts/lib/brainstorm/insight-store.mjs',
   'scripts/lib/brainstorm/resume-context.mjs',
   'scripts/lib/brainstorm/debate-prompt.mjs',
+  'scripts/lib/brainstorm/id-validator.mjs',
   // Quickfix detection — prospective hook + retrospective audit pass
   'scripts/lib/quickfix-patterns.mjs',
   '.claude/hooks/quickfix-scan.mjs',
+  // /explain --history aggregator (cross-source "did we already solve this?")
+  'scripts/explain-history.mjs',
+  // /skills quick-reference helper (reads SKILL.md frontmatter)
+  'scripts/skills-help.mjs',
 ];
 
 /**

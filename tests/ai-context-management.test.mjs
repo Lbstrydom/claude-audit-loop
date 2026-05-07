@@ -105,9 +105,12 @@ describe('ai-context-management skill', () => {
         'ai-context-management must be in SKILL_ENTRY_SCRIPTS');
     });
 
-    it('has a valid CLI invocation referencing consumer-repo path', () => {
+    it('has a valid CLI invocation referencing the scripts/ directory', () => {
       const entry = SKILL_ENTRY_SCRIPTS['ai-context-management'];
-      assert.match(entry.cli, /\.audit-loop\/scripts\//);
+      // Both the source repo and consumer repos use a flat `scripts/` layout.
+      // The earlier assertion locked in `.audit-loop/scripts/` which never
+      // existed in either context — see commit fixing this for context.
+      assert.match(entry.cli, /\bnode scripts\//);
     });
 
     it('generates a prompt file via generatePromptFile', () => {

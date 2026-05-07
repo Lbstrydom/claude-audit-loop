@@ -220,7 +220,10 @@ body`;
         assert.ok(entry.script, `${name} missing script`);
         assert.ok(entry.cli, `${name} missing cli`);
         assert.ok(entry.summary, `${name} missing summary`);
-        assert.match(entry.cli, /\.audit-loop\/scripts\//, `${name} cli must reference consumer-repo path`);
+        // `node scripts/<file>` — flat layout used in both source repo
+        // and consumer repos. (The earlier `.audit-loop/scripts/` regex
+        // locked in a path that never existed anywhere.)
+        assert.match(entry.cli, /\bnode scripts\//, `${name} cli must invoke node scripts/...`);
       }
     });
 

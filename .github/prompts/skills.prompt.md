@@ -12,10 +12,10 @@ Quick reference for every available skill — name, one-liner, triggers, usage. 
 Invoke the engineering skills CLI:
 
 ```bash
-node .audit-loop/scripts/skills-help.mjs ${input:skill_or_blank}
+node scripts/skills-help.mjs ${input:skill_or_blank}
 ```
 
-Underlying script: `.audit-loop/scripts/skills-help.mjs` — same code path that Claude skills orchestrate, so output is consistent across both surfaces.
+Underlying script: `scripts/skills-help.mjs` — same code path that Claude skills orchestrate, so output is consistent across both surfaces.
 
 ## Notes for Copilot users
 

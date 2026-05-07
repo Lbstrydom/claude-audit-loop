@@ -12,10 +12,10 @@ Refresh security_incidents from docs/security-strategy.md (interview/edit modes 
 Invoke the engineering skills CLI:
 
 ```bash
-node .audit-loop/scripts/security-memory/refresh-incidents.mjs
+node scripts/security-memory/refresh-incidents.mjs
 ```
 
-Underlying script: `.audit-loop/scripts/security-memory/refresh-incidents.mjs` — same code path that Claude skills orchestrate, so output is consistent across both surfaces.
+Underlying script: `scripts/security-memory/refresh-incidents.mjs` — same code path that Claude skills orchestrate, so output is consistent across both surfaces.
 
 ## Notes for Copilot users
 
