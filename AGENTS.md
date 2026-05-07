@@ -489,6 +489,30 @@ shortcuts during PR review (deeper analysis, higher cost). Neither
 covers the other's domain; together they cover both axes. See
 `docs/plans/brainstorm-quickfix-v1.md` §B for the full spec.
 
+## Personal config — keep it out of the public repo
+
+This repo is **public on GitHub**. The committed `.claude/settings.json`
+must contain only project-portable, neutral values. Per-developer
+overrides — local paths, machine-specific tweaks, personal allow-rules —
+go in **`.claude/settings.local.json`** (gitignored at line 9 of
+`.gitignore`).
+
+Most relevant: `permissions.additionalDirectories`. Never add personal
+folder paths (other projects, vault locations, AppData paths) to the
+committed `settings.json`. The empty-array placeholder is intentional.
+
+See `.claude/settings.local.example.json` for the format. To add your
+own paths after cloning:
+
+```bash
+cp .claude/settings.local.example.json .claude/settings.local.json
+# edit additionalDirectories with your local paths
+```
+
+Claude Code merges `settings.json` (project) with `settings.local.json`
+(local) automatically — your local entries layer on top of the committed
+defaults without polluting the public repo.
+
 ## Code Style
 
 - ESM modules (`import`/`export`, not `require`)

@@ -200,17 +200,21 @@ proposing solutions without understanding what already exists.
 
 ### Pre-step — Persona test history (frontend or full-stack scope only)
 
-If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set
-AND scope ⊇ frontend, check whether persona testing has surfaced pain
-points in the area being planned:
+If `PERSONA_TEST_REPO_NAME` is set AND scope ⊇ frontend, check whether
+persona testing has surfaced pain points in the area being planned. After
+the 20260507 RLS hardening this MUST go through `cross-skill.mjs` (which
+uses the service-role key) — anon reads are now blocked at the policy
+boundary.
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,p0_count,p1_count" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-repo \
+  --repo "$PERSONA_TEST_REPO_NAME" --limit 5 \
+  --select persona,focus,verdict,findings,p0_count,p1_count
 ```
 
-Filter sessions whose `focus` overlaps with the feature. If matches
+Output shape: `{ok: true, cloud: true|false, rows: [...]}`. When
+`cloud:false`, no persona-test database is configured — proceed without
+this signal. Filter `rows` whose `focus` overlaps with the feature. If matches
 found, include in the Context Summary as **Known user-visible issues**:
 
 ```

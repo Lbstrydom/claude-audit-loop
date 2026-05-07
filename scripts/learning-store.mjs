@@ -1277,15 +1277,39 @@ async function getPersonaSupabase() {
   if (_personaInitAttempted) return null;
   _personaInitAttempted = true;
 
-  if (!process.env.PERSONA_TEST_SUPABASE_URL || !process.env.PERSONA_TEST_SUPABASE_ANON_KEY) {
+  const url = process.env.PERSONA_TEST_SUPABASE_URL;
+  if (!url) return null;
+
+  // After 20260507 RLS hardening, anon-read is blocked on personas +
+  // persona_test_sessions. Reads + writes both require service-role.
+  // Resolution order:
+  //   1. PERSONA_TEST_SUPABASE_SERVICE_ROLE_KEY (explicit, preferred)
+  //   2. SUPABASE_AUDIT_SERVICE_ROLE_KEY (fallback when persona project ==
+  //      audit project — common single-Supabase-account setup)
+  // Anon key is no longer used; presence-only check kept for graceful
+  // degradation messaging.
+  const serviceKey =
+    process.env.PERSONA_TEST_SUPABASE_SERVICE_ROLE_KEY ||
+    (process.env.PERSONA_TEST_SUPABASE_URL === process.env.SUPABASE_AUDIT_URL
+      ? process.env.SUPABASE_AUDIT_SERVICE_ROLE_KEY
+      : null);
+
+  if (!serviceKey) {
+    if (process.env.PERSONA_TEST_SUPABASE_ANON_KEY) {
+      process.stderr.write(
+        `  [persona] WARN: PERSONA_TEST_SUPABASE_ANON_KEY no longer suffices after the\n` +
+        `         20260507 RLS hardening. Set PERSONA_TEST_SUPABASE_SERVICE_ROLE_KEY\n` +
+        `         (or rely on SUPABASE_AUDIT_SERVICE_ROLE_KEY when the URLs match).\n`,
+      );
+    }
     return null;
   }
+
   try {
     const { createClient } = await import('@supabase/supabase-js');
-    _personaSupabase = createClient(
-      process.env.PERSONA_TEST_SUPABASE_URL,
-      process.env.PERSONA_TEST_SUPABASE_ANON_KEY,
-    );
+    _personaSupabase = createClient(url, serviceKey, {
+      auth: { persistSession: false },
+    });
     return _personaSupabase;
   } catch (err) {
     process.stderr.write(`  [persona] Supabase init failed: ${err.message}\n`);
@@ -1449,6 +1473,64 @@ export async function recordPersonaSession(session) {
   // inspection. For MVP, rely on session_id uniqueness — any conflict kept the
   // existing row's id. Caller can compare to its generated session_id to tell.
   return { sessionId: data?.id || null, existed: false, statsUpdated };
+}
+
+/**
+ * Fetch persona-test sessions filtered by repo name. Used by /plan
+ * Phase 1 pre-step, /ship Step 0.5a, and persona-test interop helpers
+ * (replaces the curl-based anon reads after 20260507 RLS hardening).
+ *
+ * @param {object} args
+ * @param {string} args.repoName - PERSONA_TEST_REPO_NAME equivalent
+ * @param {number} [args.limit=5]
+ * @param {boolean} [args.p0Only=false] - filter to sessions where p0_count > 0
+ * @param {string[]} [args.select] - optional column allowlist (default: full row)
+ * @returns {Promise<object[]>} Rows; empty array on no-cloud or error.
+ */
+export async function getPersonaSessionsByRepo({ repoName, limit = 5, p0Only = false, select = null }) {
+  const supa = await getPersonaSupabase();
+  if (!supa || !repoName) return [];
+
+  const cols = (Array.isArray(select) && select.length > 0) ? select.join(',') : '*';
+  let q = supa.from('persona_test_sessions').select(cols).eq('repo_name', repoName);
+  if (p0Only) q = q.gt('p0_count', 0);
+  q = q.order('created_at', { ascending: false }).limit(Math.max(1, Math.min(limit, 100)));
+
+  const { data, error } = await q;
+  if (error) {
+    process.stderr.write(`  [persona] getPersonaSessionsByRepo failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
+}
+
+/**
+ * Fetch persona-test sessions filtered by app URL. Used by
+ * persona-test session-history reference (regression tracking).
+ *
+ * @param {object} args
+ * @param {string} args.url - app URL exact match
+ * @param {number} [args.limit=3]
+ * @param {string[]} [args.select] - optional column allowlist
+ * @returns {Promise<object[]>}
+ */
+export async function getPersonaSessionsByUrl({ url, limit = 3, select = null }) {
+  const supa = await getPersonaSupabase();
+  if (!supa || !url) return [];
+
+  const cols = (Array.isArray(select) && select.length > 0) ? select.join(',') : '*';
+  const { data, error } = await supa
+    .from('persona_test_sessions')
+    .select(cols)
+    .eq('url', url)
+    .order('created_at', { ascending: false })
+    .limit(Math.max(1, Math.min(limit, 100)));
+
+  if (error) {
+    process.stderr.write(`  [persona] getPersonaSessionsByUrl failed: ${error.message}\n`);
+    return [];
+  }
+  return data || [];
 }
 
 // ════════════════════════════════════════════════════════════════════════════

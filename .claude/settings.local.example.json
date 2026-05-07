@@ -1,0 +1,9 @@
+{
+  "_comment": "Per-developer overrides — copy to settings.local.json (gitignored) and edit. NEVER commit personal paths to .claude/settings.json since this repo is public on GitHub.",
+  "permissions": {
+    "additionalDirectories": [
+      "/path/to/another-project-you-want-claude-to-read",
+      "/path/to/your/notes-vault"
+    ]
+  }
+}

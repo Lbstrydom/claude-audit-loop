@@ -48,6 +48,8 @@ import {
   listPersonasForApp,
   upsertPersona,
   recordPersonaSession,
+  getPersonaSessionsByRepo,
+  getPersonaSessionsByUrl,
   isPersonaCloudEnabled,
   // Architectural memory (Phase A)
   upsertRepoByUuid,
@@ -394,6 +396,86 @@ async function cmdRecordPersonaSession() {
 
   const result = await recordPersonaSession(parsed.data);
   emit({ ok: !!result.sessionId, cloud: true, ...result });
+}
+
+// ── Persona session readers (post-RLS-hardening — service-role only) ──────
+//
+// Replaces curl-with-anon-key reads in:
+//   skills/persona-test/references/{interop,session-history}.md
+//   skills/plan/SKILL.md (Phase 1 pre-step)
+//   skills/ship/SKILL.md (Step 0.5a)
+// after the 20260507 RLS hardening. Anon reads are blocked at the policy
+// boundary; this CLI surface is now the only supported read path.
+
+const GetPersonaSessionsByRepoSchema = z.object({
+  repoName: z.string().min(1),
+  limit: z.number().int().positive().max(100).optional(),
+  p0Only: z.boolean().optional(),
+  select: z.array(z.string().min(1)).optional(),
+});
+
+async function cmdGetPersonaSessionsByRepo() {
+  const repoFlag = argOption('repo');
+  const limitFlag = argOption('limit');
+  const p0OnlyFlag = rest.includes('--p0-only');
+  const selectFlag = argOption('select');
+
+  let p;
+  if (repoFlag) {
+    p = {
+      repoName: repoFlag,
+      ...(limitFlag ? { limit: Number(limitFlag) } : {}),
+      ...(p0OnlyFlag ? { p0Only: true } : {}),
+      ...(selectFlag ? { select: selectFlag.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+    };
+  } else {
+    p = parsePayload();
+  }
+
+  const parsed = GetPersonaSessionsByRepoSchema.safeParse(p);
+  if (!parsed.success) {
+    return emitError('BAD_INPUT', '--repo <name> required (optional: --limit <n>, --p0-only, --select <csv>)', { issues: parsed.error.issues });
+  }
+
+  const cloud = await isPersonaCloudEnabled();
+  if (!cloud) return emit({ ok: true, cloud: false, rows: [] });
+
+  const rows = await getPersonaSessionsByRepo(parsed.data);
+  emit({ ok: true, cloud: true, rows });
+}
+
+const GetPersonaSessionsByUrlSchema = z.object({
+  url: z.string().min(1),
+  limit: z.number().int().positive().max(100).optional(),
+  select: z.array(z.string().min(1)).optional(),
+});
+
+async function cmdGetPersonaSessionsByUrl() {
+  const urlFlag = argOption('url');
+  const limitFlag = argOption('limit');
+  const selectFlag = argOption('select');
+
+  let p;
+  if (urlFlag) {
+    p = {
+      url: urlFlag,
+      ...(limitFlag ? { limit: Number(limitFlag) } : {}),
+      ...(selectFlag ? { select: selectFlag.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+    };
+  } else {
+    p = parsePayload();
+  }
+
+  const parsed = GetPersonaSessionsByUrlSchema.safeParse(p);
+  if (!parsed.success) {
+    return emitError('BAD_INPUT', '--url <app_url> required (optional: --limit <n>, --select <csv>)', { issues: parsed.error.issues });
+  }
+
+  const cloud = await isPersonaCloudEnabled();
+  if (!cloud) return emit({ ok: true, cloud: false, rows: [] });
+
+  const rows = await getPersonaSessionsByUrl(parsed.data);
+  emit({ ok: true, cloud: true, rows });
 }
 
 async function cmdDetectStack() {
@@ -762,6 +844,8 @@ const commands = {
   'list-personas': cmdListPersonas,
   'add-persona': cmdAddPersona,
   'record-persona-session': cmdRecordPersonaSession,
+  'get-persona-sessions-by-repo': cmdGetPersonaSessionsByRepo,
+  'get-persona-sessions-by-url': cmdGetPersonaSessionsByUrl,
   'whoami': cmdWhoami,
   // Architectural memory
   'resolve-repo-identity':            cmdResolveRepoIdentity,

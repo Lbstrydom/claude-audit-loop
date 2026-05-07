@@ -49,13 +49,17 @@ is accurate. Best-effort — if a query fails, log and proceed.
 
 ### 0.5a — Recent persona-test P0s for this repo
 
-If `PERSONA_TEST_SUPABASE_URL` and `PERSONA_TEST_REPO_NAME` are set:
+If `PERSONA_TEST_REPO_NAME` is set, query via cross-skill (service-role
+required after the 20260507 RLS hardening — anon reads are now blocked):
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.$PERSONA_TEST_REPO_NAME&p0_count=gt.0&order=created_at.desc&limit=1&select=persona,focus,verdict,p0_count,p1_count,created_at,debrief_md" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-repo \
+  --repo "$PERSONA_TEST_REPO_NAME" --limit 1 --p0-only \
+  --select persona,focus,verdict,p0_count,p1_count,created_at,debrief_md
 ```
+
+Returns `{ok: true, cloud: true|false, rows: [...]}`. When `cloud:false`,
+no persona-test database is configured — proceed without the UX gate.
 
 Capture `open_p0_count` + `open_p1_count` from the latest session (within
 the last 14 days). These feed the ship_event record. If a session has P0s:

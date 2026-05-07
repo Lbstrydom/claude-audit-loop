@@ -25,20 +25,7 @@
       "Write(CLAUDE.md)",
       "Write(.env.example)"
     ],
-    "additionalDirectories": [
-      "c:\\GIT\\ai-organiser\\docs",
-      "C:\\obsidian\\Second Brain\\.obsidian\\plugins\\ai-organiser",
-      "c:\\GIT\\wine-cellar-app",
-      "c:\\tmp",
-      "c:\\GIT\\ai-organiser\\src\\services\\research",
-      "C:\\obsidian\\Second Brain\\.obsidian\\plugins",
-      "c:\\GIT\\wine-cellar-app\\docs",
-      "C:\\Users\\User\\AppData\\Local\\Temp",
-      "c:\\GIT\\ai-organiser",
-      "C:\\Users\\User\\AppData\\Roaming\\Code\\User",
-      "C:\\Users\\User\\.claude\\skills",
-      "\\tmp"
-    ]
+    "additionalDirectories": []
   },
   "hooks": {
     "UserPromptSubmit": [

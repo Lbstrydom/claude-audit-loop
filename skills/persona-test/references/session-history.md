@@ -9,20 +9,22 @@ so the user notices trends they might miss.
 
 ## Readback query
 
+Use the cross-skill bridge for both queries below. After the 20260507
+RLS hardening these tables require service-role; cross-skill holds it.
+
 Fetch the last three sessions for this URL:
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?url=eq.<url>&order=created_at.desc&limit=3" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-url \
+  --url "<url>" --limit 3
 ```
 
 Or, when `repo_name` is set, prefer the repo-wide view:
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.<repo>&order=created_at.desc&limit=5&select=persona,focus,verdict,p0_count,p1_count,findings,debrief_md,created_at" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-repo \
+  --repo "<repo>" --limit 5 \
+  --select persona,focus,verdict,p0_count,p1_count,findings,debrief_md,created_at
 ```
 
 ## Output
@@ -58,17 +60,12 @@ uncertain findings aren't evidence of a pattern.
 
 ## Persistent-P0 detection
 
-If `PERSONA_TEST_SUPABASE_URL` is set, the `persistent_p0s` view already
-does this server-side:
-
-```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persistent_p0s?url=eq.<url>" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
-```
-
-Returns P0s that have appeared in ≥2 sessions with confidence ≥0.7 —
-these are the fix-first candidates.
+The `persistent_p0s` view derives from `persona_test_sessions` and is
+subject to the same service-role RLS post-20260507. Until a dedicated
+cross-skill subcommand wraps it, derive client-side from the
+`get-persona-sessions-by-url` result above: count P0 findings with the
+same `element` + `observed` substring across the returned sessions; flag
+those appearing in ≥2 sessions with confidence ≥0.7.
 
 ## Graceful degradation
 
