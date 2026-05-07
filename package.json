@@ -36,6 +36,8 @@
     "audit:sync-shared-refs": "node scripts/sync-shared-audit-refs.mjs",
     "skills:manifest": "node scripts/build-manifest.mjs",
     "skills:manifest:check": "node scripts/build-manifest.mjs --check",
+    "skills:index": "node scripts/skills-help.mjs --out docs/SKILLS-INDEX.md",
+    "skills:help": "node scripts/skills-help.mjs",
     "arch:refresh": "node scripts/symbol-index/refresh.mjs",
     "arch:refresh:full": "node scripts/symbol-index/refresh.mjs --full",
     "arch:render": "node scripts/symbol-index/render-mermaid.mjs",

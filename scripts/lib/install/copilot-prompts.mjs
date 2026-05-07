@@ -99,6 +99,11 @@ export const SKILL_ENTRY_SCRIPTS = Object.freeze({
     cli: 'node .audit-loop/scripts/security-memory/refresh-incidents.mjs',
     summary: 'Refresh security_incidents from docs/security-strategy.md (interview/edit modes are skill-driven; CLI runs the refresh).',
   },
+  'skills': {
+    script: 'skills-help.mjs',
+    cli: 'node .audit-loop/scripts/skills-help.mjs ${input:skill_or_blank}',
+    summary: 'Quick reference for every available skill — name, one-liner, triggers, usage. Reads SKILL.md frontmatter directly so it cannot drift.',
+  },
 });
 
 /**
