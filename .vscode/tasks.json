@@ -1,0 +1,83 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Skills: List all",
+      "detail": "Quick reference table of every skill (compact)",
+      "type": "shell",
+      "command": "npm run skills:help",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Skills: Detail for one skill",
+      "detail": "Show full description + triggers + usage for a specific skill",
+      "type": "shell",
+      "command": "npm run skills:help -- ${input:skillName}",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Skills: Search",
+      "detail": "Filter skills by name/description/trigger/usage substring",
+      "type": "shell",
+      "command": "npm run skills:help -- --search \"${input:searchTerm}\"",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Skills: Open SKILLS-INDEX.md",
+      "detail": "Browse the auto-generated public index in the markdown preview",
+      "type": "shell",
+      "command": "code -r docs/SKILLS-INDEX.md",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Skills: Regenerate SKILLS-INDEX.md",
+      "detail": "Rebuild docs/SKILLS-INDEX.md from current SKILL.md frontmatter",
+      "type": "shell",
+      "command": "npm run skills:index",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "skillName",
+      "type": "promptString",
+      "description": "Skill name (run \"Skills: List all\" first if you need to see the names)"
+    },
+    {
+      "id": "searchTerm",
+      "type": "promptString",
+      "description": "Search term (matches against name, description, triggers, usage)"
+    }
+  ]
+}
