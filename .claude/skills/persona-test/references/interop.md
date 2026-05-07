@@ -10,13 +10,13 @@ is optional — the skill degrades gracefully when a sibling is absent.
 ## /ship — Pre-Push UX Gate
 
 Before committing and pushing, `/ship` surfaces unresolved persona P0s as a
-non-blocking warning. When `PERSONA_TEST_SUPABASE_URL` + `PERSONA_TEST_REPO_NAME`
-are set, `/ship` queries:
+non-blocking warning. When `PERSONA_TEST_REPO_NAME` is set, `/ship` queries
+via the cross-skill bridge (which holds the service-role key — anon reads
+were locked down in the 20260507 RLS hardening):
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.<repo>&p0_count=gt.0&order=created_at.desc&limit=1" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-repo \
+  --repo "<repo>" --limit 1 --p0-only
 ```
 
 If recent P0s exist, `/ship` adds to `status.md`:
@@ -33,13 +33,14 @@ the most recent session can also be appended as a "User Perspective" section.
 ## /plan-backend + /plan-frontend — Pre-Plan Context
 
 When planning a new feature, both plan skills benefit from knowing what
-persona tests have already found. At the start of Phase 1 (codebase exploration),
-if `PERSONA_TEST_SUPABASE_URL` is set, they query:
+persona tests have already found. At the start of Phase 1 (codebase
+exploration), if `PERSONA_TEST_REPO_NAME` is set, they query via the
+cross-skill bridge (service-role only post-RLS-hardening):
 
 ```bash
-curl -s "$PERSONA_TEST_SUPABASE_URL/rest/v1/persona_test_sessions?repo_name=eq.<repo>&order=created_at.desc&limit=5&select=persona,focus,verdict,findings,debrief_md" \
-  -H "apikey: $PERSONA_TEST_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $PERSONA_TEST_SUPABASE_ANON_KEY"
+node scripts/cross-skill.mjs get-persona-sessions-by-repo \
+  --repo "<repo>" --limit 5 \
+  --select persona,focus,verdict,findings,debrief_md
 ```
 
 Filter for sessions whose `focus` overlaps with the feature being planned.
