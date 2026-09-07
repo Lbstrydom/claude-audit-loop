@@ -7,6 +7,9 @@
   relative effectiveness floor. No production change.
 - **Status**: settled — this file transcribes an existing decision, it does
   not make a new one.
+- **Corrected 2026-09-07**: the decision stands, but the metric had no
+  precision counterweight, one arm was mischaracterised and a control arm was
+  omitted from the table. See the Correction section at the end.
 
 > **This document is a transcription, not an adjudication.** The decision was
 > computed on 2026-08-28 and recorded in
@@ -95,3 +98,102 @@ full campaign-migration history.
 Production final-review keeps opus as its shadow model exactly as configured
 before this campaign ran. No config, code, or default changes as a result of
 this verdict — it confirms the status quo rather than prescribing a change.
+
+---
+
+## Correction — added 2026-09-07: the metric had no precision counterweight
+
+**The headline stands: KEEP opus.** What follows corrects the *runner-up
+ordering*, one characterisation of an arm, and an omission from the table above.
+Added after a separate investigation found the same defect class one layer up —
+a scoring rule with no counterweight, applied to model-generated labels
+([experiment-6](./experiment-6-adjudicator-swap-and-the-unreachable-rule.md),
+where neither candidate beat a classifier that read nothing).
+
+### What the original metric could not see
+
+`accepted per snapshot` is a **count**. An arm that emits twice as many findings
+at the same hit-rate scores twice as well. The table above never reports how many
+findings each arm *emitted*, so the ranking cannot be read as quality.
+
+Recomputed on the verdict's own cohort (`0d3d4031`, 12 snapshots, non-superseded
+runs, latest adjudication event per finding):
+
+| arm | emitted | accepted | dismissed | **precision** | emitted/snapshot |
+|---|---|---|---|---|---|
+| opus | 73 | 46 | 26 | 63.9% | 6.08 |
+| qwen | 61 | 31 | 30 | 50.8% | 5.08 |
+| deepseek | 29 | 16 | 13 | **55.2%** | 2.42 |
+| kimi | 35 | 15 | 20 | 42.9% | 2.92 |
+| **gemini-control** | 21 | 14 | 7 | **66.7%** | 1.75 |
+| grok | 13 | 6 | 7 | 46.2% | 1.08 |
+
+**Metric definitions**, since the original reported only one of these:
+
+- **emitted** — findings the arm produced across the 12 snapshots. The
+  denominator the original never printed.
+- **accepted / dismissed** — the adjudicator's ruling, taking the LATEST event
+  per finding (some findings carry more than one; counting every event
+  double-counts those, which is why a naive query returns 48/26 for opus against
+  73 judged).
+- **precision** — `accepted / (accepted + dismissed)`. Of the findings an arm
+  made that got a ruling, the share judged real. **Volume-independent**, which is
+  exactly what the original metric was not.
+- **accepted per snapshot** — the original's decision metric. A count, so it
+  scales with how much an arm says.
+
+**These accepted counts are NOT the same basis as the table above** (46 here vs
+23 there for opus). The original counts post-clustering, crediting a defect once
+across arms; this counts per-arm findings. The two are not comparable in
+absolutes — precision is offered as a *ratio*, which is robust to that choice,
+and every arm is computed identically.
+
+### Three things that change
+
+**1. The Grok characterisation is wrong.** The prose above reads *"Grok
+essentially missed almost everything… the gap between a careful reviewer and one
+skimming the document."* Grok emitted 13 findings and was right about **46%** of
+them — mid-pack, and within noise of qwen's 50.8%, the arm called "genuinely
+competitive". Grok is **conservative, not careless**. That is a different
+diagnosis, and it is the one that matters if the live question is ever "cheapest
+adequate reviewer" rather than "does opus stay".
+
+**2. The runner-up ordering reverses.** On the count metric qwen (2nd) beat
+deepseek (3rd). On precision **deepseek 55.2% beats qwen 50.8%** — while emitting
+less than half as much (29 vs 61). The original ranked the arm that talked more.
+
+**3. `gemini-control` is missing from the verdict table entirely.** It appears
+twice in the plan and zero times in this document, yet it scored the **highest
+precision of any arm (66.7%)** on the smallest output (21 findings). A control
+arm dropped from the reported ranking is the kind of omission that makes a result
+hard to trust later, independent of whether it would have changed the decision.
+
+### Why the decision still holds
+
+Opus ranks **first on volume and second on precision (63.9%, within 3 points of
+the control)**, so its win is not an artifact of the volume-biased metric. That is
+the strongest available defence of this verdict — and the original does not make
+it, because it never computed precision.
+
+### Two caveats the original disclosed but did not propagate
+
+- **Label error was never put into an interval.** §"One honest caveat" reports
+  human-vs-agent override rates of **37–69%**, then argues the 23-vs-15 margin is
+  too large for leniency to explain. With label error in that range, 23 and 15 are
+  not precise quantities; no interval was ever placed around them.
+- **The verdict is no longer reproducible by its own tooling.** As of 2026-09-07,
+  `node scripts/campaign.mjs verdict --campaign final-review-scoped-2026q3`
+  returns *"no cohort recorded for this campaign under the current lock — no
+  verdict is computable."* The cohort is still in the store (`0d3d4031`); the lock
+  digest has moved on. A settled verdict that its own command cannot recompute is
+  worth knowing before anyone cites it.
+
+### The generalisable lesson
+
+Both this bake-off and the 2026-09-07 adjudicator eval failed the same way: **a
+scoring rule with no counterweight, scored against model-generated labels.** A
+**degenerate-arm control** — score "accept everything" and "accept nothing"
+alongside the real arms — would have exposed both, costs nothing to compute, and
+is now implemented for the adjudicator role in
+`adjudicator-executor.mjs::degenerateBaselines`. It should be standard for any
+future comparison campaign.
