@@ -444,6 +444,7 @@
     {
       "schemaVersion": 1,
       "issueId": "b2c9a63f-f841-463b-80ef-87f6cd6a6e01",
+      "storeFingerprint": "d5a9d07b91225a93",
       "state": "fixed",
       "disposition": {
         "kind": "test",

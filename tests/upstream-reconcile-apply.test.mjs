@@ -90,6 +90,12 @@ const causeFor = (dir, overrides = {}) => ({
 const deps = {
   probeIdsFn: () => ['hydration/tooling-absent'],
   trackedTestFilesFn: () => new Set(['tests/real.test.mjs']),
+  // Explicitly "no store", because these cases are about the GATES, not the stamp.
+  // Required rather than defaultable since 2026-09-07: an omitted fingerprint used to
+  // read as a determination that there was none, which is how one unstamped entry
+  // reached the committed ledger. Stamping has its own suite —
+  // tests/upstream-ledger-store-stamp.test.mjs.
+  storeFingerprint: null,
 };
 
 const readLedger = (dir) => JSON.parse(fs.readFileSync(path.join(dir, DISPOSITION_LEDGER_PATH), 'utf-8')).entries;
@@ -316,14 +322,14 @@ describe('the mutation is bound to the state it was classified against', () => {
 describe('mergeLedgerEntry — the shared rule', () => {
   it('replaces by issueId rather than appending', () => {
     const start = [{ schemaVersion: 1, issueId: uuid(1), state: 'fixed', disposition: { kind: 'exempt', value: 'a' }, recordedAt: 'x' }];
-    const out = mergeLedgerEntry(start, { issueId: uuid(1), state: 'wont_fix', disposition: { kind: 'exempt', value: 'b' } });
+    const out = mergeLedgerEntry(start, { issueId: uuid(1), state: 'wont_fix', disposition: { kind: 'exempt', value: 'b' }, storeFingerprint: null });
     assert.equal(out.length, 1);
     assert.equal(out[0].state, 'wont_fix');
   });
 
   it('does not mutate its input — the batch folds it repeatedly', () => {
     const start = [];
-    mergeLedgerEntry(start, { issueId: uuid(1), state: 'fixed', disposition: { kind: 'exempt', value: 'a' } });
+    mergeLedgerEntry(start, { issueId: uuid(1), state: 'fixed', disposition: { kind: 'exempt', value: 'a' }, storeFingerprint: null });
     assert.deepEqual(start, [], 'the caller folds this in a loop; mutation would compound');
   });
 });

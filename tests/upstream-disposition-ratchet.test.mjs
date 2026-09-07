@@ -101,6 +101,8 @@ describe('upstreamTransition — the disposition ratchet', () => {
     const res = await upstreamTransition({
       repoRoot: repo, id: ISSUE_ID, to: 'wont_fix', note: 'a reason',
       disposition: 'exempt:no probe or test applies',
+      // Required since 2026-09-07 — these three actually reach the ledger write.
+      storeFingerprint: null,
       transitionFn: async (a) => {
         order.push('db-write');
         assert.equal(fs.existsSync(path.join(repo, DISPOSITION_LEDGER_PATH)), true, 'ledger must exist BEFORE the DB write');
@@ -118,6 +120,8 @@ describe('upstreamTransition — the disposition ratchet', () => {
     await upstreamTransition({
       repoRoot: repo, id: ISSUE_ID, to: 'wont_fix', note: 'a reason',
       disposition: 'exempt:updated reason',
+      // Required since 2026-09-07 — these three actually reach the ledger write.
+      storeFingerprint: null,
       transitionFn: async (a) => ({ ok: true, id: a.id }),
     });
     const ledger = JSON.parse(fs.readFileSync(path.join(repo, DISPOSITION_LEDGER_PATH), 'utf-8'));
@@ -135,6 +139,8 @@ describe('upstreamTransition — the disposition ratchet', () => {
     const res = await upstreamTransition({
       repoRoot: repo, id: failingId, to: 'wont_fix', note: 'a reason',
       disposition: 'probe:some-probe',
+      // Required since 2026-09-07 — these three actually reach the ledger write.
+      storeFingerprint: null,
       transitionFn: async () => ({ ok: false, code: 'CONFLICT', error: 'state changed under us — re-read and retry' }),
     });
     // The function surfaces the failure honestly...

@@ -247,10 +247,15 @@ export async function upstreamCmd(ctx) {
     if (sub === 'reconcile') {
       // Named so `--apply` can RE-run it after writing and render the post-write
       // state — the operator reads what they now have, not what they had.
+      // ONE resolution per invocation, shared by the reconcile and by `--apply`. Asking
+      // the oracle twice in one command is how two spellings of one answer appear, and
+      // the answer must be identical: `--apply` stamps entries with the store whose rows
+      // this very reconcile classified as missing.
+      const storeFp = await currentStoreFingerprint();
       const listAndReconcile = async () => m.upstreamReconcile({
         repoRoot,
         listTerminalFn: () => ctx.deps.listTerminalUpstreamIssues(),
-        currentStore: await currentStoreFingerprint(),
+        currentStore: storeFp,
       });
       let res = await listAndReconcile();
       // Round-3 audit M5: `res.reconciliation` is null in TWO distinct cases —
@@ -322,6 +327,8 @@ export async function upstreamCmd(ctx) {
           allowExempt: ctx.hasFlag('allow-exempt'),
           probeIdsFn: probeIds,
           trackedTestFilesFn: () => readTrackedTestFiles().files,
+          // The same value the reconcile above was classified with — see `storeFp`.
+          storeFingerprint: storeFp,
         });
         if (applyResult.aborted) {
           process.stderr.write(`  [upstream reconcile --apply] REFUSED: ${applyResult.aborted}\n`);

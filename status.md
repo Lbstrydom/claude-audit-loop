@@ -1,5 +1,90 @@
 # Project Status Log
 
+## 2026-09-07 — the ledger's store stamp was asked of the row, and rows cannot answer
+
+### Changes
+Follow-on from the disposition-ledger work: the committed ledger records WHICH store an
+upstream issue lives in, and one of 56 entries had no stamp. It was alone not because the
+case is rare but because **the path that wrote it can never stamp**:
+
+```
+applyMissingDispositions → storeFingerprint: row.storeFingerprint ?? null
+listTerminalUpstreamIssues → rows.map(r => ({ issueId, state, disposition }))
+```
+
+A three-field projection, and `upstream_issues` has no such column — its `fingerprint`
+column is the issue's 64-hex CONTENT hash, a different thing entirely. So the left side of
+`??` was `undefined` on every row and the fallback always fired: **an unreachable read
+wearing a considered fallback's clothes**. The same shape as the `dbRows: res.rows ?? []`
+defect fixed in this same function two days earlier, and in both the `??` is what made it
+silent.
+
+**Not cosmetic, and it would have bitten.** `isForeign` requires a non-empty fingerprint,
+so an unstamped entry is treated as LEGACY and never partitioned into `otherStore`. A
+reconcile run against the consumer store (**20 entries live there**) reads it as
+`ledgerOnly` → divergence → blocked push. That is exactly the 2026-08-29 incident this
+field was introduced to prevent, when five real closures had to be deleted from the ledger
+by hand.
+
+**Why the existing guard could not see it.** `upstream-disposition-ledger-single-writer`
+asserts the two writers agree GIVEN THE SAME ENTRY — it constructs that entry itself, with
+a fingerprint. The divergence was never in the merge rule; it was in what each CALLER put
+into the entry, one layer above anything that suite looks at. So the fix is not another
+equivalence test.
+
+The fix is a distinction the code did not previously make: **`undefined` means nobody
+asked; `null` means asked and unanswerable.** `null` is a real, legal state (no DSN
+resolves) and keeps working. `undefined` now throws, at `mergeLedgerEntry` — the one
+function both writers pass through, so a third writer inherits the requirement without
+anyone remembering to give it one.
+
+### Files Affected
+- `scripts/lib/upstream/disposition-ledger.mjs` — the guard; `storeFingerprint` required on the repair path; the unreachable row read deleted
+- `scripts/lib/upstream/commands.mjs` — `upstreamTransition`'s `= null` default removed
+- `scripts/lib/cross-skill/commands/quality.mjs` — ONE resolution per invocation, shared by reconcile and `--apply`
+- `scripts/upstream-dispositions.json` — the one unstamped entry, repaired
+- `tests/upstream-ledger-store-stamp.test.mjs` (new), `tests/upstream-reconcile-apply.test.mjs`, `tests/upstream-disposition-ratchet.test.mjs`
+- `status.md`
+
+### Decisions Made
+- **Removed `upstreamTransition`'s `storeFingerprint = null` default**, which is where the
+  fix would otherwise have been defeated: a default converts "never asked" into "determined
+  there is none" *before* `mergeLedgerEntry` can object. A guard downstream of a laundering
+  default is decorative.
+- **Did not move resolution into the ledger writer**, which would remove the parameter
+  entirely and is the strongest shape. `scripts/lib/upstream/**` imports nothing from `db/`
+  or `store/` — it is a deliberately I/O-injected layer — and adding the first such import
+  to win this argument would trade a small forgettable parameter for an architectural
+  exception. The requirement is enforced instead of the dependency being inverted.
+- **One oracle call per invocation.** `--apply` now stamps with the SAME value the reconcile
+  it is repairing was classified against, rather than re-asking. Two calls could in principle
+  answer differently, and two spellings of one answer is the class this whole change is about.
+- **Repaired the existing entry rather than leaving it legacy-shaped.** It is not legacy: it
+  was written yesterday by the broken path, and its correct value is mechanically knowable —
+  verified by querying `d5a9d07b91225a93`, which holds the row (`state: fixed`). Done through
+  `mergeLedgerEntry` + `serialiseDispositionLedger` (the one rule, the one serialiser), not by
+  hand-editing JSON, with `recordedAt` restored: *when* the closure was recorded is a fact,
+  and this repair only adds *which store* it was recorded against. Diff: one line. Unstamped
+  entries now 0 of 56.
+- **Did not reach for the `fingerprint` column** that `upstream_issues` does have. It is the
+  issue's content hash; writing it here would poison the cross-store partition. The 16-hex
+  validator rejects it (they are 64 hex), so the guard holds — but the name is inviting and
+  is now called out in the code.
+
+### Verification
+- Negative control before any fix: **5 of 9 fail**, each naming the defect — including
+  `expected d5a9d07b91225a93 / actual ffffffffffffffff`, which proves `row.storeFingerprint`
+  was genuinely being read and would have won. After: **9/9**.
+- The guard was then seen to fire across the existing suites — **27 failures** on call sites
+  that omitted the argument, narrowing to **3** in the ratchet suite once the shared fixture
+  declared its answer. Those 3 are precisely the ratchet cases that reach the ledger write;
+  the other 10 are refusals that never get there, which is the reasoning confirmed by
+  measurement rather than assumed.
+- Upstream suites: **135/135**. Gates: `upstream:reconcile:gate`, `upstream:coverage:gate`,
+  `cli:flags:gate`, `size:ratchet:gate` all clean.
+
+---
+
 ## 2026-09-07 — the ship persona gate asked the shell for a name the shell never had
 
 ### Consumer Verification (previous ship)

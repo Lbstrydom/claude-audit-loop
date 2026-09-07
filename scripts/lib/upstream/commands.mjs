@@ -530,8 +530,13 @@ export async function upstreamList({
  */
 export async function upstreamTransition({
   repoRoot = process.cwd(), transitionFn, id, to, note = null, commit = null, actor = null,
-  disposition = null, storeFingerprint = null,
+  disposition = null, storeFingerprint,
 }) {
+  // NO `= null` default, deliberately (2026-09-07). A default here would convert "the
+  // caller never asked" into "the caller determined there is no store" before
+  // `mergeLedgerEntry` ever sees it, defeating the guard that function now carries — the
+  // exact laundering that let one unstamped entry reach the committed ledger.
+  // `null` is still legal; it just has to be said out loud.
   if (!id) return { ok: false, code: 'BAD_INPUT', errors: ['--id is required'] };
   // Shape-check BEFORE the store sees it. `upstream_issues.id` is a uuid column,
   // so anything non-uuid used to reach Postgres and come back as a raw

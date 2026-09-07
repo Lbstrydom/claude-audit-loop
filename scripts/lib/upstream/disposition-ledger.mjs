@@ -104,6 +104,24 @@ function readDispositionLedger(repoRoot) {
  * @returns {object[]} the merged list (input not mutated)
  */
 export function mergeLedgerEntry(entries, entry) {
+  // "Never asked" and "asked, unanswerable" are DIFFERENT, and conflating them is the
+  // whole defect (2026-09-07). `null` is a real state — no DSN resolves, so the store is
+  // genuinely unknown and the key is omitted rather than invented. `undefined` means the
+  // author of this call never considered the question, and an entry written that way is
+  // indistinguishable from a legacy one: `isForeign` skips it, so it is never partitioned
+  // into `otherStore` and instead reconciles as `ledgerOnly` against any other store —
+  // failing a push, which is the 2026-08-29 incident this field exists to prevent.
+  //
+  // Enforced HERE because this is the one function both writers pass through, so a third
+  // writer inherits the requirement without anybody remembering to give it one. The
+  // sibling suite that compares the two writers cannot catch this class: it hands both an
+  // entry it built itself, so a caller's omission is upstream of everything it sees.
+  if (entry?.storeFingerprint === undefined) {
+    throw new TypeError(
+      'mergeLedgerEntry: storeFingerprint is required — pass the fingerprint of the store '
+      + 'this transition was made against, or an explicit `null` when no DSN resolves. '
+      + 'It is a property of the CONNECTION, never of a row and never of a default.');
+  }
   const prior = entries.find((e) => e?.issueId === entry.issueId);
   const withoutThis = entries.filter((e) => e?.issueId !== entry.issueId);
   // A re-transition that cannot determine the store must not STRIP one an
@@ -209,8 +227,17 @@ export function serialiseDispositionLedger(entries) {
  */
 export async function applyMissingDispositions({
   repoRoot = process.cwd(), dbRows, missingIds, missingCause, allowExempt = false,
-  probeIdsFn, trackedTestFilesFn,
+  probeIdsFn, trackedTestFilesFn, storeFingerprint,
 }) {
+  // Required, and deliberately without a default. `dbRows` came from ONE connection, and
+  // only the caller knows which — the rows themselves cannot say, because the store does
+  // not record which store it is. Defaulting here would recreate the defect this argument
+  // was added to fix, one layer up from where it was found.
+  if (storeFingerprint === undefined) {
+    throw new TypeError(
+      'applyMissingDispositions: storeFingerprint is required — pass the fingerprint of '
+      + 'the store `dbRows` were read from, or an explicit `null` when no DSN resolves.');
+  }
   const applied = [];
   const refused = [];
 
@@ -248,7 +275,14 @@ export async function applyMissingDispositions({
       refused.push({ issueId: id, gate: 'exempt-opt-in', reason: 'an exemption is unverifiable prose — pass --allow-exempt to accept it' });
       continue;
     }
-    candidates.push({ issueId: id, state: row.state, disposition: { kind: parsed.kind, value: parsed.value }, storeFingerprint: row.storeFingerprint ?? null });
+    // The stamp comes from the CALLER's connection, never from `row`:
+    // `listTerminalUpstreamIssues` projects exactly {issueId, state, disposition}, so
+    // `row.storeFingerprint` was `undefined` on every row and the old `?? null`
+    // fallback always fired — an unreachable read wearing a considered fallback's
+    // clothes. (`upstream_issues` does have a `fingerprint` column; it is the issue's
+    // 64-hex CONTENT hash, and reaching for it here would poison the cross-store
+    // partition — the 16-hex validator is what rejects that.)
+    candidates.push({ issueId: id, state: row.state, disposition: { kind: parsed.kind, value: parsed.value }, storeFingerprint });
   }
 
   if (candidates.length === 0) return { applied, refused, wrote: false, aborted: null };
