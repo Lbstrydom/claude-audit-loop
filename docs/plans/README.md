@@ -10,7 +10,7 @@ archiver was deleted ([`reference-integrity-gate.md`](./reference-integrity-gate
 Cluster C). A path is an identity; status is a fact that changes. This index is
 the derived view that makes status navigable without touching identity.
 
-**5 active · 218 terminal · 28 audit summaries · 5 reference docs**
+**4 active · 218 terminal · 28 audit summaries · 1 parked · 5 reference docs**
 
 ---
 
@@ -22,10 +22,20 @@ This is the list to read when asking "what is in flight?".
 | Plan | Status | Notes |
 |---|---|---|
 | [The five aged-out acceptances that are real, still live, and no longer surfaced](./aged-out-acceptance-remainder.md) | `Draft` | evidence gathered, no code written. Each item below was re-verified against the tree at `8178f062` and… |
-| [Score the final-review gate on the claims it already makes](./final-review-self-scoring-gate.md) | `Draft` | not yet audited |
 | [Reconcile attribution, coverage honesty, and base freshness](./reconcile-attribution-and-base-freshness.md) | `Approved` | `/audit-plan` 3 GPT rounds (H:3 M:2 → H:1 M:1 → M:1), 8/8 findings accepted, 100% acceptance every round.… |
 | [A transactional commit boundary for `ship-commit`](./ship-commit-transaction.md) | `Draft` | not started; trigger-gated; Phase 1 answered in §2.1 and the cost widened |
 | [Standing Queue Burndown — the three gates that fire on every ship](./standing-queue-burndown.md) | `In Progress` | Q3 RE-ADOPTED 2026-09-04; its own stated revisit condition (§4) is now met on both halves, so this plan… |
+
+## Parked
+
+Consciously shelved — not abandoned, not superseded, and not in flight.
+Deliberately listed SEPARATELY from Active: parked work should not be
+chased for progress, but filing it as terminal would lose that it can
+resume. Read this list when asking "what did we decide to defer?".
+
+| Plan | Status | Notes |
+|---|---|---|
+| [Score the final-review gate on the claims it already makes](./final-review-self-scoring-gate.md) | `Parked` | NO-GO, closed 2026-09-07. The §5 assumption was measured and does not hold; Features A/B/C are not built.… |
 
 ## Superseded / abandoned
 
