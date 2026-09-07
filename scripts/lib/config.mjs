@@ -132,7 +132,10 @@ export const openaiConfig = Object.freeze({
 // ── Gemini / Final Review Config ────────────────────────────────────────────
 
 export const geminiConfig = Object.freeze({
-  model: resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro'),
+  // `latest-flash` since 2026-09-07 (was `latest-pro`): 65% cheaper, quality
+  // equivalence NOT established, defensible only because this gate is ADVISORY in
+  // code. Revert here. Why + revisit triggers: docs/research/experiment-6-adjudicator-swap-and-the-unreachable-rule.md
+  model: resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-flash'),
   // 270s. Raised from 180s on 2026-08-10 after a CONSOLIDATED gate — one Gemini
   // review over the union diff of three clusters (31 files, ~8,300 insertions) —
   // timed out at 180s, then completed twice at 142s and 130s once the bound was
@@ -642,18 +645,16 @@ export const modelPricing = Object.freeze({
   // Legacy key preserved for callers not yet migrated
   'claude':        { input: 3,    output: 15  },
 
-  // Google — refreshed 2026-09-07 from ai.google.dev/gemini-api/docs/pricing.
-  // The prior values (flash 0.15/0.60, pro 1.25/5, set 2026-04-23 in 900f58e5)
-  // priced the 2.x generation, so 3.x flash was costed at ~1/5 of its real rate
-  // — and `adjudicator-thresholds.json` decides a model swap on
-  // `switchIfCostImprovesByPct`, the exact axis a stale row corrupts.
+  // Google — refreshed 2026-09-07 from ai.google.dev/gemini-api/docs/pricing. The
+  // prior values (flash 0.15/0.60, pro 1.25/5, set 2026-04-23 in 900f58e5) priced
+  // the 2.x generation, so 3.x flash was costed at ~1/5 of its real rate — the
+  // exact axis `switchIfCostImprovesByPct` decides a model swap on.
   //
-  // TWO CAVEATS. (1) The flash rates are PROMOTIONAL: 3.6/3.7/3.8 Flash are
-  // $0.75/$3.75 "through December 31, 2026", then $1.50/$7.50 — re-check before
-  // acting on any cost delta. (2) `pricingKey()` keys on TIER, not version, so
-  // every *-flash id shares one row; 3.6/3.7/3.8 agree, but **3.5 Flash is
-  // $1.50/$9.00** and is mis-priced here. Tolerable only while `latest-flash`
-  // resolves to the always-current `gemini-flash-latest` alias.
+  // TWO CAVEATS. (1) The flash rates are PROMOTIONAL through 2026-12-31, then
+  // $1.50/$7.50 — re-check before acting on any cost delta. (2) `pricingKey()`
+  // keys on TIER not version, so every *-flash id shares this row and 3.5 Flash
+  // ($1.50/$9.00) is mis-priced — tolerable only while `latest-flash` resolves to
+  // the always-current alias.
   //
   // `gemini-pro` is TIERED for the same reason `grok-4.6` below is: Google
   // prices Pro by prompt size, and a flat row under-counts every long audit
