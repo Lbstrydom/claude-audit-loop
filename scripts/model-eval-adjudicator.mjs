@@ -39,13 +39,14 @@ import { finalizeShadowEval } from './lib/model-eval/finalize-shadow-eval.mjs';
 import { parseThresholdConfig } from './lib/model-eval/config/schema.mjs';
 import { createEvalRun, updateEvalRunTerminal, getActiveEvalRunId, EvalRunAlreadyActiveError } from './lib/store/model-eval.mjs';
 import { resolveRepoIdentity } from './lib/repo-identity.mjs';
+import { resolveRepoForStoreResult } from './lib/store/repo.mjs';
 import { writeOutput } from './lib/file-io.mjs';
 import { argOption } from './lib/cli-io.mjs';
 import { RunPreflightError, parseJsonArg } from './lib/model-eval/cli-shared.mjs';
 // D7a layering fix — moved to a lib module so EXECUTORS.adjudicator (D7c, a
 // lib module itself) can import the SAME function without importing this
 // entry point.
-import { scoreAgainstGroundTruth } from './lib/model-eval/adjudicator-executor.mjs';
+import { scoreAgainstGroundTruth, selectBalancedSample } from './lib/model-eval/adjudicator-executor.mjs';
 // D7c — CLI parity with model-eval-auditor.mjs: the role-generic manifest
 // driver dispatches on manifest.role, so an adjudicator manifest belongs on
 // THIS entry point, not the auditor one, even though both call the same
@@ -107,7 +108,21 @@ async function main() {
     if (thresholds.role !== 'adjudicator') throw new RunPreflightError('invalid_threshold_config', `threshold config role must be "adjudicator", got "${thresholds.role}"`);
 
     const repoIdentity = resolveRepoIdentity();
+    // TWO id spaces, both uuid-shaped — see assertRepoRowId in store/repo.mjs.
+    // `repoId` scopes `model_eval_runs`, whose established (FK-less) convention
+    // is the repo_uuid. The ground-truth read filters `audit_runs.repo_id`, an
+    // FK to `audit_repos.id`, and so takes the STORAGE row id from the
+    // documented seam. They are deliberately separate bindings: collapsing them
+    // back into one `repoId` is how this broke.
     const repoId = repoIdentity.repoUuid;
+    // The DISCRIMINATED resolver, not the null-collapsing wrapper: `cloud-off`
+    // is a supported mode (the read below then reports an empty corpus, which
+    // is the truth), while `unresolved`/`error` with the store ON must fail
+    // closed — silently scoping to nothing is the very false zero this fixes.
+    const repoForStore = await resolveRepoForStoreResult();
+    if (repoForStore.kind === 'error' || repoForStore.kind === 'unresolved') {
+      throw new RunPreflightError('unresolved_repo_row', `could not resolve audit_repos.id for this repo (${repoForStore.kind}) — ground truth is scoped by the storage row id, and guessing it would silently score against an empty corpus`);
+    }
     const baselineSpec = baselineRaw ? parseJsonArg(baselineRaw, '--baseline') : DEFAULT_BASELINE_CANDIDATE_SPEC;
     const baselineRoute = resolveCandidateRoute({ role: 'adjudicator', candidateSpec: baselineSpec });
 
@@ -133,11 +148,31 @@ async function main() {
     // Tier-C ground-truth check — screen tier always, promotion tier when
     // no live-shadow run is active yet (the eligibility pre-check).
     const tierConfig = thresholds[tier];
-    const { rows } = await getAdjudicatorGroundTruth({ repoId, limit: Math.max(tierConfig.minSampleSize * 5, 200) });
+    // Cloud-off skips the call outright — `getAdjudicatorGroundTruth` rejects a
+    // null repoId BEFORE its own cloud check (a pinned contract), so there is no
+    // id to pass. An absent store simply has no corpus, and the
+    // insufficient_ground_truth refusal below states that accurately.
+    const { rows } = repoForStore.kind === 'resolved'
+      ? await getAdjudicatorGroundTruth({ repoId: repoForStore.repoRowId, limit: Math.max(tierConfig.minSampleSize * 5, 200) })
+      : { rows: [] };
     if (rows.length < tierConfig.minSampleSize) {
       throw new RunPreflightError('insufficient_ground_truth', `only ${rows.length} labeled ground-truth rows available; ${tier} tier needs minSampleSize=${tierConfig.minSampleSize}`);
     }
-    const sampled = rows.slice(0, tierConfig.minSampleSize);
+    // Stratified, NOT `rows.slice(0, n)` — see selectBalancedSample. A
+    // recency slice can hand back a single-label sample, which leaves
+    // falsePositiveRate undefined while still producing a verdict-shaped
+    // result.
+    const draw = selectBalancedSample(rows, tierConfig.minSampleSize);
+    const sampled = draw.sample;
+    if (!draw.balanced) {
+      throw new RunPreflightError(
+        'unbalanced_ground_truth',
+        `ground-truth sample contains only ${draw.classesPresent} label class `
+        + `(${JSON.stringify(draw.composition)}); falsePositiveRate is undefined without both `
+        + `true_positive and false_positive rows, and it is the metric an adjudicator swap turns on. `
+        + `This is a corpus setup error, not a degenerate-but-valid measurement.`,
+      );
+    }
 
     const runBundle = {
       repoId, role: 'adjudicator', tier,
@@ -161,7 +196,7 @@ async function main() {
       result = {
         verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics,
         cost: { candidateUsd: candidateUsage.costUsd, candidateTokens: { input: candidateUsage.inputTokens, output: candidateUsage.outputTokens } },
-        evidence: { mode: 'ground-truth', sampleSize: sampled.length, reasons: v.reasons },
+        evidence: { mode: 'ground-truth', sampleSize: sampled.length, sampleComposition: draw.composition, reasons: v.reasons },
       };
     } else {
       const [
@@ -197,7 +232,7 @@ async function main() {
         writeOutput({ runId, tier, ...result }, outFile, `[model-eval-adjudicator] tier=promotion ground-truth inconclusive — starting live-shadow collection (need ${tierConfig.minSampleSize} terminal observations)`);
         return;
       }
-      result = { verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics, cost: groundTruthCost, evidence: { mode: 'ground-truth', baselineMetrics, sampleSize: sampled.length, reasons: v.reasons } };
+      result = { verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics, cost: groundTruthCost, evidence: { mode: 'ground-truth', baselineMetrics, sampleSize: sampled.length, sampleComposition: draw.composition, reasons: v.reasons } };
     }
 
     if (created.runId) {

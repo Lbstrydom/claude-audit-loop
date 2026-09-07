@@ -20,7 +20,7 @@
  */
 
 import { one, many, query, withTx, upsert, pgArray } from '../db/query.mjs';
-import { isCloudEnabled } from './repo.mjs';
+import { isCloudEnabled, assertRepoRowId } from './repo.mjs';
 import { CANONICAL_ARMS, stagesForArm } from '../arm-vocabulary.mjs';
 
 // ── Schema preflight (decision 13) ───────────────────────────────────────────
@@ -584,6 +584,13 @@ const GROUND_TRUTH_LIMIT_MAX = 1000;
 export async function getAdjudicatorGroundTruth({ repoId, limit = GROUND_TRUTH_LIMIT_DEFAULT, cursor = null, sinceDecidedAt = 'default' } = {}) {
   if (!repoId) throw new Error('getAdjudicatorGroundTruth: repoId is required');
   if (!await isCloudEnabled()) return { cloud: false, rows: [] };
+  // `repoId` here must be `audit_repos.id` — the query below filters
+  // `audit_runs.repo_id`, an FK into that column. Handing it the sibling
+  // `repo_uuid` matches nothing and returns an empty corpus that is
+  // indistinguishable from a repo with no labeled findings. Guarding at the
+  // SEAM (not at each call site) is the point: three call sites had the bug,
+  // and a per-site fix leaves the fourth free to reintroduce it.
+  await assertRepoRowId(repoId, { caller: 'getAdjudicatorGroundTruth' });
   const boundedLimit = Math.min(Math.max(1, limit), GROUND_TRUTH_LIMIT_MAX);
 
   // 'default' sentinel (not undefined) so an explicit null is distinguishable

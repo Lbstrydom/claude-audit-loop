@@ -73,3 +73,57 @@ export async function scoreAgainstGroundTruth({ route, rows }) {
     usage: { inputTokens, outputTokens, costUsd: allPriced ? costUsd : null },
   };
 }
+
+/**
+ * **Stratified ground-truth draw.** `getAdjudicatorGroundTruth` returns rows
+ * ordered `decided_at DESC`, so a plain `rows.slice(0, n)` takes the n most
+ * RECENTLY adjudicated findings — which in practice come from a single audit
+ * session and therefore often share one label. The first real run of this
+ * harness drew 10 rows that were all `true_positive`: `falsePositiveRate` came
+ * back `null` (correctly — there were no negatives to get wrong) and the
+ * verdict rested on recall alone, while the surrounding corpus held 150/50.
+ *
+ * FP-rate is the metric the runbook says should DECIDE an adjudicator swap, so
+ * a sample that structurally cannot measure it is not a cheaper measurement —
+ * it is a different, unstated one. This draws as close to 50/50 as the corpus
+ * allows, newest-first within each class so the sample still tracks current
+ * adjudication behaviour.
+ *
+ * Deterministic: no RNG, so two runs over one corpus draw the same sample and
+ * a verdict is reproducible.
+ *
+ * @param {Array<{humanLabel: string}>} rows - as returned by getAdjudicatorGroundTruth
+ * @param {number} size - desired sample size
+ * @returns {{sample: Array<object>, composition: Record<string, number>,
+ *   balanced: boolean, classesPresent: number}}
+ */
+export function selectBalancedSample(rows, size) {
+  if (!Number.isInteger(size) || size < 1) throw new Error(`selectBalancedSample: size must be a positive integer, got ${size}`);
+  const positives = rows.filter((r) => r.humanLabel === 'true_positive');
+  const negatives = rows.filter((r) => r.humanLabel === 'false_positive');
+
+  // Round-robin from each class until `size` is met or both are exhausted.
+  // Whichever class is scarce contributes everything it has; the other fills
+  // the rest, so a lopsided corpus degrades to "as balanced as possible"
+  // rather than silently reverting to recency order.
+  const sample = [];
+  let i = 0;
+  let j = 0;
+  while (sample.length < size && (i < positives.length || j < negatives.length)) {
+    if (i < positives.length && sample.length < size) sample.push(positives[i++]);
+    if (j < negatives.length && sample.length < size) sample.push(negatives[j++]);
+  }
+
+  const composition = {};
+  for (const r of sample) composition[r.humanLabel] = (composition[r.humanLabel] || 0) + 1;
+  const classesPresent = Object.keys(composition).length;
+  return {
+    sample,
+    composition,
+    // "Balanced" is a claim about MEASURABILITY, not about a 50/50 split: both
+    // classes present is exactly the condition under which falsePositiveRate
+    // is defined.
+    balanced: classesPresent >= 2,
+    classesPresent,
+  };
+}

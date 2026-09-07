@@ -467,3 +467,77 @@ export async function listRepoIds() {
     return [];
   }
 }
+
+/**
+ * Thrown by {@link assertRepoRowId} when a caller supplies an id from the WRONG
+ * repo id space. Carries the correct id when it can be derived, so the message
+ * is a remedy and not merely a complaint.
+ */
+export class RepoIdSpaceError extends Error {
+  constructor(message, { supplied, expected = null, kind }) {
+    super(message);
+    this.name = 'RepoIdSpaceError';
+    this.supplied = supplied;
+    this.expected = expected;
+    this.kind = kind; // 'repo-uuid-passed-as-row-id' | 'unknown-repo-id'
+  }
+}
+
+/**
+ * **Guard for the two-repo-id-space hazard.** This repo carries two uuid-shaped
+ * repo identities and NOTHING about their shape distinguishes them:
+ *
+ *   - `audit_repos.repo_uuid` — the stable LOGICAL identity from
+ *     `resolveRepoIdentity()`; also the (FK-less) scoping convention of
+ *     `model_eval_runs` and `tiered_shadow_observations`.
+ *   - `audit_repos.id` — the STORAGE row id that every FK'd child table's
+ *     `repo_id` column references (`audit_runs`, `debt_entries`, …).
+ *
+ * A reader that filters a child table by `repo_id` and is handed a `repo_uuid`
+ * matches nothing and returns an EMPTY RESULT — indistinguishable from "this
+ * repo genuinely has no rows". That false zero is what kept the adjudicator
+ * eval unrunnable since it was built: it reported `insufficient_ground_truth:
+ * 0 rows` against 3,413 real labeled ones.
+ *
+ * Call this at the READ SEAM (inside the store function), not at each call
+ * site — a per-call-site fix leaves the next caller free to reintroduce it.
+ * Fails CLOSED: a DB error propagates rather than being read as "valid".
+ *
+ * @param {string} repoId - the id to validate; must be `audit_repos.id`
+ * @param {{caller?: string}} [opts] - name used in the error message
+ * @returns {Promise<void>} resolves when `repoId` is a real storage row id
+ * @throws {RepoIdSpaceError} when it is a `repo_uuid`, or matches no repo
+ */
+export async function assertRepoRowId(repoId, { caller = 'query' } = {}) {
+  if (!repoId) throw new RepoIdSpaceError(`${caller}: repoId is required`, { supplied: repoId, kind: 'unknown-repo-id' });
+
+  // `audit_repos.id` is `uuid` while `repo_uuid` is `text`, so a non-uuid value
+  // makes THIS query throw 22P02 (invalid_text_representation) before the
+  // repo_uuid branch below is ever reached — and repo_uuid values are not
+  // required to be uuid-shaped. 22P02 here means only "not a row id", so it
+  // falls through rather than aborting; EVERY other DB error propagates,
+  // because swallowing one would restore exactly the "unverified id sails
+  // through into a silent empty result" path this guard exists to close.
+  let byRowId = null;
+  try {
+    byRowId = await one(`SELECT id FROM audit_repos WHERE id = $1 LIMIT 1`, [repoId]);
+  } catch (err) {
+    if (err?.code !== '22P02') throw err;
+  }
+  if (byRowId?.id) return;
+
+  const byUuid = await one(`SELECT id, name FROM audit_repos WHERE repo_uuid = $1 LIMIT 1`, [repoId]);
+  if (byUuid?.id) {
+    throw new RepoIdSpaceError(
+      `${caller}: was given a repo_uuid (${repoId}) where audit_repos.id is required. `
+      + `That id space matches no child-table repo_id, so the query would return 0 rows and read as an empty corpus. `
+      + `The correct id for "${byUuid.name}" is ${byUuid.id} — resolve it via resolveRepoForStore() (.repoRowId) or getRepoIdByUuid().`,
+      { supplied: repoId, expected: byUuid.id, kind: 'repo-uuid-passed-as-row-id' },
+    );
+  }
+
+  throw new RepoIdSpaceError(
+    `${caller}: repoId ${repoId} matches no audit_repos row by either id or repo_uuid — refusing to return an empty result that would read as "no data".`,
+    { supplied: repoId, kind: 'unknown-repo-id' },
+  );
+}

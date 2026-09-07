@@ -128,6 +128,17 @@ prevent.**
 - Thresholds are versioned, conservative v0.1 bootstrap values
   (`scripts/lib/model-eval/config/{auditor,adjudicator}-thresholds.json`) —
   not yet empirically calibrated; a recalibration is a `version: 2` bump.
+  **First real evidence they are miscalibrated (2026-09-07):** on a balanced
+  10-row adjudicator sample the INCUMBENT (`gemini-pro-latest`) scored
+  `F1 0.615` against a `minF1` floor of `0.95`. A floor the model already in
+  production cannot clear rejects every candidate by construction.
+- **Name a candidate with `{"kind":"pinned-model","value":"<id>"}`, not a
+  sentinel, whenever you mean one specific model.** A sentinel resolves through
+  a floating alias: a run launched for `gemini-3.8-flash` via `latest-flash`
+  recorded `resolvedModel: "gemini-flash-latest"` (2026-09-07), which is both
+  unreproducible and possibly not the model under test. An id absent from the
+  live catalog degrades to `lineageStatus:'unknown'` and can never reach
+  Tier A/B — unverified is not the same as trusted.
 
 ## Load-bearing invariants
 
@@ -239,9 +250,27 @@ raw-finding evidence and a governance note on the cross-repo egress
 authorization boundary that held even under direct repeated user request:
 [`docs/research/experiment-3-model-swap-glm-vs-gpt.md`](../research/experiment-3-model-swap-glm-vs-gpt.md).
 
-## Adjudicator role — not yet run (open item, 2026-07-14)
+## Adjudicator role — FIRST RUN 2026-09-07 (was: never run since 2026-07-14)
 
-Unlike the auditor role above, **no `model-eval-adjudicator.mjs` run has ever
+**It could not have run.** `model-eval-adjudicator.mjs` passed
+`resolveRepoIdentity().repoUuid` into `getAdjudicatorGroundTruth`, whose SQL
+filters `audit_runs.repo_id` — an FK to `audit_repos.id`. Both ids are
+uuid-shaped, so the wrong one matched nothing and the CLI reported
+`insufficient_ground_truth: only 0 labeled rows` against 3,413 real ones. Fixed
+by a guard at the read seam (`assertRepoRowId`), not at the call sites, because
+three call sites had it and a fourth would have reacquired it.
+
+Two further defects surfaced on that first run, both since fixed: the sample was
+`rows.slice(0, n)` over a `decided_at DESC` read, which drew 10 rows that were
+all `true_positive` and left `falsePositiveRate` **null** while still emitting a
+verdict; and `tests/model-eval-adjudicator-cli.test.mjs` had been relying on the
+corpus being too small to run, so repairing the bug turned it into a test that
+billed a provider on every `npm test` (now air-gapped).
+
+The paragraphs below are retained as the historical record of what was
+outstanding.
+
+Unlike the auditor role above, **no `model-eval-adjudicator.mjs` run had ever
 been executed** — screen or promotion tier, any candidate. The harness
 supports it identically (`node scripts/model-eval-adjudicator.mjs --candidate
 <spec> --tier screen|promotion`), and the shared core (route resolution,

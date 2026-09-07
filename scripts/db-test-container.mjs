@@ -83,6 +83,12 @@ export const ISOLATED_SUITE_FILES = Object.freeze([
   // intact; its pure half runs everywhere and is a no-op here.
   'tests/campaign-adjudication.test.mjs',
   'tests/candidate-audit-findings-window.test.mjs',
+  // Enrolled 2026-09-07 with `assertRepoRowId`: the two repo id spaces are
+  // both uuid-shaped, so the wrong one produced an EMPTY result rather than
+  // an error and kept the adjudicator eval unrunnable since it was built.
+  // Only a real schema can prove the guard distinguishes them — a mock would
+  // be asserting the very mapping under test.
+  'tests/repo-id-space-guard.test.mjs',
   'tests/db-schema-realization-live.test.mjs',
   // Enrolled 2026-08-30 with migration 20260830150000 (the vector-space
   // scoping of memory_health_semantic_cluster). It is a plpgsql function, so

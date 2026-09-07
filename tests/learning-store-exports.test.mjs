@@ -41,6 +41,15 @@ const EXPECTED_EXPORTS = [
   // 'unresolved'|'error'`) and is now the single implementation; the older name
   // is a thin wrapper over it so existing call sites are untouched.
   'resolveRepoForStoreResult',
+  // Added 2026-09-07. The two repo id spaces (`audit_repos.repo_uuid`, the
+  // logical identity, and `audit_repos.id`, the storage FK every child
+  // table's `repo_id` references) are both uuid-shaped, so a reader handed
+  // the wrong one matches nothing and returns an EMPTY RESULT rather than an
+  // error. `assertRepoRowId` is the seam-level guard that makes that
+  // distinguishable, and `RepoIdSpaceError` carries the id the caller should
+  // have used so the failure is a remedy rather than a complaint.
+  'assertRepoRowId',
+  'RepoIdSpaceError',
   // Added 2026-09-04 (drift-signal-attribution). The publishable identity of the
   // configured store — fingerprint + database name, never a hostname. It is a
   // READ of configuration rather than of the database, so it is sync and answers
@@ -565,6 +574,14 @@ describe('learning-store.mjs — public export surface (plan §2 / R3/M2)', () =
     // its id, created_at and spec-run children survive, and
     // `deleteRegressionSpec` removes it where no test discharges the finding at
     // all — which returns the finding to `unlocked_fixes`, the honest outcome.
-    assert.equal(EXPECTED_EXPORTS.length, 204);
+    // 204 → 206: +assertRepoRowId, +RepoIdSpaceError (2026-09-07). The
+    // adjudicator eval had never run in its entire history because
+    // `model-eval-adjudicator.mjs` passed a `repo_uuid` into
+    // `getAdjudicatorGroundTruth`, whose SQL filters `audit_runs.repo_id` —
+    // it reported `0 labeled rows` against 3,413 real ones. Three call
+    // sites had the bug, so the fix is a guard INSIDE the store function
+    // rather than three corrected arguments: a per-call-site fix leaves the
+    // fourth caller free to reintroduce the same false zero.
+    assert.equal(EXPECTED_EXPORTS.length, 206);
   });
 });

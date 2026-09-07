@@ -14,7 +14,8 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isSentinel, resolveModel, pickOssModel, SENTINEL_TO_TIER, OSS_POOL } from '../model-resolver.mjs';
+import { isSentinel, resolveModel, pickOssModel, SENTINEL_TO_TIER, OSS_POOL,
+  parseClaudeModel, parseGeminiModel, parseOpenAIModel, getLiveCatalog } from '../model-resolver.mjs';
 import { azureConfig } from '../config.mjs';
 import { RoleSchema, CandidateSpecSchema } from './contracts.mjs';
 
@@ -107,6 +108,23 @@ function transportForProvider(provider) {
   throw new RouteResolutionError(`transportForProvider: unrecognized provider "${provider}" — every provider must have an explicit transport mapping`);
 }
 
+/**
+ * Parse a concrete first-party model id into `{provider, tier}` for a
+ * `pinned-model` candidate. Delegates to model-resolver.mjs's existing per-
+ * vendor parsers — deliberately NOT a fourth id grammar living here, which is
+ * the duplicate-classifier shape this repo keeps getting bitten by.
+ * @returns {{provider: string, tier: string}|null} null when unrecognizable
+ */
+function parsePinnedModel(id) {
+  const claude = parseClaudeModel(id);
+  if (claude) return { provider: 'anthropic', tier: claude.tier };
+  const gemini = parseGeminiModel(id);
+  if (gemini) return { provider: 'google', tier: gemini.tier };
+  const openai = parseOpenAIModel(id);
+  if (openai) return { provider: 'openai', tier: openai.isLite ? 'mini' : null };
+  return null;
+}
+
 /** modelLineage is the underlying provider identity, not transport — an
  * Azure-hosted and public instance of the same lineage count as ONE family. */
 function lineageForProvider(provider, tierOrVariantOrRole) {
@@ -156,6 +174,33 @@ export function resolveCandidateRoute({ role, candidateSpec, env = process.env, 
     modelLineage = lineageForProvider(provider, tier.tier || tier.variant || tier.role);
     lineageStatus = 'known';
     lineageSource = 'catalog-verified';
+    pricingModel = resolvedModel;
+  } else if (spec.kind === 'pinned-model') {
+    // A concrete, first-party model id under test. See CandidateSpecSchema in
+    // contracts.mjs for why pinning is REQUIRED here rather than forbidden: a
+    // sentinel resolves through a floating alias, which makes the verdict
+    // unreproducible and can silently evaluate a model other than the one
+    // named on the command line.
+    const parsedModel = parsePinnedModel(spec.value);
+    if (!parsedModel) {
+      throw new RouteResolutionError(
+        `resolveCandidateRoute: "${spec.value}" is not a recognizable first-party model id `
+        + '(expected a claude-*, gemini-* or gpt-* id). An OpenRouter/OSS candidate uses {kind:"oss-role"}.',
+      );
+    }
+    provider = parsedModel.provider;
+    resolvedModel = spec.value;
+    modelLineage = lineageForProvider(provider, parsedModel.tier);
+    // Independence is only claimable when the id genuinely EXISTS — otherwise a
+    // typo would mint its own trusted family. `getLiveCatalog` returns [] when
+    // the catalog was never refreshed or has gone stale, and an empty catalog
+    // is "unverified", never "verified absent": it degrades to
+    // lineageStatus:'unknown' (which fail-closes independenceEligible below),
+    // rather than throwing on a route that may be perfectly good.
+    const catalog = getLiveCatalog(provider);
+    const inCatalog = catalog.includes(spec.value);
+    lineageStatus = inCatalog ? 'known' : 'unknown';
+    lineageSource = inCatalog ? 'catalog-verified' : 'operator-attested';
     pricingModel = resolvedModel;
   } else if (spec.kind === 'oss-role') {
     provider = 'oss';

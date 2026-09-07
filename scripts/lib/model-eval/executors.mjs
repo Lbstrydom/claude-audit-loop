@@ -44,6 +44,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { getAdjudicatorGroundTruth } from '../store/model-ab.mjs';
+import { resolveRepoForStoreResult } from '../store/repo.mjs';
 import { scoreAgainstGroundTruth } from './adjudicator-executor.mjs';
 import { resolveCandidateRoute } from './route-catalog.mjs';
 import { createEvalRun, updateEvalRunTerminal } from '../store/model-eval.mjs';
@@ -237,7 +238,25 @@ async function adjudicatorPrepareContext(manifest, repoIdentity, driverArgs) {
   // barrel and broke its curated public-surface pin — the fix is one default,
   // not a re-exported one.
   const declaredLimit = manifest.controls.groundTruthLimit;
-  const { rows } = await getAdjudicatorGroundTruth({ repoId: repoIdentity.repoUuid, ...(declaredLimit ? { limit: declaredLimit } : {}) });
+  // NOT `repoIdentity.repoUuid` — the ground-truth query filters
+  // `audit_runs.repo_id`, an FK to `audit_repos.id`. The two id spaces are both
+  // uuid-shaped, so the wrong one returns an empty corpus rather than an error;
+  // `assertRepoRowId` inside the store now rejects it loudly, and this resolves
+  // the right one. (`repoId` below still scopes model_eval_* on the repo_uuid
+  // convention — the two are deliberately different values.)
+  // `cloud-off` falls through to the existing 0-rows refusal below (which is
+  // the accurate diagnosis there); only a store that IS on but cannot resolve
+  // the row is a hard preflight failure.
+  const repoForStore = await resolveRepoForStoreResult();
+  if (repoForStore.kind === 'error' || repoForStore.kind === 'unresolved') {
+    throw new Error(`[executors] adjudicator: could not resolve audit_repos.id for this repo (${repoForStore.kind}) — ground truth is scoped by the storage row id, and proceeding would score against an empty corpus.`);
+  }
+  // Cloud-off skips the call outright — getAdjudicatorGroundTruth rejects a null
+  // repoId before its own cloud check, so there is no id to pass; the 0-rows
+  // refusal below is the accurate diagnosis for an absent store.
+  const { rows } = repoForStore.kind === 'resolved'
+    ? await getAdjudicatorGroundTruth({ repoId: repoForStore.repoRowId, ...(declaredLimit ? { limit: declaredLimit } : {}) })
+    : { rows: [] };
   // An empty corpus is a REFUSAL (plan: "not a degenerate-but-valid outcome,
   // it is a setup error"), not a 0-observation `unknown` under D6's rule — a
   // comparison with nothing to score fails the same way an unresolvable repo

@@ -88,8 +88,22 @@ export const COMPARATIVE_FLOOR_KEYS = Object.freeze(['minRecallRatioVsBaseline',
 // relies on. contracts.mjs imports ONLY zod — genuinely side-effect-free —
 // so both route-catalog.mjs and audit-arms.mjs import CandidateSpecSchema
 // from here instead of one depending on the other's heavier module.
+//
+// **`pinned-model` and the "never pin a concrete model id" rule.** AGENTS.md's
+// anti-pattern governs CALL PATHS — which model production code INVOKES — and
+// a sentinel is right there because the newest tier member should win without
+// an edit. An eval candidate is the opposite question: it names the ONE
+// already-chosen model under test. Resolving it through a sentinel actively
+// breaks the measurement, because `latest-flash` resolves to the floating
+// `gemini-flash-latest` alias, so the run records a verdict against "whatever
+// that pointed at today" and nobody can reproduce it. (Measured 2026-09-07: an
+// adjudicator run intended for `gemini-3.8-flash` recorded
+// `resolvedModel: "gemini-flash-latest"`.) This is the same carve-out
+// config.mjs states for its `grok-4.6` PRICE row: the rule is about choosing a
+// model, not about naming one you have already chosen.
 export const CandidateSpecSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('sentinel'), value: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('pinned-model'), value: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('oss-role'), role: z.enum(['coder', 'reasoner']) }).strict(),
   z.object({ kind: z.literal('azure-deployment'), profile: z.string().min(1) }).strict(),
 ]);

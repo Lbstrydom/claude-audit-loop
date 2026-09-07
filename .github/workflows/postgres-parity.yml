@@ -239,10 +239,12 @@ jobs:
             tests/persona-outcomes-hash-backfill.test.mjs \
             tests/plans-ship-persona-correlation.test.mjs \
             tests/postgres-parity-identity-columns.test.mjs \
-            tests/refresh-ownership-epoch-db.test.mjs \n            tests/refresh-provenance-promotion.test.mjs \
+            tests/refresh-ownership-epoch-db.test.mjs \
+            tests/refresh-provenance-promotion.test.mjs \
             tests/refresh-runs-column-allowlist.test.mjs \
             tests/refresh-runs-repo-scoping.test.mjs \
             tests/regression-spec-multi-finding-lock.test.mjs \
+            tests/repo-id-space-guard.test.mjs \
             tests/repo-identity-store.test.mjs \
             tests/repo-last-audited-at.test.mjs \
             tests/setup-postgres-surface-precondition.test.mjs \
