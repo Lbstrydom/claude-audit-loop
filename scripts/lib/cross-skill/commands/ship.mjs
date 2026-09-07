@@ -668,6 +668,9 @@ export async function repointRegressionSpecCmd(ctx) {
  * and stays a hard error: the (repo_id, spec_path) arbiter is a FULL index and
  * a NULL repo_id is distinct from every other NULL in Postgres, so an unscoped
  * row INSERTs a duplicate on every re-run instead of updating.
+ *
+ * A `sourceKind` of `unit-test` is path-checked; every other kind is not. See the
+ * comment on the branch below — that asymmetry is the decision, not an oversight.
  */
 export async function recordRegressionSpecCmd(ctx) {
   const p = ctx.payload();
@@ -676,22 +679,78 @@ export async function recordRegressionSpecCmd(ctx) {
   }
   if (!p.specPath) throw new CommandError('BAD_INPUT', 'specPath is required');
   if (!ctx.cloud.enabled) return { ...ctx.degrade(), specId: null };
-  // NO existence check here, and that is a REVERSAL of my own first attempt — recorded
-  // because the reasoning is the useful part. I added one as a "cheap second line" and
-  // it broke two existing contracts: the golden-envelope capture (a cloud-off call began
-  // REFUSING on a filesystem probe where it used to degrade) and the write-outcome
-  // contract fixture (a synthetic `tests/x.spec.ts`, testing exit codes, not paths).
+  // A SCOPED existence check: `unit-test` rows are validated, every other kind is not.
+  // This NARROWS an earlier reversal recorded here rather than undoing it, and the
+  // reasoning is the useful part.
   //
-  // Fixing those two guards to accommodate the check would have been fitting the tests to
-  // the change. And the check earns little: upstream b2c9a63f measured 3 of 3 dangling
-  // citations that were TRUE when written and were invalidated later by a refactor, so a
-  // write-time probe catches none of the real population — only a typo, which the
-  // read-side report in listUnlockedFixesCmd surfaces one ship later anyway.
+  // The reverted attempt was an UNCONDITIONAL probe. It broke two contracts — the
+  // golden-envelope capture (placed above the cloud-off return, so a supported degrade
+  // became a refusal) and the write-outcome fixture (a synthetic `tests/x.spec.ts`
+  // asserting exit codes, not paths) — and repairing those guards to fit it would have
+  // been fitting the tests to the change, so it was backed out whole. That refusal was
+  // right. But both breakages were collateral from the SCOPE, not evidence against the
+  // check: the capture writes `sourceKind: "audit-loop-fix"` and the fixture `'ux-lock'`,
+  // so neither is a unit-test row and neither reaches the branch below.
   //
-  // lock-with-test keeps ITS check: it is the interactive verb a human aims at one
-  // finding, where refusing a typo immediately is worth the friction. This is the
-  // programmatic recorder, called by tooling that may legitimately write the spec after
-  // recording the intent to.
+  // WHY unit-test, and only unit-test (upstream 429683ac, measured 2026-09-07).
+  // `source_kind: 'unit-test'` is not a label: it selects a different upsert arbiter
+  // ((repo_id, spec_path, source_finding_id) instead of (repo_id, spec_path)) and it
+  // excludes the row from ux-lock's adoption census. It is `lock-with-test`'s row shape,
+  // and that verb EARNS it by resolving the path through `classifyTestPath`. This verb
+  // took `sourceKind` straight from the payload under no constraint, so
+  // `record-regression-spec --json '{"sourceKind":"unit-test",…}'` minted a row
+  // indistinguishable in the store from a validated one — the validating verb's whole
+  // guarantee was bypassable through its sibling. Row e473285b cited
+  // `tests/unit/contracts/noV1RegistryInValidators.test.js` SIXTEEN DAYS after that file
+  // was deleted: false on arrival, not invalidated later by a refactor.
+  //
+  // That measurement retired this comment's previous claim, which said a write-time probe
+  // "catches none of the real population" on upstream b2c9a63f's 3 of 3 dangling citations
+  // that were true when written. 429683ac added two more rows from the same consumer and
+  // a probe would have stopped one. The known population is 1 of 5, not 0 of 3.
+  //
+  // The other half of the original reasoning survives intact, which is why the branch is
+  // conditional: /ux-lock, plan-verify and manual runs legitimately record the intent
+  // BEFORE the spec file is saved, so for them a missing path is not yet a defect — and
+  // the read-side `danglingLocks` report surfaces a genuine typo one ship later.
+  //
+  // Considered and deliberately NOT done, so the next reader need not re-derive them:
+  //   - Refusing `unit-test` here outright, so the two verbs stop being interchangeable.
+  //     Stronger, but it withdraws a capability whose only measured abuse is the missing
+  //     probe, and this bundle syncs to consumers whose callers cannot be observed from
+  //     here. Honouring the contract is the smallest change that is a true function of
+  //     the defect; withdrawing the verb is a scope decision needing its own evidence.
+  //   - Importing lock-with-test's `findUnlockedFixInRepo` check as well. It would be
+  //     WRONG here: that check refuses an ALREADY-LOCKED finding, which is precisely the
+  //     row this verb's unit-test arbiter exists to UPDATE.
+  //   - Storing the citation's write-time truth (a probed-at column) so the read side
+  //     could separate "false on arrival" from "invalidated later by a refactor". With
+  //     the branch below in place a dangling unit-test row is true-when-written by
+  //     construction, and for the deferred-write kinds the flag would record false on
+  //     every legitimate call. Near-constant where it is cheap, redundant where it would
+  //     have meant something.
+  if (p.sourceKind === 'unit-test') {
+    const { realpathSync } = await import('node:fs');
+    const { classifyTestPath } = await import('../../path-validation.mjs');
+    // The SAME oracle lock-with-test refuses on and the danglingLocks report measures
+    // with — a second spelling would let a row be writable and dangling at once.
+    const verdict = classifyTestPath({ repoRoot: realpathSync(process.cwd()), testPath: p.specPath });
+    if (!verdict.ok) {
+      const why = {
+        'path-escapes-repo': `"${p.specPath}" resolves outside the repo`,
+        'not-a-file': `"${p.specPath}" is not a regular file`,
+        'test-file-not-found': `test file "${p.specPath}" does not exist — a unit-test lock naming a missing file reads as coverage forever`,
+        'path-unresolvable': `"${p.specPath}" could not be resolved (broken symlink or permission error)`,
+        'sensitive-path': `"${p.specPath}" is a sensitive path`,
+        'empty-path': 'a test path is required',
+      }[verdict.reason] ?? verdict.reason;
+      throw new CommandError('BAD_INPUT',
+        `refusing: ${why}. sourceKind "unit-test" claims lock-with-test's row shape, so it `
+        + 'must clear the same path contract. If the spec is written AFTER this call, use a '
+        + 'deferred-write kind (ux-lock, plan-verify, manual), which is not probed.',
+        { reason: verdict.reason }, 2);
+    }
+  }
   const scope = await ctx.resolveScope();
   const repoId = scope.kind === 'scoped' ? scope.repoId : null;
   if (!repoId) {

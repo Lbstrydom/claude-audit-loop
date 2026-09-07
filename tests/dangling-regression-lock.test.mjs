@@ -8,14 +8,28 @@
  * obligation permanently, and nothing re-raises it: the queue reports a clean backlog
  * that is not clean.
  *
- * **The read side is the primary instrument, and the upstream evidence is why.** Measured
- * here the day of the fix: 3 of 235 rows cite a path that no longer resolves — all three
- * `source_kind: 'unit-test'`, i.e. written by `lock-with-test`, which ALREADY validates
- * existence, and all three deleted by one commit (`e833b2aa`, "retire the consistency
- * candidate promotion path"). They were TRUE when recorded and were invalidated later by
- * a legitimate refactor, so a write-time check would have caught zero of them. The
- * reporter's three were the opposite case (tests on unmerged branches). A citation's
- * truth is not a property of the moment it was written.
+ * **The read side is the primary instrument** — a citation's truth is not a property of
+ * the moment it was written. Measured here the day of that fix: 3 of 235 rows cite a path
+ * that no longer resolves, all three `source_kind: 'unit-test'` and all three deleted by
+ * one commit (`e833b2aa`, "retire the consistency candidate promotion path"). They were
+ * TRUE when recorded and invalidated later by a legitimate refactor, so a write-time check
+ * would have caught zero of them. The reporter's own three were the opposite case (tests
+ * on unmerged branches).
+ *
+ * **But not the ONLY instrument — upstream `429683ac` (2026-09-07) falsified the stronger
+ * reading of that number.** Two further dangling rows from the same consumer, both
+ * `source_kind: 'unit-test'`: `d23094b2` cited a test deleted in the same PR that recorded
+ * the lock (true-when-written, consistent with the above), but `e473285b` was recorded
+ * SIXTEEN DAYS after the file it cites was deleted — FALSE ON ARRIVAL. The known
+ * population is 1 of 5 write-time-catchable, not 0 of 3.
+ *
+ * **The mechanism is the finding.** `lock-with-test` validates via `classifyTestPath`, so
+ * it cannot have produced `e473285b`. `record-regression-spec` took `sourceKind` from the
+ * caller's payload under no constraint, so it could mint an identical-looking `unit-test`
+ * row with no validation — the validating verb's guarantee was fully bypassable through
+ * its sibling, and the two rows are indistinguishable in the store. The write half below
+ * pins the fix: claiming `unit-test` now means clearing `unit-test`'s path contract, while
+ * genuinely deferred-write kinds stay permissive.
  *
  * @module tests/dangling-regression-lock
  */
@@ -107,23 +121,71 @@ describe('the /ship lock nudge reports locks whose spec_path no longer resolves'
   });
 });
 
-describe('record-regression-spec does NOT probe the filesystem — and that is the decision', () => {
-  // A REVERSAL of this change's own first attempt, pinned so it is not silently redone.
-  // I added a write-time existence check as a "cheap second line". It broke two existing
-  // contracts — the golden-envelope capture (a cloud-off call started REFUSING on a
-  // filesystem probe where it used to degrade) and the write-outcome fixture (a synthetic
-  // `tests/x.spec.ts`, testing exit codes rather than paths). Repairing those two guards
-  // to fit the new check would have been fitting the tests to the change.
+describe('record-regression-spec probes the filesystem for unit-test rows ONLY', () => {
+  // This NARROWS a reversal rather than undoing it, and both halves are pinned so neither
+  // is silently redone.
   //
-  // And it earns little: upstream b2c9a63f measured 3 of 3 dangling citations that were
-  // TRUE when written and were invalidated later by a refactor, so a write-time probe
-  // catches none of the real population — only a typo, which the read-side report above
-  // surfaces one ship later anyway.
+  // The reverted attempt was an UNCONDITIONAL probe. It broke the golden-envelope capture
+  // (placed above the cloud-off return, so a supported degrade became a refusal) and the
+  // write-outcome fixture (a synthetic `tests/x.spec.ts` asserting exit codes, not paths).
+  // Repairing those to fit it would have been fitting the tests to the change, and backing
+  // it out whole was right. But both breakages were collateral from the SCOPE: the capture
+  // writes `audit-loop-fix` and the fixture `ux-lock`, so under the scoped check neither
+  // reaches the probe at all — which is what the "must NOT fire" cases below assert, by
+  // kind, on purpose.
 
-  it('accepts a path that does not resolve — the programmatic recorder stays permissive', async () => {
-    const ctx = makeCtx({ payload: { sourceKind: 'unit-test', description: 'pins a thing', specPath: GONE_SPEC } });
+  it('THE DIRECTION THAT MUST FIRE: a unit-test row citing a missing file is refused', async () => {
+    // upstream 429683ac / e473285b: recorded sixteen days after its test was deleted.
+    // `source_kind: 'unit-test'` is lock-with-test's row shape — it selects that verb's
+    // upsert arbiter and is excluded from ux-lock's adoption census — so claiming it
+    // through the programmatic sibling must clear the same contract.
+    const ctx = makeCtx({ payload: { sourceKind: 'unit-test', description: 'pins a thing', specPath: GONE_SPEC, sourceFindingId: 'f1' } });
+    await assert.rejects(() => recordRegressionSpecCmd(ctx), (err) => {
+      assert.ok(err instanceof CommandError);
+      assert.equal(err.code, 'BAD_INPUT');
+      assert.equal(err.exitCode, 2, 'a refused input is exit 2, never the write-failure exit');
+      assert.equal(err.extra.reason, 'test-file-not-found');
+      return true;
+    });
+  });
+
+  it('a unit-test row naming a DIRECTORY is refused too — existsSync alone would accept it', async () => {
+    // The same INC-001 class the read side already covers, through the SAME oracle: a
+    // second spelling would let a row be writable and dangling at once.
+    const ctx = makeCtx({ payload: { sourceKind: 'unit-test', description: 'd', specPath: 'tests', sourceFindingId: 'f1' } });
+    await assert.rejects(() => recordRegressionSpecCmd(ctx), /not a regular file/);
+  });
+
+  it('accepts a unit-test row whose file really exists', async () => {
+    const ctx = makeCtx({ payload: { sourceKind: 'unit-test', description: 'd', specPath: REAL_SPEC, sourceFindingId: 'f1' } });
     const out = await recordRegressionSpecCmd(ctx);
-    assert.equal(out.ok, true, 'tooling may legitimately record the intent before the file is saved');
+    assert.equal(out.ok, true);
+  });
+
+  // ── The directions that must NOT fire ────────────────────────────────────
+  // A false refusal is silent in the other direction: tooling that legitimately records
+  // the intent before writing the spec would start failing, at ship time, for everyone.
+
+  it('a deferred-write kind still accepts a path that does not resolve', async () => {
+    // /ux-lock, plan-verify and manual runs write the spec AFTER recording the intent to,
+    // so for them a missing path is not yet a defect — the half of the original reasoning
+    // that survived. The read-side report above surfaces a real typo one ship later.
+    for (const sourceKind of ['ux-lock', 'plan-verify', 'manual', 'audit-code-fix']) {
+      const ctx = makeCtx({ payload: { sourceKind, description: 'pins a thing', specPath: GONE_SPEC } });
+      const out = await recordRegressionSpecCmd(ctx);
+      assert.equal(out.ok, true, `${sourceKind} must not be probed`);
+    }
+  });
+
+  it('the two kinds the reverted attempt broke are named explicitly', async () => {
+    // Asserted BY KIND rather than by re-running those suites, so that if either fixture
+    // is ever re-captured with a different sourceKind this states what changed. The
+    // golden-envelope capture uses `audit-loop-fix`; the write-outcome fixture `ux-lock`.
+    for (const sourceKind of ['audit-loop-fix', 'ux-lock']) {
+      const ctx = makeCtx({ payload: { sourceKind, description: 'd', specPath: 'tests/x.spec.ts' } });
+      const out = await recordRegressionSpecCmd(ctx);
+      assert.equal(out.ok, true, `the ${sourceKind} fixture path must stay unprobed`);
+    }
   });
 
   it('still refuses an ABSENT specPath — presence was always the contract here', async () => {
@@ -131,19 +193,20 @@ describe('record-regression-spec does NOT probe the filesystem — and that is t
     await assert.rejects(() => recordRegressionSpecCmd(ctx), /specPath is required/);
   });
 
-  it('cloud-off degrades rather than probing anything — the regression that was caught', async () => {
-    // The specific break: a check placed before this early return turned a supported mode
-    // into a refusal. Cloud-off writes nothing, so there is nothing for a probe to protect.
-    const ctx = makeCtx({ cloud: false, payload: { sourceKind: 'unit-test', description: 'x', specPath: GONE_SPEC } });
+  it('cloud off degrades WITHOUT probing, even for unit-test — the placement regression', async () => {
+    // The specific break in the reverted attempt: a check placed before this early return
+    // turned a supported mode into a refusal. Cloud-off writes nothing, so there is
+    // nothing for a probe to protect. This is the negative control for PLACEMENT, and it
+    // must use the one kind that IS probed or it proves nothing.
+    const ctx = makeCtx({ cloud: false, payload: { sourceKind: 'unit-test', description: 'x', specPath: GONE_SPEC, sourceFindingId: 'f1' } });
     const out = await recordRegressionSpecCmd(ctx);
     assert.equal(out.ok, true);
     assert.equal(out.cloud, false);
   });
 
-  it('lock-with-test KEEPS its own existence check — the two verbs differ on purpose', async () => {
-    // The interactive verb a human aims at one finding, where refusing a typo immediately
-    // is worth the friction. Asserted on the source so the asymmetry is deliberate rather
-    // than an accident nobody noticed.
+  it('lock-with-test KEEPS its own existence check — the verbs now agree on unit-test', async () => {
+    // The interactive verb a human aims at one finding. Asserted on the source so the
+    // shared contract stays deliberate rather than an accident nobody noticed.
     const src = fs.readFileSync(
       path.join(REPO_ROOT, 'scripts/lib/cross-skill/commands/ship.mjs'), 'utf-8');
     const lockFn = src.slice(src.indexOf('export async function lockWithTestCmd'));
