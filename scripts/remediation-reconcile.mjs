@@ -103,11 +103,27 @@ async function main() {
   const grouped = groupByFile(needsLlmCheck).slice(0, cap);
   const notExamined = groupByFile(needsLlmCheck).length - grouped.length;
 
+  // `skipped` carries a distinct `reason` per row and the summary used to sum
+  // all of them into one number labelled `unchanged/unresolvable`. That is where
+  // the case-comparison defect above was invisible for 20 days in the reporting
+  // consumer: "the throttle is working" and "this row can never be measured" are
+  // opposite claims and must not share a count.
+  const countReason = (r) => skipped.filter((s) => s.reason === r).length;
+  const unchanged = countReason('unchanged-since-last-check');
+  const notTracked = countReason('path-not-tracked');
+  const commitUnresolvable = countReason('commit-unresolvable');
+  const noFileOrCommit = countReason('missing-primary-file-or-commit');
+  const coverageHoles = notTracked + commitUnresolvable + noFileOrCommit + unresolvablePathSkipped.length;
+
   log(`${B}remediation-reconcile${X} — ${repo.name}: ${eligible} eligible (fetched ${rows.length}), `
     + `${mechanicallyResolved.length} mechanically resolved, ${grouped.length} file(s) to verify `
-    + `(${sensitivePathSkipped.length} sensitive-path skipped, `
-    + `${unresolvablePathSkipped.length} no-file-to-diff, ${skipped.length} unchanged/unresolvable), `
+    + `(${sensitivePathSkipped.length} sensitive-path skipped, ${unchanged} unchanged since last check), `
     + `${apply ? Y + 'APPLY' + X : Y + 'DRY-RUN' + X}`);
+  if (coverageHoles > 0) {
+    log(`  ${Y}${coverageHoles} row(s) this tool cannot measure${X} — `
+      + `${unresolvablePathSkipped.length} no-file-to-diff, ${notTracked} path-not-tracked, `
+      + `${commitUnresolvable} commit-unresolvable, ${noFileOrCommit} missing-primary-file-or-commit`);
+  }
   if (notExamined > 0) log(`  ${Y}${notExamined} more changed file(s) NOT examined this run${X} — raise --cap or re-run (never-checked-first order makes progress across runs)`);
 
   const actions = mechanicallyResolved.map((row) => mechanicalResolvedAction(row, headSha.sha));
@@ -151,7 +167,9 @@ async function main() {
       ok: true, cloud: true, applied: false, repo: repo.name, eligible, examined: grouped.length, notExamined,
       resolved: resolvedCount, stillPresent: stillPresentCount, uncertain: uncertainCount,
       mechanicallyResolved: mechanicallyResolved.length, sensitivePathSkipped: sensitivePathSkipped.length,
-    unresolvablePathSkipped: unresolvablePathSkipped.length,
+      unresolvablePathSkipped: unresolvablePathSkipped.length,
+      unchanged, pathNotTracked: notTracked, commitUnresolvable, missingPrimaryFileOrCommit: noFileOrCommit,
+      coverageHoles,
       providerFailures, skippedNoCredential,
     });
     console.log(`\n${Y}DRY-RUN${X} — no findings written. Re-run with ${B}--apply${X} to project ${actions.length} verdict(s).`);
@@ -165,6 +183,8 @@ async function main() {
     resolved: resolvedCount, stillPresent: stillPresentCount, uncertain: uncertainCount,
     mechanicallyResolved: mechanicallyResolved.length, sensitivePathSkipped: sensitivePathSkipped.length,
     unresolvablePathSkipped: unresolvablePathSkipped.length,
+    unchanged, pathNotTracked: notTracked, commitUnresolvable, missingPrimaryFileOrCommit: noFileOrCommit,
+    coverageHoles,
     providerFailures, skippedNoCredential, updated, attempted,
   });
 }

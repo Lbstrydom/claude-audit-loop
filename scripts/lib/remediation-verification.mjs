@@ -42,7 +42,7 @@ export function effectiveSinceCommit(row) {
  * @param {object[]} rows - shape from getStaleAcceptedFindingsForVerification
  *   (audit_finding_id, primary_file, detail_snapshot, category, severity,
  *   finding_fingerprint, accepted_at_commit, remediation_last_checked_commit)
- * @param {(file: string, sinceCommit: string) => 'changed'|'unchanged'|'deleted'|'unknown'} fileState
+ * @param {(file: string, sinceCommit: string) => 'changed'|'unchanged'|'deleted'|'untracked'|'unknown'} fileState
  * @param {(file: string) => boolean} [isSensitivePath] - classifies `primary_file`
  *   BEFORE any git/LLM work is attempted on it; defaults to "never sensitive"
  *   only for callers that supply their own gate — production wiring always
@@ -119,6 +119,13 @@ export function selectFindingsNeedingCheck(rows, fileState, isSensitivePath = ()
     if (state === 'deleted') { mechanicallyResolved.push(row); continue; }
     if (state === 'changed') { needsLlmCheck.push(row); continue; }
     if (state === 'unchanged') { skipped.push({ row, reason: 'unchanged-since-last-check' }); continue; }
+    // NOT folded into `unchanged`. `git diff <commit>` is structurally silent
+    // about a path git does not track, so "this file did not change" is a claim
+    // the instrument never made — the same fail-quiet shape as f8d2730f, where a
+    // bucket swallowed the population the feature exists to serve. A row parked
+    // here is a permanent coverage hole, not a throttle working as designed, and
+    // it must be countable as such.
+    if (state === 'untracked') { skipped.push({ row, reason: 'path-not-tracked' }); continue; }
     skipped.push({ row, reason: 'commit-unresolvable' });
   }
   return { needsLlmCheck, mechanicallyResolved, sensitivePathSkipped, unresolvablePathSkipped, skipped };
@@ -142,31 +149,104 @@ export function groupByFile(findings) {
 // ── The impure git adapter ────────────────────────────────────────────────
 
 /**
- * Build a memoised `(file, sinceCommit) => 'changed'|'unchanged'|'deleted'|'unknown'`
+ * The ONE spelling both sides of this module's path comparisons are reduced to.
+ *
+ * `scripts/lib/sync-owned-sidecar.mjs` states the same rule for the ownership
+ * sidecar (`comparisonKey`, and the artifact itself declares
+ * `"comparison": "case-insensitive"`). It is deliberately NOT imported here:
+ * that module is not in the consumer sync manifest, so importing it would drag
+ * sync-authoring internals into every consumer bundle for a one-line fold. The
+ * rule is shared; the distribution closures are not.
+ *
+ * @param {string} p
+ * @returns {string}
+ */
+function pathComparisonKey(p) {
+  return String(p).replaceAll('\\', '/').replace(/^\.\//, '').toLowerCase();
+}
+
+/**
+ * Index one `gitDiffWithWorkingTree` result by path, once per distinct
+ * `sinceCommit`, so the per-row lookup is O(1) rather than four array scans.
+ *
+ * Insertion order encodes the precedence the linear form had: added/modified,
+ * then renamed, then deleted LAST so it wins. `untracked` is indexed too — see
+ * that state's note in the caller.
+ */
+function indexDiffByPath(diff) {
+  const exact = new Map();
+  const folded = new Map();
+  const put = (p, state) => {
+    if (typeof p !== 'string' || p === '') return;
+    exact.set(p, state);
+    folded.set(pathComparisonKey(p), state);
+  };
+  for (const p of diff.untracked || []) put(p, 'untracked');
+  for (const p of diff.added || []) put(p, 'changed');
+  for (const p of diff.modified || []) put(p, 'changed');
+  for (const r of diff.renamed || []) { put(r.from, 'changed'); put(r.to, 'changed'); }
+  for (const p of diff.deleted || []) put(p, 'deleted');
+  return { exact, folded };
+}
+
+/**
+ * Build a memoised
+ * `(file, sinceCommit) => 'changed'|'unchanged'|'deleted'|'untracked'|'unknown'`
  * predicate for `selectFindingsNeedingCheck`. One `git diff --name-status`
  * subprocess call per DISTINCT `sinceCommit` seen (findings sharing an
  * acceptance commit — the common case, since many stuck findings come from
  * one run — never re-pay the git call).
  *
+ * **The comparison is case-insensitive, and that is the whole point.** Upstream
+ * report (Lbstrydom/wine-cellar-app, 2026-09-07). `audit_findings.primary_file`
+ * is written through `normalizePath`, whose last operation is `.toLowerCase()`
+ * — it is a MATCHING key (AGENTS.md §Accepted Technical Debt), lossy by design.
+ * `git diff --name-status` emits REAL-CASED paths on every platform, and git's
+ * pathspec matching is case-sensitive even on a case-insensitive filesystem. So
+ * the raw `String === String` this used to do could never match a stored path
+ * whose real spelling carries an uppercase letter: the reconciler bucketed every
+ * such row as "unchanged", never examined it, never stamped
+ * `remediation_last_checked_at`, and exited `ok`. In a camelCase/PascalCase
+ * codebase that is most of the repo. Reproduced HERE, on Windows — where the
+ * filesystem's own case-insensitivity is irrelevant, because the defect is in a
+ * string compare: against `HEAD~3`, `AGENTS.md` answered `changed` and
+ * `agents.md` answered `unchanged`.
+ *
+ * Fixed at the READER, never at `normalizePath`: that fold is the
+ * dedup/fingerprint key shared by `ledger.mjs`, `findings-pipeline.mjs` and
+ * `semantic-suppression.mjs`, so unfolding it there would move the bug rather
+ * than remove it. `displayPathOf` (7cc1a47a) fixed the WRITE side going forward;
+ * this fixes every row already stored, which is the population the reconciler
+ * exists to serve.
+ *
+ * EXACT match wins before the folded fallback, so a repo that genuinely tracks
+ * two paths differing only in case still answers precisely for both. Only when
+ * nothing matches exactly does the fold decide, and its worst case — attributing
+ * a sibling's change to the wrong spelling — routes the row to an LLM check that
+ * defaults to `uncertain`. That is the safe direction: it can over-examine, never
+ * emit a false `resolved`.
+ *
  * @param {string} repoRoot
- * @returns {(file: string, sinceCommit: string) => 'changed'|'unchanged'|'deleted'|'unknown'}
+ * @returns {(file: string, sinceCommit: string) => 'changed'|'unchanged'|'deleted'|'untracked'|'unknown'}
  */
 export function buildFileChangeStateFn(repoRoot) {
-  const cache = new Map(); // sinceCommit -> DiffShape | null
+  const cache = new Map(); // sinceCommit -> {exact, folded} | null
   return (file, sinceCommit) => {
     if (!isSafeGitRevision(sinceCommit)) return 'unknown';
-    let diff = cache.get(sinceCommit);
-    if (diff === undefined) {
+    let index = cache.get(sinceCommit);
+    if (index === undefined) {
       const res = gitDiffWithWorkingTree(repoRoot, sinceCommit);
-      diff = res.ok ? res.files : null;
-      cache.set(sinceCommit, diff);
+      index = res.ok ? indexDiffByPath(res.files) : null;
+      cache.set(sinceCommit, index);
     }
-    if (!diff) return 'unknown';
-    const normalised = String(file).replace(/\\/g, '/');
-    if (diff.deleted.includes(normalised)) return 'deleted';
-    if (diff.renamed.some((r) => r.to === normalised || r.from === normalised)) return 'changed';
-    if (diff.modified.includes(normalised) || diff.added.includes(normalised)) return 'changed';
-    return 'unchanged';
+    if (!index) return 'unknown';
+    const normalised = String(file).replaceAll('\\', '/');
+    const hit = index.exact.get(normalised) ?? index.folded.get(pathComparisonKey(normalised));
+    // Absence from a READABLE diff is a true "did not change since sinceCommit"
+    // — for a path git tracks. `untracked` is separated above because for such a
+    // path `git diff <commit>` is structurally silent, so "unchanged" would be a
+    // claim this instrument never made.
+    return hit ?? 'unchanged';
   };
 }
 

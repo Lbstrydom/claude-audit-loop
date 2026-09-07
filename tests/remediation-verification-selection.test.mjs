@@ -5,14 +5,18 @@
  * interaction is injected, so this suite never touches a subprocess or a
  * network call (Tier 1: deterministic seam).
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import cp from 'node:child_process';
 import {
   effectiveSinceCommit, selectFindingsNeedingCheck, groupByFile,
   normaliseVerificationVerdicts, planWriteActions, mechanicalResolvedAction,
   VerificationVerdictSchema,
   buildPathSkipClassifier, PATH_SKIP_SENSITIVE, PATH_SKIP_UNRESOLVABLE,
+  buildFileChangeStateFn,
 } from '../scripts/lib/remediation-verification.mjs';
 
 /** The real repo root — these classify with the REAL oracle, not a fake that begs the question. */
@@ -341,4 +345,125 @@ test('WIRING PIN: the CLI reports the two counts separately', async () => {
   assert.match(src, /unresolvablePathSkipped\.length/, 'the new count must reach the summary line');
   assert.equal((src.match(/unresolvablePathSkipped: unresolvablePathSkipped\.length/g) || []).length, 2,
     'both the dry-run and the apply JSON payloads must carry it');
+});
+
+// ── buildFileChangeStateFn — the git-facing half (upstream case-comparison bug) ──
+//
+// These are the ONLY tests in this suite that let the real subprocess run, and that
+// is deliberate: every test above injects a fake `fileState`, so the function that
+// actually crossed back into git had NO coverage at all. A fixture that lowercases
+// both sides of the comparison is green before the fix and green after it — the
+// asymmetry (real-cased git output vs a lowercased stored `primary_file`) IS the
+// defect, so each case below builds a throwaway repo containing a genuinely
+// mixed-case tracked path.
+
+/** A disposable git repo with one mixed-case file, committed then modified. */
+function makeCaseRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'remediation-case-'));
+  const run = (...args) => cp.execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  run('init', '-q');
+  run('config', 'user.email', 'test@example.invalid');
+  run('config', 'user.name', 'Test');
+  run('config', 'commit.gpgsign', 'false');
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'someModule.js'), 'export const a = 1;\n');
+  fs.writeFileSync(path.join(dir, 'src', 'plain.js'), 'export const b = 1;\n');
+  run('add', '-A');
+  run('commit', '-q', '-m', 'base');
+  const base = cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf-8' }).trim();
+  fs.writeFileSync(path.join(dir, 'src', 'someModule.js'), 'export const a = 2;\n');
+  return { dir, base };
+}
+
+const caseRepos = [];
+after(() => {
+  for (const d of caseRepos) fs.rmSync(d, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+});
+
+test('a LOWERCASED stored primary_file matches a real-cased changed file — the reported defect', () => {
+  const { dir, base } = makeCaseRepo();
+  caseRepos.push(dir);
+  const fileState = buildFileChangeStateFn(dir);
+  // Real-cased: worked before the fix too. Pinned so the fix cannot regress it.
+  assert.equal(fileState('src/someModule.js', base), 'changed');
+  // Lowercased — the shape `normalizePath` actually stores. This returned
+  // 'unchanged' before the fix, which is why two HIGH findings sat at `planned`
+  // for 20 days while their file had demonstrably been rewritten.
+  assert.equal(fileState('src/somemodule.js', base), 'changed',
+    'a stored (lowercased) primary_file must match the real-cased path git reports');
+});
+
+test('NEGATIVE CONTROL: a file that genuinely did not change is still unchanged, in either case', () => {
+  // The direction the fix must NOT fire. A case-insensitive lookup that answered
+  // 'changed' for everything would pass the test above and destroy the throttle.
+  const { dir, base } = makeCaseRepo();
+  caseRepos.push(dir);
+  const fileState = buildFileChangeStateFn(dir);
+  assert.equal(fileState('src/plain.js', base), 'unchanged');
+  assert.equal(fileState('SRC/PLAIN.JS', base), 'unchanged');
+});
+
+test('a DELETED real-cased file resolves mechanically from its lowercased stored path', () => {
+  const { dir, base } = makeCaseRepo();
+  caseRepos.push(dir);
+  fs.rmSync(path.join(dir, 'src', 'someModule.js'), { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  const fileState = buildFileChangeStateFn(dir);
+  assert.equal(fileState('src/somemodule.js', base), 'deleted',
+    'the mechanical-resolution route must not be case-gated either');
+});
+
+test('EXACT case wins over the folded fallback when a repo tracks both spellings', (t) => {
+  // Only reachable on a case-sensitive filesystem; skipped elsewhere rather than
+  // asserted vacuously.
+  const { dir, base } = makeCaseRepo();
+  caseRepos.push(dir);
+  let bothExist = false;
+  try {
+    fs.writeFileSync(path.join(dir, 'src', 'somemodule.js'), 'export const c = 1;\n');
+    bothExist = fs.readFileSync(path.join(dir, 'src', 'someModule.js'), 'utf-8').includes('a = 2');
+  } catch { bothExist = false; }
+  // Declared as a SKIP, never a silent early return: on a case-insensitive
+  // filesystem the two names are one file, so the premise does not exist here and
+  // a green would mean nothing was checked.
+  if (!bothExist) { t.skip('case-insensitive filesystem — two case-variant paths cannot coexist'); return; }
+  cp.execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'pipe' });
+  const fileState = buildFileChangeStateFn(dir);
+  assert.equal(fileState('src/someModule.js', base), 'changed');
+  assert.equal(fileState('src/somemodule.js', base), 'changed');
+});
+
+test('an UNTRACKED path is not reported as unchanged — git diff never speaks about it', () => {
+  const { dir, base } = makeCaseRepo();
+  caseRepos.push(dir);
+  fs.writeFileSync(path.join(dir, 'src', 'Newcomer.js'), 'export const d = 1;\n');
+  const fileState = buildFileChangeStateFn(dir);
+  assert.equal(fileState('src/newcomer.js', base), 'untracked',
+    '"unchanged" would be a claim this instrument never made');
+});
+
+test('selectFindingsNeedingCheck buckets an untracked path as a coverage hole, never as unchanged', () => {
+  const rows = [{ primary_file: 'src/newcomer.js', accepted_at_commit: 'c1', finding_fingerprint: 'fp1' }];
+  const { skipped, needsLlmCheck, mechanicallyResolved } =
+    selectFindingsNeedingCheck(rows, () => 'untracked');
+  assert.deepEqual(needsLlmCheck, []);
+  assert.deepEqual(mechanicallyResolved, []);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].reason, 'path-not-tracked',
+    'must not share the `unchanged-since-last-check` reason — they are opposite claims');
+});
+
+test('WIRING PIN: the CLI splits the skip reasons instead of summing them', async () => {
+  // The operator-facing half, same shape as the pin above. Fixing the comparison and
+  // then printing one `unchanged/unresolvable` number would leave the next instance of
+  // this class exactly as invisible as this one was.
+  const src = fs.readFileSync(path.join(import.meta.dirname, '../scripts/remediation-reconcile.mjs'), 'utf-8');
+  // Anchored to the EMITTED label (`${...} unchanged/unresolvable`), not the bare
+  // words: the file's own comment quotes the old wording to explain the fix, and an
+  // assertion that cannot tell prose from output is the vacuous kind.
+  assert.ok(!/\$\{[^}]*\}\s*unchanged\/unresolvable/.test(src),
+    'the fused label is the defect — "the throttle worked" and "unmeasurable" must not share a count');
+  for (const reason of ['unchanged-since-last-check', 'path-not-tracked', 'commit-unresolvable', 'missing-primary-file-or-commit']) {
+    assert.match(src, new RegExp(reason.replace(/[-]/g, '-')), `the summary must account for ${reason} separately`);
+  }
+  assert.match(src, /coverageHoles/, 'the unmeasurable population needs its own name in the envelope');
 });
