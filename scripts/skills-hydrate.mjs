@@ -71,6 +71,30 @@ const KNOWN_FLAGS = ['--json', '--from'];
 export const SOURCE_ENV_VAR = 'SKILLS_SOURCE';
 /** The one directory this hydrates — the synced consumer tooling tree. */
 export const SYNCED_TOOLING_DIR = 'scripts/.claude-skills';
+/**
+ * The tooling tree's STAMP, and the second thing hydration must carry.
+ *
+ * `scripts/.sync-manifest.json` is a SIBLING of the tooling directory,
+ * gitignored by the same rule that makes hydration necessary in the first
+ * place — so a hydrator that thinks in terms of "the tooling tree" copies the
+ * code and leaves the provenance behind. Every hydrated worktree then ran with
+ * `readBundleStamp` returning null: upstream reports filed as
+ * "version unknown (no-stamp)", `lib/doctor/probes.mjs` unable to run its
+ * orphan or staleness probe, and `check-audit-tool-version` /
+ * `npm-script-enumerator` / `remove-legacy-synced` blind with it. Reported by
+ * a consumer 2026-09-07 (upstream 5bc7ff30) whose own hand-rolled hydrator had
+ * made the identical omission independently — the split is easy to miss, not
+ * something one consumer got wrong.
+ *
+ * Deliberately a local literal rather than an import of
+ * `lib/sync-manifest.mjs`'s `MANIFEST_RELATIVE_PATH`: this script must run in a
+ * freshly-added worktree, which is exactly the tree that may not have
+ * `node_modules` yet, and that module pulls in `zod`. Hydration crashing on a
+ * missing dependency would break the one command that has to work first.
+ * Agreement is enforced instead by `tests/skills-hydrate.test.mjs`, which
+ * imports both and compares them — N copies stay legal, disagreement does not.
+ */
+export const SYNCED_MANIFEST_PATH = 'scripts/.sync-manifest.json';
 /** This bundle's own package name; here the tooling is tracked, not synced. */
 const SOURCE_REPO_NAME = 'claude-engineering-skills';
 /** The argv `displayDlx` renders, and the npm-dialect fallback for a pure caller. */
@@ -111,11 +135,13 @@ export function resolveMainWorktree(run) {
  * @param {string|null} facts.mainWorktree - resolved main checkout, or null
  * @param {string|null} facts.packageName - `package.json.name` of the cwd repo
  * @param {boolean} facts.sourceExists - does the tooling tree exist in main?
- * @returns {{action:'copy'|'noop'|'fail', code:string, message:string, from?:string, to?:string}}
+ * @param {boolean} [facts.manifestExists] - does the sync manifest exist in main?
+ * @returns {{action:'copy'|'noop'|'fail', code:string, message:string, from?:string, to?:string,
+ *   items?: Array<{rel:string, from:string, to:string, present:boolean, recursive:boolean}>}}
  */
 export function planHydration({
-  cwd, mainWorktree, packageName, sourceExists, explicitSource = null,
-  installCommand = null,
+  cwd, mainWorktree, packageName, sourceExists, manifestExists = false,
+  explicitSource = null, installCommand = null,
 }) {
   // The remedy must be spelled in the reader's OWN package manager. It was
   // hardcoded to `npx`, and the consumer it was written for runs pnpm (audit
@@ -180,7 +206,30 @@ export function planHydration({
       to: dest,
     };
   }
-  return { action: 'copy', code: 'hydrated', message: `[hydrate] copied ${src}`, from: src, to: dest };
+  // Two items, not one. `from`/`to` stay pointed at the tooling tree for every
+  // existing caller; `items` is what the copier and the reporter iterate, so a
+  // third asset later is one array entry rather than a second code path.
+  const items = [
+    { rel: SYNCED_TOOLING_DIR, from: src, to: dest, present: true, recursive: true },
+    {
+      rel: SYNCED_MANIFEST_PATH,
+      from: path.resolve(base, SYNCED_MANIFEST_PATH),
+      to: path.resolve(cwd, SYNCED_MANIFEST_PATH),
+      present: manifestExists,
+      recursive: false,
+    },
+  ];
+  const copied = items.filter((i) => i.present);
+  // PARTIAL hydration must be visible on the line an operator actually reads.
+  // The old single-item report said "copied <path>" and exited 0 with the stamp
+  // silently absent; the nulls only showed up in --json, beside an `ok: true`.
+  const message = copied.length === items.length
+    ? `[hydrate] copied ${copied.length}/${items.length} items from ${base}: ${items.map((i) => i.rel).join(', ')}`
+    : `[hydrate] copied ${copied.length}/${items.length} items from ${base}: ${copied.map((i) => i.rel).join(', ')} `
+      + `— but NOT ${items.filter((i) => !i.present).map((i) => i.rel).join(', ')} (absent there). `
+      + 'This tree has NO bundle stamp: upstream reports file as "version unknown", and the doctor cannot run its '
+      + 'orphan or staleness probe. Re-sync the main checkout to produce the manifest.';
+  return { action: 'copy', code: 'hydrated', message, from: src, to: dest, items };
 }
 
 /**
@@ -253,11 +302,14 @@ function main() {
   const base = explicitSource ?? mainWorktree;
   const src = base ? path.resolve(base, SYNCED_TOOLING_DIR) : null;
 
+  const manifestSrc = base ? path.resolve(base, SYNCED_MANIFEST_PATH) : null;
+
   const plan = planHydration({
     cwd,
     mainWorktree,
     packageName: readPackageName(cwd),
     sourceExists: src ? fs.existsSync(src) : false,
+    manifestExists: manifestSrc ? fs.existsSync(manifestSrc) : false,
     explicitSource,
     // Resolved HERE, not inside the pure planner: detection reads the
     // filesystem, and a two-lockfile repo is deliberately left ambiguous by
@@ -266,7 +318,14 @@ function main() {
   });
 
   if (plan.action === 'copy') {
-    fs.cpSync(plan.from, plan.to, { recursive: true });
+    for (const item of plan.items) {
+      if (!item.present) continue;
+      if (item.recursive) fs.cpSync(item.from, item.to, { recursive: true });
+      else {
+        fs.mkdirSync(path.dirname(item.to), { recursive: true });
+        fs.copyFileSync(item.from, item.to);
+      }
+    }
   }
   if (asJson) {
     console.log(JSON.stringify({ ok: plan.action !== 'fail', ...plan }));

@@ -17,12 +17,14 @@ import path from 'node:path';
 
 import {
   planHydration, resolveMainWorktree, resolveExplicitSource,
-  SYNCED_TOOLING_DIR, SOURCE_ENV_VAR, INSTALL_ARGV, DEFAULT_INSTALL_COMMAND,
+  SYNCED_TOOLING_DIR, SYNCED_MANIFEST_PATH, SOURCE_ENV_VAR, INSTALL_ARGV, DEFAULT_INSTALL_COMMAND,
 } from '../scripts/skills-hydrate.mjs';
 import { displayDlx } from '../scripts/lib/package-manager.mjs';
+import { MANIFEST_RELATIVE_PATH } from '../scripts/lib/sync-manifest.mjs';
 import {
   markerNamedNpmScripts, checkMarkerRemedies, checkDocumentedRecipes,
-  MARKER_BLOCK, MAIN_CHECKOUT_PATH_RECIPE, CONSUMER_HYDRATE_NPM_SCRIPT,
+  MARKER_BLOCK, PENDING_NOTE_READ_RECIPE, PENDING_NOTE_WRITE_RECIPE,
+  CONSUMER_HYDRATE_NPM_SCRIPT,
 } from '../scripts/lib/worktree-preflight.mjs';
 
 const MAIN = path.resolve('/repo');
@@ -155,6 +157,43 @@ describe('planHydration — every branch, without touching a filesystem', () => 
     assert.equal(p.to, path.resolve(WORKTREE, SYNCED_TOOLING_DIR));
   });
 
+  it('THE STAMP TRAVELS WITH THE TREE: the manifest is a second copied item', () => {
+    // upstream 5bc7ff30 — hydration copied the tooling and left the provenance
+    // behind, so every hydrated worktree ran with readBundleStamp() === null:
+    // upstream reports filed as "version unknown", doctor probes unable to run.
+    const p = planHydration({
+      cwd: WORKTREE, mainWorktree: MAIN, packageName: 'some-consumer',
+      sourceExists: true, manifestExists: true,
+    });
+    assert.deepEqual(p.items.map((i) => i.rel), [SYNCED_TOOLING_DIR, SYNCED_MANIFEST_PATH]);
+    assert.ok(p.items.every((i) => i.present));
+    assert.equal(p.items[1].from, path.resolve(MAIN, SYNCED_MANIFEST_PATH));
+    assert.equal(p.items[1].to, path.resolve(WORKTREE, SYNCED_MANIFEST_PATH));
+    assert.equal(p.items[1].recursive, false, 'the manifest is a FILE, not a tree');
+    assert.match(p.message, /2\/2 items/);
+  });
+
+  it('PARTIAL hydration says so on the line an operator reads', () => {
+    // The failure this replaces was silent: "copied <path>", exit 0, and the
+    // absent stamp visible only as a null inside --json.
+    const p = planHydration({
+      cwd: WORKTREE, mainWorktree: MAIN, packageName: 'some-consumer',
+      sourceExists: true, manifestExists: false,
+    });
+    assert.equal(p.action, 'copy', 'a missing stamp does not block the tooling copy');
+    assert.equal(p.items[1].present, false);
+    assert.match(p.message, /1\/2 items/);
+    assert.match(p.message, /NO bundle stamp/);
+    assert.match(p.message, new RegExp(SYNCED_MANIFEST_PATH.replace('.', '\\.')));
+  });
+
+  it('the manifest path agrees with sync-manifest.mjs — N copies legal, drift not', () => {
+    // skills-hydrate keeps a local literal on purpose: it must run in a tree
+    // that may have no node_modules, and sync-manifest.mjs pulls in zod. The
+    // agreement is enforced here instead, where both are importable.
+    assert.equal(SYNCED_MANIFEST_PATH, MANIFEST_RELATIVE_PATH);
+  });
+
   it('fails rather than guessing when git cannot answer', () => {
     const p = planHydration({
       cwd: WORKTREE, mainWorktree: null, packageName: 'some-consumer', sourceExists: false,
@@ -211,6 +250,19 @@ describe('checkMarkerRemedies — the gate on the gate', () => {
 describe('checkDocumentedRecipes — N copies legal, disagreement not', () => {
   const ROOT = path.resolve(import.meta.dirname, '..');
 
+  it('the WRITE recipe is pinned too, not just the read one', () => {
+    // Both halves of the handoff are commands now; pinning only one would let
+    // the writer drift from the reader again, which is the class this gate owns.
+    const r = checkDocumentedRecipes('/x', {
+      readFile: (p) => (p.includes('SKILL.md')
+        ? `${PENDING_NOTE_READ_RECIPE}\n${PENDING_NOTE_WRITE_RECIPE}`
+        : CONSUMER_HYDRATE_NPM_SCRIPT),
+    });
+    assert.equal(r.ok, true);
+    // 2 SKILL.md lines + the hydrate one-liner the mock returns for the runbook.
+    assert.equal(r.checked, 3);
+  });
+
   it('THE REAL REPO: every documented copy matches its canonical constant', () => {
     const r = checkDocumentedRecipes(ROOT);
     assert.equal(r.ok, true, `drifted: ${JSON.stringify(r.mismatches)}`);
@@ -221,7 +273,7 @@ describe('checkDocumentedRecipes — N copies legal, disagreement not', () => {
 
   it('accepts the SAME recipe appearing many times — copies are not the defect', () => {
     const many = [
-      'blah', MAIN_CHECKOUT_PATH_RECIPE, 'text', `> ${MAIN_CHECKOUT_PATH_RECIPE}`, 'more',
+      'blah', PENDING_NOTE_READ_RECIPE, 'text', `> ${PENDING_NOTE_READ_RECIPE}`, 'more',
     ].join('\n');
     const r = checkDocumentedRecipes('/x', {
       readFile: (p) => (p.includes('SKILL.md') ? many : CONSUMER_HYDRATE_NPM_SCRIPT),
@@ -231,10 +283,11 @@ describe('checkDocumentedRecipes — N copies legal, disagreement not', () => {
   });
 
   it('THE DIRECTION THAT MUST FIRE: one drifted copy fails, and is located', () => {
-    const drifted = MAIN_CHECKOUT_PATH_RECIPE.replace('pending.md', 'DRIFTED.md');
+    const drifted = PENDING_NOTE_READ_RECIPE.replace('pending-note read', 'pending-note read --all');
+    assert.notEqual(drifted, PENDING_NOTE_READ_RECIPE, 'the drifted copy must actually differ');
     const r = checkDocumentedRecipes('/x', {
       readFile: (p) => (p.includes('SKILL.md')
-        ? `${MAIN_CHECKOUT_PATH_RECIPE}\n${drifted}`
+        ? `${PENDING_NOTE_READ_RECIPE}\n${drifted}`
         : CONSUMER_HYDRATE_NPM_SCRIPT),
     });
     assert.equal(r.ok, false);
@@ -245,7 +298,7 @@ describe('checkDocumentedRecipes — N copies legal, disagreement not', () => {
   it('strips only the blockquote marker, which is formatting rather than meaning', () => {
     const r = checkDocumentedRecipes('/x', {
       readFile: (p) => (p.includes('SKILL.md')
-        ? `> ${MAIN_CHECKOUT_PATH_RECIPE}`
+        ? `> ${PENDING_NOTE_READ_RECIPE}`
         : CONSUMER_HYDRATE_NPM_SCRIPT),
     });
     assert.equal(r.ok, true);
@@ -256,7 +309,7 @@ describe('checkDocumentedRecipes — N copies legal, disagreement not', () => {
       readFile: () => { throw new Error('ENOENT'); },
     });
     assert.equal(r.ok, false);
-    assert.equal(r.mismatches.length, 2, 'both subject docs reported');
+    assert.equal(r.mismatches.length, 3, 'every subject doc reported');
   });
 });
 

@@ -49,8 +49,17 @@ const MARKER_RE = /selector-policy:\s*structural(?:\s*[—–-]+\s*(\S[^\n]*))?/
 /** Semantic attribute allowlist — the only attributes a clean locator() string may target. */
 const SEMANTIC_ATTR_RE = /^(?:data-testid|data-engine-claim|role|aria-[\w-]+)$/i;
 
-/** Import specifiers always allowed regardless of shape. */
-const IMPORT_PKG_ALLOW = new Set(['@playwright/test', 'axe-core', '@axe-core/playwright']);
+/**
+ * Import specifiers always allowed regardless of shape.
+ *
+ * Exported because these are also the packages a consumer must INSTALL to run
+ * the specs `/ux-lock` generates — `generate-bundle-deps.mjs` reads this set so
+ * that list is derived here rather than restated there. They are deliberately
+ * NOT part of the bundle's own import graph: nothing in the bundle imports
+ * them, so declaring them as bundle imports would be a false claim (the same
+ * reason `@playwright/test` was dropped from OPTIONAL_DEPS on 2026-08-11).
+ */
+export const IMPORT_PKG_ALLOW = new Set(['@playwright/test', 'axe-core', '@axe-core/playwright']);
 
 /** Alias-like prefixes that usually map into app source (distinguishable from npm scopes: '@/x' has '/' right after '@'). */
 const DEFAULT_ALIAS_PREFIXES = ['~/', '@/'];

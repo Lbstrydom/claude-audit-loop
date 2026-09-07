@@ -236,6 +236,11 @@ export async function upstreamCmd(ctx) {
         recordFn: (p) => ctx.deps.recordUpstreamIssue(p),
       });
       if (!res.ok) throw new CommandError(res.code || 'BAD_INPUT', res.errors.join('; '), { errors: res.errors });
+      // Same reason the reconcile --gate notices below go to stderr: a caveat
+      // that only appears as a null inside the JSON envelope is not a signal
+      // an operator reads.
+      for (const w of res.warnings || []) process.stderr.write(`  [upstream] ${w}
+`);
       return { ...res, drain };
     }
 

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "gate": "bundle:deps:check",
+  "guards": "scripts/lib/bundle-deps.json (Category B) — every npm package the synced bundle imports",
+  "gates": [
+    {
+      "id": "bundle-deps-check-compares-the-derived-set",
+      "kind": "executable",
+      "statedIn": "AGENTS.md",
+      "stated": "`npm run bundle:deps` / `bundle:deps:check`",
+      "implementation": "scripts/generate-bundle-deps.mjs",
+      "tests": ["tests/upstream-triage-2026-09-07.test.mjs", "tests/gate-poison-pills.test.mjs"],
+      "proof": "process",
+      "oracle": "poison-pill",
+      "poisonPill": {
+        "isolation": "tmpdir",
+        "argv": ["scripts/generate-bundle-deps.mjs", "--check"],
+        "mutate": {
+          "scripts/lib/bundle-deps.json": {
+            "path": "installAs",
+            "value": "dependencies"
+          }
+        },
+        "expectExit": 1,
+        "expectStderr": "stale",
+        "why": "A committed declaration whose dev-vs-runtime intent no longer matches what the generator produces. This is the field the reporting consumer got wrong in the other direction — four of these packages sat in `dependencies`, shipping to a production image built with `npm ci --omit=dev` — so a check that compared only the package NAMES would pass here while the one fact that caused the incident had drifted. The gate compares the whole serialised artifact, which is what makes this pill fire.",
+        "needsGit": true
+      }
+    }
+  ]
+}

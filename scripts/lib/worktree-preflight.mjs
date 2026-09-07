@@ -24,6 +24,8 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 /**
  * The consumer-side `skills:hydrate` npm script, as documented in
@@ -39,7 +41,7 @@ import path from 'node:path';
  * `tests/skills-hydrate.test.mjs` asserts the one-liner emits the same
  * user-visible messages `planHydration` does for the branches they share.
  */
-export const CONSUMER_HYDRATE_NPM_SCRIPT = "\"skills:hydrate\": \"node -e \\\"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});console.log('[hydrate] copied '+src)\\\"\"";
+export const CONSUMER_HYDRATE_NPM_SCRIPT = "\"skills:hydrate\": \"node -e \\\"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});const man='scripts/.sync-manifest.json',ms=p.join(main,man),ok=f.existsSync(ms);if(ok){f.copyFileSync(ms,man)}console.log('[hydrate] copied '+(ok?2:1)+'/2 items from '+main+(ok?'':' - but NOT '+man+' (absent there): this tree has no bundle stamp'))\\\"\"";
 
 /**
  * The canonical marker block, inserted verbatim into every in-scope SKILL.md.
@@ -183,16 +185,27 @@ export function checkMarkerRemedies(rootDir, io = {}) {
 export const EXEMPTIONS = Object.freeze({});
 
 /**
- * The ONE spelling of "resolve the MAIN checkout's pending-note path".
+ * The ONE spelling of each pending-note command.
  *
- * `/ship` Step 2 READS that file and Step 6.8 WRITES it, so the two must
- * resolve the same path — and they carried hand-copied recipes with nothing
- * comparing them. That is the producer/consumer-must-agree class this repo keeps
- * fixing, reappearing inside a single document. `checkDocumentedRecipes` compares
- * every copy against this constant, so N copies stay legal and DISAGREEMENT does
- * not — the same shape as `MARKER_BLOCK` above.
+ * `/ship` Step 2 READS the notes and Step 6.8 WRITES one, so the two must reach
+ * the same store — and they carried hand-copied recipes with nothing comparing
+ * them. That is the producer/consumer-must-agree class this repo keeps fixing,
+ * reappearing inside a single document. `checkDocumentedRecipes` compares every
+ * copy against these constants, so N copies stay legal and DISAGREEMENT does not
+ * — the same shape as `MARKER_BLOCK` above.
+ *
+ * **These were one `node -e` one-liner resolving a single fixed filename until
+ * 2026-09-07.** Path agreement was all it could enforce; it never asked how many
+ * notes that path can hold, and the answer was one, overwritten without a look
+ * (upstream b02d80b3). Occupancy is now code — `readPendingNotes` /
+ * `writePendingNote` / `clearPendingNotes` below — for the same reason this
+ * constant exists rather than a note asking two steps to stay in sync.
+ *
+ * Named BY PATH, never as an `npm run` alias: the path is rewritten into a
+ * consumer's `scripts/.claude-skills/` by the sync, an alias is not.
  */
-export const MAIN_CHECKOUT_PATH_RECIPE = "node -e \"const{execFileSync}=require('node:child_process'),p=require('node:path');console.log(p.join(p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim()),'.claude','tmp','ship-verification-pending.md'))\"";
+export const PENDING_NOTE_READ_RECIPE = 'node scripts/lib/worktree-preflight.mjs pending-note read';
+export const PENDING_NOTE_WRITE_RECIPE = 'node scripts/lib/worktree-preflight.mjs pending-note write';
 
 /**
  * Do the DOCS still quote the canonical recipes byte-for-byte?
@@ -228,7 +241,8 @@ export function checkDocumentedRecipes(rootDir, io = {}) {
     // recipe now inlined in every skill's MARKER_BLOCK — and compared it against
     // the WRONG canonical, reporting drift on a line that is byte-correct. A
     // subject claims a line only when no other subject's key appears on it.
-    { file: 'skills/ship/SKILL.md', marker: '--git-common-dir', canonical: MAIN_CHECKOUT_PATH_RECIPE, needs: 'node -e', excludes: ['"skills:hydrate"'] },
+    { file: 'skills/ship/SKILL.md', marker: 'pending-note read', canonical: PENDING_NOTE_READ_RECIPE, needs: 'node scripts/lib/worktree-preflight.mjs' },
+    { file: 'skills/ship/SKILL.md', marker: 'pending-note write', canonical: PENDING_NOTE_WRITE_RECIPE, needs: 'node scripts/lib/worktree-preflight.mjs' },
     { file: 'docs/runbooks/consumer-adoption.md', marker: '"skills:hydrate"', canonical: CONSUMER_HYDRATE_NPM_SCRIPT, needs: '"skills:hydrate"' },
   ];
   const mismatches = [];
@@ -340,4 +354,249 @@ export function checkSkill(rootDir, skill) {
   // file clean, and a tool that disagrees is comparing the wrong thing.
   if (!text.replaceAll('\r\n', '\n').includes(MARKER_BLOCK)) return { skill, status: 'edited' };
   return { skill, status: 'ok' };
+}
+
+// ── Ship pending-notes: occupancy, not just path agreement ──────────────────
+
+/**
+ * `/ship` Step 6.8 writes a consumer-verification note that Step 2 of the NEXT
+ * ship reads, prepends to `status.md` and deletes. That handoff used ONE fixed
+ * filename, written unconditionally, with no existence check — and the gap
+ * between a write and the next read is unbounded, because Step 2 only runs
+ * inside `/ship` and not every status.md commit is a ship. A second ship inside
+ * that gap destroyed an unread note by following the step as written. Hit live
+ * 2026-09-06: a verified note was still unread ~10 hours later when the next
+ * Step 6.8 ran (upstream b02d80b3).
+ *
+ * `MAIN_CHECKOUT_PATH_RECIPE` above already made the reader and the writer
+ * resolve the same PATH, with `checkDocumentedRecipes` proving it. It never
+ * asked how many notes that path can hold. These functions answer the second
+ * question the same way: in code, so the invariant cannot be restated wrongly
+ * in prose. One file per ship, unique by construction, drained oldest-first.
+ */
+export const PENDING_NOTE_PREFIX = 'ship-verification-';
+export const PENDING_NOTE_SUFFIX = '.md';
+/**
+ * The pre-2026-09-07 single-occupancy filename. Still MATCHED (never written),
+ * so a note left by the old step is drained rather than stranded by the fix.
+ */
+export const LEGACY_PENDING_NOTE = 'ship-verification-pending.md';
+
+/** The MAIN checkout's note directory — the one tree that outlives a session. */
+export function pendingNoteDir(mainCheckout) {
+  return path.join(mainCheckout, '.claude', 'tmp');
+}
+
+/**
+ * `ship-verification-<sha>-<compact ISO>.md`.
+ *
+ * The sha says WHICH ship the note is about; the timestamp makes the name
+ * unique even when one sha is shipped twice, so a write can never land on an
+ * unread note. Both are readable in a directory listing, which is where an
+ * operator looks when the handoff seems to have gone missing.
+ */
+export function pendingNoteName(sha, when = new Date()) {
+  const shortSha = String(sha || 'unknown').trim().slice(0, 12).replace(/[^0-9a-zA-Z]/g, '') || 'unknown';
+  const stamp = when.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  return `${PENDING_NOTE_PREFIX}${shortSha}-${stamp}${PENDING_NOTE_SUFFIX}`;
+}
+
+/**
+ * Chronological key for a note filename. Legacy notes have no timestamp, so
+ * they sort FIRST — they are by definition older than anything written since
+ * the per-ship naming landed.
+ */
+export function pendingNoteSortKey(name) {
+  if (name === LEGACY_PENDING_NOTE) return '';
+  const m = /-(\d{8}T\d{6}Z)\.md$/.exec(name);
+  return m ? m[1] : '';
+}
+
+/**
+ * Every pending note in the main checkout, OLDEST FIRST.
+ *
+ * Never throws: an absent directory is an empty list, which is the normal state
+ * between ships. An unreadable one is reported as an error rather than an empty
+ * list — "nothing pending" and "could not look" must not be the same answer.
+ *
+ * @returns {{ok: boolean, notes: Array<{name:string, path:string, text:string}>, error?: string}}
+ */
+export function readPendingNotes(mainCheckout, io = {}) {
+  const readdir = io.readdir ?? ((d) => fs.readdirSync(d));
+  const readFile = io.readFile ?? ((p) => fs.readFileSync(p, 'utf-8'));
+  const exists = io.exists ?? ((p) => fs.existsSync(p));
+  const dir = pendingNoteDir(mainCheckout);
+  if (!exists(dir)) return { ok: true, notes: [] };
+  let entries;
+  try { entries = readdir(dir); }
+  catch (err) { return { ok: false, notes: [], error: `cannot read ${dir}: ${err.message}` }; }
+  const names = entries
+    .filter((n) => n === LEGACY_PENDING_NOTE
+      || (n.startsWith(PENDING_NOTE_PREFIX) && n.endsWith(PENDING_NOTE_SUFFIX)))
+    // Key FIRST, then name — concatenating the two put the legacy note (empty
+    // key) AFTER a timestamped one, which is backwards: it is the oldest.
+    .sort((a, b) => pendingNoteSortKey(a).localeCompare(pendingNoteSortKey(b)) || a.localeCompare(b));
+  const notes = [];
+  for (const name of names) {
+    const p = path.join(dir, name);
+    try { notes.push({ name, path: p, text: readFile(p) }); }
+    catch (err) { return { ok: false, notes: [], error: `cannot read ${p}: ${err.message}` }; }
+  }
+  return { ok: true, notes };
+}
+
+/**
+ * Write one note. Returns the path written.
+ *
+ * No existence check is needed and none is performed — the name carries a
+ * timestamp, so this cannot collide with an unread note. That is the point: the
+ * race is removed by construction rather than by asking the writer to look
+ * first, the same reason `checkDocumentedRecipes` exists instead of a comment
+ * saying "keep these in sync".
+ */
+export function writePendingNote(mainCheckout, sha, text, io = {}) {
+  const mkdir = io.mkdir ?? ((d) => fs.mkdirSync(d, { recursive: true }));
+  const write = io.writeFile ?? ((p, t) => fs.writeFileSync(p, t));
+  const now = io.now ?? new Date();
+  const dir = pendingNoteDir(mainCheckout);
+  mkdir(dir);
+  const p = path.join(dir, pendingNoteName(sha, now));
+  write(p, text.endsWith('\n') ? text : `${text}\n`);
+  return p;
+}
+
+/**
+ * Delete the notes NAMED by the caller — never "everything currently there".
+ *
+ * A blanket delete would reopen the defect one step later: a note written
+ * between the read and the clear would be destroyed unread. The caller passes
+ * back exactly the names `readPendingNotes` handed it, so a note that arrived
+ * in between survives to the next drain.
+ *
+ * @returns {{deleted: string[], missing: string[]}}
+ */
+export function clearPendingNotes(mainCheckout, names, io = {}) {
+  // The 4-property form the repo-wide rmSync guard requires: a Windows AV or
+  // indexer holding a handle turns a delete into a transient EPERM/EBUSY.
+  const rm = io.rm ?? ((p) => fs.rmSync(p, { force: true, recursive: true, maxRetries: 3, retryDelay: 50 }));
+  const exists = io.exists ?? ((p) => fs.existsSync(p));
+  const dir = pendingNoteDir(mainCheckout);
+  const deleted = [];
+  const missing = [];
+  for (const raw of names) {
+    // Basenames only: this deletes files, and a caller-supplied path must not
+    // be able to reach outside the note directory.
+    const name = path.basename(String(raw));
+    if (name !== LEGACY_PENDING_NOTE
+      && !(name.startsWith(PENDING_NOTE_PREFIX) && name.endsWith(PENDING_NOTE_SUFFIX))) {
+      missing.push(name);
+      continue;
+    }
+    const p = path.join(dir, name);
+    if (!exists(p)) { missing.push(name); continue; }
+    rm(p);
+    deleted.push(name);
+  }
+  return { deleted, missing };
+}
+
+// ── CLI: `pending-note read|write|clear` ────────────────────────────────────
+//
+// A module rather than a top-level script, and run BY PATH from the two
+// `/ship` steps, exactly as Step 6.8 already runs
+// `lib/sync-isolation-verify.mjs`: naming synced tooling by path is what makes
+// the command survive the rewrite into a consumer's `scripts/.claude-skills/`.
+
+/** Resolve the MAIN checkout — the one tree guaranteed to outlive a session. */
+export function resolveMainCheckout(run) {
+  const common = run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
+  if (!common) throw new Error('git could not resolve --git-common-dir');
+  return path.resolve(path.dirname(common));
+}
+
+function readAllStdin() {
+  try { return fs.readFileSync(0, 'utf-8'); } catch { return ''; }
+}
+
+async function pendingNoteMain(argv) {
+  const { assertKnownFlags, ArgvError, finishAndExit } = await import('./cli-io.mjs');
+  const KNOWN = ['--sha', '--notes', '--json'];
+  const sub = argv[3] ?? '';
+  try {
+    assertKnownFlags(argv, KNOWN, { cli: 'worktree-preflight pending-note', from: 4 });
+  } catch (err) {
+    if (err instanceof ArgvError) { process.stderr.write(`${err.message}\n`); return finishAndExit(2); }
+    throw err;
+  }
+  const flag = (name) => {
+    const i = argv.indexOf(name);
+    return i !== -1 ? (argv[i + 1] ?? null) : null;
+  };
+  const run = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8' });
+  let main;
+  try { main = resolveMainCheckout(run); }
+  catch (err) {
+    process.stderr.write(`[pending-note] ${err.message}\n`);
+    return finishAndExit(2);
+  }
+
+  if (sub === 'read') {
+    const res = readPendingNotes(main);
+    if (!res.ok) {
+      // "could not look" is not "nothing pending" — never render it as one.
+      process.stderr.write(`[pending-note] ${res.error}\n`);
+      return finishAndExit(1);
+    }
+    const out = res.notes.map((n) => `<!-- ${n.name} -->\n${n.text.trimEnd()}`).join('\n\n');
+    process.stdout.write(res.notes.length
+      ? `${out}\n\n<!-- ${res.notes.length} note(s). After prepending them to status.md, delete exactly these: `
+        + `pending-note clear --notes ${res.notes.map((n) => n.name).join(',')} -->\n`
+      : '<!-- no pending consumer-verification notes -->\n');
+    return finishAndExit(0);
+  }
+
+  if (sub === 'write') {
+    const sha = flag('--sha') || (() => {
+      try { return run('git', ['rev-parse', '--short', 'HEAD']).trim(); } catch { return 'unknown'; }
+    })();
+    const text = readAllStdin();
+    if (!text.trim()) {
+      process.stderr.write('[pending-note] refusing to write an empty note (body is read from stdin)\n');
+      return finishAndExit(2);
+    }
+    const p = writePendingNote(main, sha, text);
+    process.stdout.write(`[pending-note] wrote ${p}\n`);
+    return finishAndExit(0);
+  }
+
+  if (sub === 'clear') {
+    const names = (flag('--notes') || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!names.length) {
+      // Deliberately not "clear everything": a note written between the read
+      // and this call must survive, or the fix reopens the defect one step on.
+      process.stderr.write('[pending-note] --notes is required — pass exactly the names `pending-note read` printed\n');
+      return finishAndExit(2);
+    }
+    const res = clearPendingNotes(main, names);
+    process.stdout.write(`[pending-note] deleted ${res.deleted.length}`
+      + (res.missing.length ? `, ${res.missing.length} not found: ${res.missing.join(', ')}` : '') + '\n');
+    return finishAndExit(res.missing.length ? 1 : 0);
+  }
+
+  process.stderr.write('usage: worktree-preflight.mjs pending-note read|write|clear\n');
+  return finishAndExit(2);
+}
+
+const _isCli = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (_isCli) {
+  if (process.argv.includes('--selfcheck-relocation')) { console.log('OK'); process.exit(0); }
+  if (process.argv[2] === 'pending-note') {
+    pendingNoteMain(process.argv).catch((err) => {
+      process.stderr.write(`[pending-note] fatal: ${err?.message || err}\n`);
+      process.exit(1);
+    });
+  } else {
+    process.stderr.write('usage: worktree-preflight.mjs pending-note read|write|clear\n');
+    process.exit(2);
+  }
 }

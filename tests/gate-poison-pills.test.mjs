@@ -413,6 +413,9 @@ const MANDATORY = {
     // is description text — parsed, valid, inert. Pill is the real consumer file.
     'skills-check-detects-indented-frontmatter-key',
   ],
+  // Added 2026-09-07 with the gate itself (upstream ea23dfda). Post-2026-07-31,
+  // so a pill is mandatory and an exemption was never available.
+  'bundle:deps:check': ['bundle-deps-check-compares-the-derived-set'],
   'plans:index:check': ['plans-index-check-compares-rendered-content'],
   'requirements:map:check': ['requirements-map-check-compares-rendered-content'],
   'parity:check-coupling': ['parity-coupling-rejects-new-schema-qualification'],

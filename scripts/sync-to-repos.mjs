@@ -547,6 +547,9 @@ const CORE_ASSETS = [
   // and every affected run recorded `fallback_legacy` — 15 wasted observations
   // in the Phase-14 window before the cause was traced (2026-07-18).
   'scripts/lib/oss-call-policy.json',
+  // The bundle's npm-dependency declaration (generate-bundle-deps.mjs). JSON
+  // fs-read by check-setup, so the import walker cannot discover it.
+  'scripts/lib/bundle-deps.json',
   // postgres-parity M4 — setup-postgres.mjs reads compat-bootstrap.sql via
   // fs (the import-graph walker can't follow fs reads). Migrations are
   // similarly fs-read; ship the whole directory so `--migrate` works on

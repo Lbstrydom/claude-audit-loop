@@ -703,6 +703,7 @@ import {
   detectPackageManager, packageManagerInvocation, execBinaryArgs,
   playwrightInstallHint, playwrightBootstrapHint,
 } from './lib/package-manager.mjs';
+import { checkBundleDependencies } from './lib/install/bundle-deps.mjs';
 const execFileAsync = promisify(execFile);
 
 /**
@@ -939,6 +940,9 @@ async function main() {
   await checkAuditLoop(env, report);
   await checkPersonaTest(env, report);
   await checkConsistencyMode(env, report);
+  // The section body lives in lib/install/bundle-deps.mjs: it has to run in a
+  // consumer, and this file is already at its size ceiling.
+  checkBundleDependencies(report, REPO_PATH, import.meta.dirname);
   await checkBrowser(report);
   await checkGitHub(env, report);
 

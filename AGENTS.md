@@ -158,7 +158,11 @@
 >   identical (no clocks/shas/network). Example: `.claude/skills/**` (regen by
 >   `skills:regenerate`, enforced by `skills:check`); `docs/plans/README.md`, the
 >   status-bucketed plans index (`plans:index` / `plans:index:check`);
->   `docs/requirements-map.md` (`requirements:map` / `requirements:map:check`).
+>   `docs/requirements-map.md` (`requirements:map` / `requirements:map:check`);
+>   **`scripts/lib/bundle-deps.json`**, every npm package the synced bundle
+>   imports plus its importers, derived from the import graph so a consumer can
+>   verify its install and build a knip ignore list without hydrating the tree
+>   (`npm run bundle:deps` / `bundle:deps:check`).
 >
 > The test for a tracked generated file: *would two regenerations on the same
 > commit be byte-identical, and does a check enforce it?* If no → it belongs in
@@ -1223,27 +1227,12 @@ correctness / persistence invariants the code already enforces.
 
 ## Personal config — keep it out of the public repo
 
-This repo is **public on GitHub**. The committed `.claude/settings.json`
-must contain only project-portable, neutral values. Per-developer
-overrides — local paths, machine-specific tweaks, personal allow-rules —
-go in **`.claude/settings.local.json`** (gitignored at line 9 of
-`.gitignore`).
-
-Most relevant: `permissions.additionalDirectories`. Never add personal
-folder paths (other projects, vault locations, AppData paths) to the
-committed `settings.json`. The empty-array placeholder is intentional.
-
-See `.claude/settings.local.example.json` for the format. To add your
-own paths after cloning:
-
-```bash
-cp .claude/settings.local.example.json .claude/settings.local.json
-# edit additionalDirectories with your local paths
-```
-
-Claude Code merges `settings.json` (project) with `settings.local.json`
-(local) automatically — your local entries layer on top of the committed
-defaults without polluting the public repo.
+This repo is **public on GitHub**, so the committed `.claude/settings.json` holds
+only project-portable values — most of all `permissions.additionalDirectories`,
+whose empty-array placeholder is intentional. Never put a personal folder path
+(other projects, vault locations, AppData) there. Per-developer overrides go in
+the gitignored **`.claude/settings.local.json`**, which Claude Code merges on top
+automatically; copy `.claude/settings.local.example.json` for the format.
 
 ## Scope discipline — pre-existing uncommitted changes
 

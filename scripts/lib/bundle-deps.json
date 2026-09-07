@@ -1,0 +1,216 @@
+{
+  "_generated": "GENERATED FILE — do not edit. Regenerate: npm run bundle:deps",
+  "_why": "Every npm package the synced bundle imports, derived from its own import graph. Read by check-setup.mjs so a consumer can verify its install, and by consumers building a knip/depcheck ignore list — a dead-code tool cannot see the importers, because the tooling tree is gitignored.",
+  "installAs": "devDependencies",
+  "packages": [
+    {
+      "name": "@anthropic-ai/sdk",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/anthropic-client.mjs"
+      ]
+    },
+    {
+      "name": "@babel/parser",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/ast.mjs"
+      ]
+    },
+    {
+      "name": "@babel/traverse",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/audit/adjacency-detector.mjs"
+      ]
+    },
+    {
+      "name": "@google/genai",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/evolve-prompts.mjs",
+        "scripts/.claude-skills/gemini-review.mjs",
+        "scripts/.claude-skills/lib/arm-eval/producers/model-call.mjs",
+        "scripts/.claude-skills/lib/audit-shadow.mjs",
+        "scripts/.claude-skills/lib/brainstorm/gemini-adapter.mjs",
+        "scripts/.claude-skills/lib/context.mjs",
+        "scripts/.claude-skills/lib/llm-wrappers.mjs",
+        "scripts/.claude-skills/meta-assess.mjs",
+        "scripts/.claude-skills/refine-prompts.mjs"
+      ]
+    },
+    {
+      "name": "codeowners-utils",
+      "required": false,
+      "importers": [
+        "scripts/.claude-skills/lib/owner-resolver.mjs"
+      ]
+    },
+    {
+      "name": "dependency-cruiser",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/arch-intent/adapters/js-ts.mjs",
+        "scripts/.claude-skills/lib/audit/diff-scope-resolver.mjs",
+        "scripts/.claude-skills/symbol-index/extract.mjs",
+        "scripts/.claude-skills/symbol-index/spike-extract.mjs"
+      ]
+    },
+    {
+      "name": "dotenv",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/load-shared-env.mjs",
+        "scripts/.claude-skills/lib/shared-cloud-config.mjs"
+      ]
+    },
+    {
+      "name": "micromatch",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/openai-audit.mjs"
+      ]
+    },
+    {
+      "name": "minimatch",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/arch-intent/domain-resolver.mjs",
+        "scripts/.claude-skills/lib/arch-intent/semantic-validator.mjs"
+      ]
+    },
+    {
+      "name": "openai",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/debt-review.mjs",
+        "scripts/.claude-skills/lib/audit-shadow.mjs",
+        "scripts/.claude-skills/lib/audit/llm-helpers.mjs",
+        "scripts/.claude-skills/lib/llm-wrappers.mjs",
+        "scripts/.claude-skills/lib/openai-client.mjs",
+        "scripts/.claude-skills/meta-assess.mjs",
+        "scripts/.claude-skills/openai-audit.mjs"
+      ]
+    },
+    {
+      "name": "pg",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/db/client.mjs"
+      ]
+    },
+    {
+      "name": "playwright",
+      "required": false,
+      "importers": [
+        "scripts/.claude-skills/check-setup.mjs",
+        "scripts/.claude-skills/lib/nav/verify.mjs",
+        "scripts/.claude-skills/lib/visual/extract.mjs",
+        "scripts/.claude-skills/persona-consistency-run.mjs"
+      ]
+    },
+    {
+      "name": "proper-lockfile",
+      "required": false,
+      "importers": [
+        "scripts/.claude-skills/lib/audit/orphan-metrics.mjs",
+        "scripts/.claude-skills/lib/debt-ledger.mjs",
+        "scripts/.claude-skills/lib/ledger.mjs",
+        "scripts/.claude-skills/lib/plan-fp-tracker.mjs"
+      ]
+    },
+    {
+      "name": "ts-morph",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/symbol-index/extract.mjs",
+        "scripts/.claude-skills/symbol-index/spike-extract.mjs"
+      ]
+    },
+    {
+      "name": "yaml",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/lib/brainstorm/insight-store.mjs",
+        "scripts/.claude-skills/lib/friction/commands.mjs",
+        "scripts/.claude-skills/lib/memory-paths.mjs",
+        "scripts/.claude-skills/lib/skill-frontmatter-layout.mjs",
+        "scripts/.claude-skills/lib/skills-index.mjs"
+      ]
+    },
+    {
+      "name": "zod",
+      "required": true,
+      "importers": [
+        "scripts/.claude-skills/check-context-drift.mjs",
+        "scripts/.claude-skills/check-model-freshness.mjs",
+        "scripts/.claude-skills/cross-skill.mjs",
+        "scripts/.claude-skills/evolve-prompts.mjs",
+        "scripts/.claude-skills/gemini-review.mjs",
+        "scripts/.claude-skills/lib/anthropic-client.mjs",
+        "scripts/.claude-skills/lib/arm-eval/experiments.mjs",
+        "scripts/.claude-skills/lib/arm-eval/judge.mjs",
+        "scripts/.claude-skills/lib/audit-arms.mjs",
+        "scripts/.claude-skills/lib/audit-shadow.mjs",
+        "scripts/.claude-skills/lib/audit/detector.mjs",
+        "scripts/.claude-skills/lib/audit/discovery-prompts.mjs",
+        "scripts/.claude-skills/lib/audit/event-wiring-corpus.mjs",
+        "scripts/.claude-skills/lib/audit/finalization-contract.mjs",
+        "scripts/.claude-skills/lib/audit/legacy-production-audit.mjs",
+        "scripts/.claude-skills/lib/audit/map-reduce-scheduler.mjs",
+        "scripts/.claude-skills/lib/audit/review-effort-event.mjs",
+        "scripts/.claude-skills/lib/audit/stage1-triage.mjs",
+        "scripts/.claude-skills/lib/audit/stage1-triager-resolver.mjs",
+        "scripts/.claude-skills/lib/audit/tiered-provider-calls.mjs",
+        "scripts/.claude-skills/lib/audit/usage-event.mjs",
+        "scripts/.claude-skills/lib/brainstorm/schemas.mjs",
+        "scripts/.claude-skills/lib/campaign/adjudicate.mjs",
+        "scripts/.claude-skills/lib/campaign/config.mjs",
+        "scripts/.claude-skills/lib/comparison/arms.mjs",
+        "scripts/.claude-skills/lib/comparison/controls.mjs",
+        "scripts/.claude-skills/lib/comparison/roles.mjs",
+        "scripts/.claude-skills/lib/coverage-schema.mjs",
+        "scripts/.claude-skills/lib/cross-skill/commands/persona.mjs",
+        "scripts/.claude-skills/lib/dashboard/schema.mjs",
+        "scripts/.claude-skills/lib/efficacy-lints.mjs",
+        "scripts/.claude-skills/lib/finalize-outcomes.mjs",
+        "scripts/.claude-skills/lib/learning/author-tier-observation.mjs",
+        "scripts/.claude-skills/lib/llm-wrappers.mjs",
+        "scripts/.claude-skills/lib/memory-paths.mjs",
+        "scripts/.claude-skills/lib/model-eval/contracts.mjs",
+        "scripts/.claude-skills/lib/model-eval/route-catalog.mjs",
+        "scripts/.claude-skills/lib/model-eval/verdict.mjs",
+        "scripts/.claude-skills/lib/nav/schema.mjs",
+        "scripts/.claude-skills/lib/neighbourhood-query.mjs",
+        "scripts/.claude-skills/lib/observed-deps.mjs",
+        "scripts/.claude-skills/lib/oss-call-policy.mjs",
+        "scripts/.claude-skills/lib/oss-structured-output.mjs",
+        "scripts/.claude-skills/lib/persona-test/schemas.mjs",
+        "scripts/.claude-skills/lib/persona-test/semantic-compare.mjs",
+        "scripts/.claude-skills/lib/remediation-verification.mjs",
+        "scripts/.claude-skills/lib/requirements/schema.mjs",
+        "scripts/.claude-skills/lib/runner-inventory.mjs",
+        "scripts/.claude-skills/lib/sanitizer.mjs",
+        "scripts/.claude-skills/lib/schemas-install.mjs",
+        "scripts/.claude-skills/lib/schemas.mjs",
+        "scripts/.claude-skills/lib/store/friction.mjs",
+        "scripts/.claude-skills/lib/store/model-eval.mjs",
+        "scripts/.claude-skills/lib/store/nav-audit.mjs",
+        "scripts/.claude-skills/lib/store/persona-outcomes.mjs",
+        "scripts/.claude-skills/lib/store/tiered-shadow.mjs",
+        "scripts/.claude-skills/lib/symbol-index-contracts.mjs",
+        "scripts/.claude-skills/lib/sync-manifest.mjs",
+        "scripts/.claude-skills/lib/visual/schema.mjs",
+        "scripts/.claude-skills/openai-audit.mjs"
+      ]
+    }
+  ],
+  "generatedSpecPackages": {
+    "_why": "Not imported by the bundle. Imported by the Playwright specs /ux-lock generates, so a consumer that runs those specs needs them installed; a consumer that does not, does not.",
+    "packages": [
+      "@axe-core/playwright",
+      "@playwright/test",
+      "axe-core"
+    ]
+  }
+}

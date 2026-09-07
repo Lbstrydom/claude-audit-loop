@@ -133,6 +133,14 @@
       "description": "Print every Azure wire route (endpoint, path, deployment, auth header, credential VARIABLE — never its value) and probe each one.",
       "category": "diagnostic"
     },
+    "bundle:deps": {
+      "description": "Regenerate scripts/lib/bundle-deps.json — every npm package the synced bundle imports, derived from its own import graph.",
+      "category": "sync"
+    },
+    "bundle:deps:check": {
+      "description": "Fail when the committed bundle-deps.json no longer matches the bundle import graph (pre-push check).",
+      "category": "sync"
+    },
     "cache:check": {
       "description": "Audit-loop cache hit-rate diagnostic.",
       "category": "diagnostic"

@@ -43,6 +43,7 @@ import { enumerateNpmRunRefs } from './npm-script-enumerator.mjs';
 import { listSurfaceNames, compareSkillSurfaces } from './skill-surface-identity.mjs';
 import { lintSkillTree } from './skill-frontmatter-layout.mjs';
 import { assertKnownFlags, ArgvError } from './cli-io.mjs';
+import { detectCheckout } from './checkout-kind.mjs';
 
 // NOTE: this module intentionally does NOT import sync-inventory.mjs.
 // Inventory is source-only (depends on consumer-repos.mjs which uses
@@ -892,8 +893,30 @@ function gate1(consumerRoot) {
 // was previously reachable only via the test-only `_internals` export below.
 export function runGates(opts) {
   const { consumerRoot, gates } = opts;
-  const manifestRes = loadConsumerManifest(consumerRoot);
   const results = [];
+
+  // A LINKED WORKTREE CANNOT ANSWER THIS — refuse explicitly, not by accident.
+  // Every manifest-bearing gate compares the manifest against files on disk, and
+  // `skills:hydrate` populates a worktree by COPYING the files the manifest
+  // records, so a run there reports agreement it manufactured. This used to be
+  // prevented by an accident — hydrate did not copy the manifest, so the run
+  // died at `manifest missing` — and fixing THAT defect (upstream 5bc7ff30)
+  // removes the accidental guard. `unknown` does not block; see checkout-kind.
+  const checkout = opts.checkout ?? detectCheckout(consumerRoot);
+  if (checkout.kind === 'linked') {
+    return [{
+      gate: 'preflight',
+      pass: false,
+      error: `${consumerRoot} is a LINKED git worktree (${checkout.reason}). `
+        + 'Run sync-isolation-verify in the consumer MAIN checkout: the manifest records what the last '
+        + 'sync wrote THERE, and skills:hydrate populates a worktree by copying those same files, so a '
+        + 'run here would compare hydrated bytes against the manifest that produced them and report '
+        + 'agreement it manufactured.',
+      details: { checkout },
+    }];
+  }
+
+  const manifestRes = loadConsumerManifest(consumerRoot);
 
   const needManifest = gates.some((g) => ['2A', '2B', '2C', '3', '5', '6', '8', '9'].includes(g));
   if (needManifest && !manifestRes.ok) {

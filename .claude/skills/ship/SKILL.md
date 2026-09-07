@@ -77,7 +77,7 @@ Full contract: `references/input-acquisition.md`.
 > this entry to its `package.json` `scripts` and run it — it copies the tooling
 > tree in from the main checkout, and leans on nothing but node and git:
 >
-> "skills:hydrate": "node -e \"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});console.log('[hydrate] copied '+src)\""
+> "skills:hydrate": "node -e \"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});const man='scripts/.sync-manifest.json',ms=p.join(main,man),ok=f.existsSync(ms);if(ok){f.copyFileSync(ms,man)}console.log('[hydrate] copied '+(ok?2:1)+'/2 items from '+main+(ok?'':' - but NOT '+man+' (absent there): this tree has no bundle stamp'))\""
 >
 > Rationale (source repo only — `docs/runbooks/` is not synced to consumers):
 > `docs/runbooks/consumer-adoption.md` §"Linked git worktrees".
@@ -918,22 +918,29 @@ patterns were established.
 
 ## Step 2 — Update status.md
 
-If `ship-verification-pending.md` exists in the MAIN checkout's `.claude/tmp/`
-(Step 6.8 of a prior ship wrote it instead of force-pushing a status.md-only
-commit), read it, prepend its content now as a
-`### Consumer Verification (previous ship)` subsection above the new entry —
-see `references/status-md-format.md` — then delete the file. This is how that
-note ever reaches git without a second push. The file is gitignored scratch
-state (same directory the commit-message file uses), so it survives a session
-boundary but never ships as-is.
-
-**Resolve the MAIN checkout, not the tree you are standing in** — `.claude/tmp/`
-is per-worktree, and Step 6.8 deliberately writes to the durable one (a worktree
-is routinely deleted at session end, taking the note with it):
+Drain any consumer-verification notes a PRIOR ship left (Step 6.8 writes one
+instead of force-pushing a status.md-only commit). This is how such a note ever
+reaches git without a second push:
 
 ```bash
-node -e "const{execFileSync}=require('node:child_process'),p=require('node:path');console.log(p.join(p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim()),'.claude','tmp','ship-verification-pending.md'))"
+node scripts/lib/worktree-preflight.mjs pending-note read
 ```
+
+It prints EVERY pending note, oldest first, each under an HTML comment naming
+its file — there can be more than one, because a ship does not happen after
+every note. Prepend them, in that order, as a single
+`### Consumer Verification (previous ship)` subsection above the new entry —
+see `references/status-md-format.md`. Then delete exactly the notes you just
+prepended, with the `pending-note clear --notes …` line the read printed for
+you. Pass those names verbatim: a note that arrived between the read and the
+clear must survive to the next drain, which is why `clear` refuses to delete
+everything it happens to find.
+
+The command resolves the MAIN checkout itself — `.claude/tmp/` is per-worktree
+and Step 6.8 deliberately writes to the durable one (a worktree is routinely
+deleted at session end, taking the note with it). The notes are gitignored
+scratch state (same directory the commit-message file uses), so they survive a
+session boundary but never ship as-is.
 
 Append a new session log entry to `status.md`. If file doesn't exist,
 create with the standard header. Always append at the TOP (below the
@@ -1410,41 +1417,54 @@ Pick the row(s) this push actually produced:
 | Artifact | Consumer-side retrieval | Subject check |
 |---|---|---|
 | the pushed commit | clone/fetch into a temp dir at the pushed sha | the repo's battery runs green **in the clone** — catches tracked-vs-ignored and case-only path faults invisible locally |
-| the synced consumer bundle | **authoritative**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs`, run *in the consumer's MAIN checkout* — note the `lib/` segment, it is a module rather than a top-level script. A linked worktree cannot answer this: `skills:hydrate` copies the tooling tree, and `scripts/.sync-manifest.json` is gitignored too, so the run stops at `manifest missing at …` with exit 2. Hydrating the manifest as well would not help — the manifest records what the last sync wrote to the MAIN checkout's disk, so a worktree comparison re-reads the files hydrate itself just copied and reports agreement it manufactured. `npm run sync:dry` from here is the pre-check, not the verdict | zero unexpected diffs; no orphans |
+| the synced consumer bundle | **authoritative**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs`, run *in the consumer's MAIN checkout* — note the `lib/` segment, it is a module rather than a top-level script. A linked worktree cannot answer this, and since 2026-09-07 it SAYS so: `runGates` refuses a proven linked worktree at `preflight` with exit 2. The manifest records what the last sync wrote to the MAIN checkout's disk, and `skills:hydrate` populates a worktree by copying those same files — so a run there would re-read bytes hydrate just copied and report agreement it manufactured. Hydrate now carries the manifest as well as the tooling tree (upstream 5bc7ff30), so that refusal is explicit rather than the accident of a missing file. `npm run sync:dry` from here is the pre-check, not the verdict | zero unexpected diffs; no orphans |
 | the skill manifest | re-derive from the pushed sha, not the working tree | regenerated bytes identical |
 
-**Write the outcome to the MAIN checkout's `.claude/tmp/ship-verification-pending.md`
-— never by re-opening the status.md entry you just pushed.** status.md is append-only
+**Write the outcome with `pending-note write` (body on stdin) — never by
+re-opening the status.md entry you just pushed.** status.md is append-only
 (Reminders, below), and this step runs AFTER that entry's commit already
 landed: writing into it now means a second commit and a second push, which
 re-triggers the same pre-push readiness suite Step 6.8 exists to verify —
 doubling the workflow's cost for one status line. A consumer hit exactly this
 2026-08-14 and reported it as friction. Include in the file: the immutable
 locator (full sha / digest / bundle version), the retrieval command actually
-run, and the observed result. The **next** `/ship` invocation's Step 2 reads
-this file, prepends it as a `### Consumer Verification (previous ship)`
-subsection above that session's own entry, then deletes it (template:
-`references/status-md-format.md`). If no further `/ship` happens, the file
-simply sits there unread — an acceptable loss for advisory documentation
-(never a gate), not a reason to force a push now.
+run, and the observed result. Write it with:
+
+```bash
+node scripts/lib/worktree-preflight.mjs pending-note write
+```
+
+It resolves the MAIN checkout, stamps the filename with the shipped sha and the
+time, and writes there. The **next** `/ship` invocation's Step 2 drains every
+pending note, prepends them as a `### Consumer Verification (previous ship)`
+subsection above that session's own entry, then deletes exactly those (template:
+`references/status-md-format.md`). If no further `/ship` happens, the notes
+simply sit there unread — an acceptable loss for advisory documentation (never a
+gate), not a reason to force a push now.
+
+> **One note per ship, and none of them overwrite each other** (2026-09-07,
+> upstream b02d80b3). This step used to write ONE fixed filename
+> unconditionally, and the gap between a write and the next read is unbounded —
+> Step 2 only runs inside `/ship`, and not every status.md commit is a ship. A
+> second ship inside that gap destroyed an unread note by following this step as
+> written, silently in both directions. Hit live 2026-09-06: a verified note was
+> still unread ~10 hours later when the next Step 6.8 ran. The filename now
+> carries the sha and a timestamp, so a collision is not expressible rather than
+> merely unlikely.
 
 > **The MAIN checkout, not the worktree you are standing in** (2026-08-14). A
 > ship run from a linked worktree that is then deleted — the normal end of a
 > Claude Code session — destroys this note before any later `/ship` can read it,
 > so the handoff silently never happens and the only symptom is a note that
-> never appears. `.claude/tmp/` resolves per-tree, so "write it to
-> `.claude/tmp/`" means a different directory depending on where you are
-> standing. Resolve the durable one explicitly:
+> never appears. `.claude/tmp/` resolves per-tree, so a hand-written path means
+> a different directory depending on where you are standing.
 >
-> ```bash
-> node -e "const{execFileSync}=require('node:child_process'),p=require('node:path');console.log(p.join(p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim()),'.claude','tmp','ship-verification-pending.md'))"
-> ```
->
-> Same `--git-common-dir` trick `skills:hydrate` uses, and for the same reason:
-> in a linked worktree the common dir's parent IS the main checkout, and the
-> main checkout is the one tree guaranteed to outlive the session. Step 2 reads
-> the same resolved path, so a note written from a worktree is still found by a
-> later ship run from anywhere.
+> Both commands resolve the durable one themselves, via the same
+> `--git-common-dir` trick `skills:hydrate` uses: in a linked worktree the
+> common dir's parent IS the main checkout, and the main checkout is the one
+> tree guaranteed to outlive the session. Reader and writer share ONE
+> implementation rather than two hand-copied recipes, so a note written from a
+> worktree is still found by a later ship run from anywhere.
 
 **Three terminal states, and only three**: `verified`, `failed`, `unverified`.
 **`unverified` must name a concrete blocked prerequisite** — "no network in this

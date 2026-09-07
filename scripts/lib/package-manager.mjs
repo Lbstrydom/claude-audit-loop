@@ -3,6 +3,12 @@
  * and how do I invoke it without a shell".
  *
  * **Why this exists.** `ensureAuditDeps` hardcoded `npm install --save-dev`.
+ * (That function lives in `lib/install/deps.mjs`, which is SOURCE-REPO-ONLY —
+ * it walks the consumer registry, so it never syncs. If you are reading this in
+ * a consumer bundle, the caller named here is upstream code you do not have;
+ * what reaches you is this module and the install it once produced. Named
+ * because a rationale that cites an unreachable symbol reads as a stale
+ * reference — reported 2026-09-07, upstream ea23dfda.)
  * Measured 2026-08-15 in a scratch pnpm repo, that command does not merely
  * write a competing lockfile — npm cannot read pnpm's symlinked tree at all and
  * dies with `Cannot destructure property 'package' of 'node.target'`. A plain

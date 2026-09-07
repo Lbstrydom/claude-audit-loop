@@ -16,12 +16,12 @@
     "scripts/lib/schemas.mjs": 1628,
     "scripts/lib/store/campaign.mjs": 1787,
     "scripts/lib/store/runs-findings.mjs": 2364,
-    "scripts/lib/sync-isolation-verify.mjs": 1001,
-    "scripts/lib/upstream/commands.mjs": 1044,
+    "scripts/lib/sync-isolation-verify.mjs": 1028,
+    "scripts/lib/upstream/commands.mjs": 1062,
     "scripts/openai-audit.mjs": 1309,
     "scripts/setup-postgres.mjs": 1506,
     "scripts/solo-control-audit.mjs": 1588,
     "scripts/symbol-index/extract.mjs": 1205,
-    "scripts/sync-to-repos.mjs": 2663
+    "scripts/sync-to-repos.mjs": 2673
   }
 }

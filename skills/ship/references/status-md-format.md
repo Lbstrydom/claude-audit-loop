@@ -97,18 +97,28 @@ These will silently regress under future refactors.
 - **Failing P0**: <first failing criterion if any>
 ```
 
-### Consumer Verification — previous ship (when `.claude/tmp/ship-verification-pending.md` exists)
+### Consumer Verification — previous ship(s), when `pending-note read` returns any
 
-Step 6.8 of a PRIOR `/ship` run wrote this file instead of amending an
+Step 6.8 of a PRIOR `/ship` run wrote a note instead of amending an
 already-pushed status.md entry (which would force a second commit + push —
-see SKILL.md Step 6.8). Step 2 of THIS run reads it, prepends it above this
-session's own entry, then deletes the file:
+see SKILL.md Step 6.8). Step 2 of THIS run drains them, prepends them above this
+session's own entry, then deletes exactly the ones it drained.
+
+**There may be more than one, and the subsection holds all of them.** A ship
+does not happen after every note: Step 2 only runs inside `/ship`, and not every
+status.md commit is a ship, so notes accumulate between drains. One Commit /
+Retrieval / Result triple per note, oldest first — the order `pending-note read`
+prints them in. Never collapse two ships into one triple, and never drop the
+older one: each names a different pushed artifact.
 
 ```markdown
 ### Consumer Verification (previous ship)
 - **Commit**: <full sha>
 - **Retrieval**: <command actually run, e.g. clone-to-tempdir + `npm run check`>
 - **Result**: <verified | failed | unverified — <blocked prerequisite> if unverified>
+- **Commit**: <full sha of the next-newer note, if the drain returned more than one>
+- **Retrieval**: …
+- **Result**: …
 ```
 
 ## Never commit these into status.md

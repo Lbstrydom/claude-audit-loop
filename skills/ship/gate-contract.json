@@ -87,7 +87,7 @@
   ],
   "ignoredCandidates": [
     {
-      "line": "> \"skills:hydrate\": \"node -e \\\"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});console.log('[hydrate] copied '+src)\\\"\"",
+      "line": "> \"skills:hydrate\": \"node -e \\\"const{execFileSync}=require('node:child_process'),p=require('node:path'),f=require('node:fs');const main=p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim());const dir='scripts/.claude-skills';const src=p.join(main,dir);if(p.resolve(dir)===p.resolve(src)){console.log('[hydrate] main checkout - nothing to do');process.exit(0)}if(!f.existsSync(src)){console.error('[hydrate] no tooling at '+src+' - re-sync the main checkout first');process.exit(1)}f.cpSync(src,dir,{recursive:true});const man='scripts/.sync-manifest.json',ms=p.join(main,man),ok=f.existsSync(ms);if(ok){f.copyFileSync(ms,man)}console.log('[hydrate] copied '+(ok?2:1)+'/2 items from '+main+(ok?'':' - but NOT '+man+' (absent there): this tree has no bundle stamp'))\\\"\"",
       "reason": "The worktree-preflight marker block's inlined `skills:hydrate` recipe. Every node one-liner carries `require` and `process.exit`, two ENFORCEMENT_VERBS, and no phrasing of a runnable recipe avoids them — the verbs are JavaScript here, not an enforcement claim about this skill. The recipe is inlined rather than cited because in an unadopted consumer both of the old pointers are dead at once (no `skills:hydrate` script yet, and `docs/runbooks/` is not synced), so a skill file is the only carrier that reaches the reader. Byte-identical across all 16 contracts by construction: it is generated from CONSUMER_HYDRATE_NPM_SCRIPT via MARKER_BLOCK, and `checkSkill` pins the block in every copy."
     },
     {
@@ -331,32 +331,8 @@
       "reason": "Step 6.8 instruction to the agent about WHERE to record the consumer-verification outcome (a gitignored scratch file, not the already-pushed status.md entry). Same shape as the existing Step 6.8 entries here ('unverified must name a concrete blocked prerequisite', 'Never inherit the producer-side green'): a discipline addressed to the agent, with no CLI exit code for a cli-exit recipe to assert — /ship writes nothing that checks whether the agent complied."
     },
     {
-      "line": "(never a gate), not a reason to force a push now.",
-      "reason": "Tail of the sentence explaining WHY the pending-verification file is acceptable to lose (Step 6.8 is advisory, never a gate — the existing step-0-5-gates-non-blocking rationale applied to this specific note). Not a new claim: restates the advisory-only nature of Step 6.8 already contracted via the 'Advisory by construction' entry here."
-    },
-    {
-      "line": "boundary but never ships as-is.",
-      "reason": "Step 2. Describes what the gitignored scratch file DOES (survives a session, is never committed) — a property of .gitignore, not a rule /ship enforces. There is no exit code to assert: the note is advisory documentation the next ship folds into status.md."
-    },
-    {
-      "line": "node -e \"const{execFileSync}=require('node:child_process'),p=require('node:path');console.log(p.join(p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim()),'.claude','tmp','ship-verification-pending.md'))\"",
-      "reason": "Step 2. A path-resolution recipe, not an enforcement claim. `--git-common-dir` is matched only because the verb scanner sees `git`; the command prints a path and asserts nothing. Same literal appears in Step 6.8 (dispositioned separately) because the two steps must resolve the SAME file."
-    },
-    {
-      "line": "— never by re-opening the status.md entry you just pushed.** status.md is append-only",
-      "reason": "Step 6.8. Restates the pre-existing append-only convention for status.md and says where NOT to write the verification note. Re-wrapped 2026-08-14 when the target moved to the main checkout, which changed the line boundary; the claim is unchanged and is a documentation convention, not a /ship gate — nothing exits non-zero if an agent writes it elsewhere."
-    },
-    {
       "line": "> so the handoff silently never happens and the only symptom is a note that",
       "reason": "Step 6.8. Explains the FAILURE MODE that motivated resolving the main checkout (a deleted worktree destroys the note). A statement about what happens absent the fix, not a rule /ship enforces."
-    },
-    {
-      "line": "> never appears. `.claude/tmp/` resolves per-tree, so \"write it to",
-      "reason": "Step 6.8. States a fact about how a relative path resolves inside a linked git worktree — external git/filesystem behaviour, not a /ship enforcement claim."
-    },
-    {
-      "line": "> node -e \"const{execFileSync}=require('node:child_process'),p=require('node:path');console.log(p.join(p.dirname(execFileSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8'}).trim()),'.claude','tmp','ship-verification-pending.md'))\"",
-      "reason": "Step 6.8. The blockquoted form of the same path-resolution recipe as Step 2. Prints a path; asserts nothing. Matched only because the verb scanner sees `git`."
     },
     {
       "line": "primary GPT/Gemini-round finding was never surfaced here at all, however long",
@@ -527,12 +503,36 @@
       "reason": "Step 2b. An instruction to the AGENT about how to place the backlog line, plus the incident that motivates it — not a gate /ship runs. The property it protects IS enforced, just elsewhere and by a different mechanism: scripts/backlog-snapshot.mjs writes no file at all (it prints one line to stdout), and status:integrity:gate fails the push if any session-log entry is lost or rewritten rather than appended to. So there is nothing for a cli-exit oracle to assert here; asserting one would be the fake-check class this suite catches. The PR #87 reference is the reason the instruction is phrased as a prohibition: a tool rewriting that file destroyed 19,257 lines and reached main through a full check run."
     },
     {
-      "line": "| the synced consumer bundle | **authoritative**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs`, run *in the consumer's MAIN checkout* — note the `lib/` segment, it is a module rather than a top-level script. A linked worktree cannot answer this: `skills:hydrate` copies the tooling tree, and `scripts/.sync-manifest.json` is gitignored too, so the run stops at `manifest missing at …` with exit 2. Hydrating the manifest as well would not help — the manifest records what the last sync wrote to the MAIN checkout's disk, so a worktree comparison re-reads the files hydrate itself just copied and reports agreement it manufactured. `npm run sync:dry` from here is the pre-check, not the verdict | zero unexpected diffs; no orphans |",
-      "reason": "Step 6.8's consumer-side retrieval table. Describes what sync-isolation-verify.mjs does when its manifest input is absent — an exit code that ANOTHER tool produces about ITS own input, not a gate /ship enforces or an exit code /ship returns. Added 2026-09-04 after wine-cellar-app measured that a successful `skills:hydrate` still leaves that run at 'manifest missing' exit 2, because hydrate copies scripts/.claude-skills/ and the manifest is gitignored too. The row states where the run belongs and why hydrating the manifest would be the wrong fix rather than merely a bigger one; the verbs are a description of that tool's behaviour, and no phrasing that keeps the exit code precise avoids them."
-    },
-    {
       "line": "> unlockable *by construction* in 0.5b, so it is never an obligation. Here it is",
       "reason": "Step 0.5e's rationale for why its mode split is NOT 0.5b's. The enforcement verb is 'never', and it is a statement about what a plan-mode ROW IS — in 0.5b a plan finding's primary_file is a section reference, so no regression spec can ever cite it — not a claim that /ship enforces anything. The contrast it draws is the point of the paragraph: in 0.5e the same row shape is an unamended plan section, whose worth depends on the plan's Status, so the two steps must word their banners differently. Nothing here has an exit code to assert; the aggregate that DOES have one (byMode / agedOutByMode classifying on primary_file's shape as well as audit_mode) lives in the reader and is covered by tests/cross-skill-unlocked-scope.test.mjs."
+    },
+    {
+      "line": "clear must survive to the next drain, which is why `clear` refuses to delete",
+      "reason": "Step 2 prose explaining why `pending-note clear` takes explicit names. `must` and `refuses` describe the CLI's argument handling — a fact about lib/worktree-preflight.mjs, tested in tests/upstream-triage-2026-09-07.test.mjs — not an enforcement claim /ship makes about itself."
+    },
+    {
+      "line": "session boundary but never ship as-is.",
+      "reason": "Restates that `.claude/tmp/` is gitignored scratch. `never ship` is a description of the directory, not a gate. Reworded from the pre-2026-09-07 singular phrasing when Step 2 moved to draining N notes."
+    },
+    {
+      "line": "| the synced consumer bundle | **authoritative**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs`, run *in the consumer's MAIN checkout* — note the `lib/` segment, it is a module rather than a top-level script. A linked worktree cannot answer this, and since 2026-09-07 it SAYS so: `runGates` refuses a proven linked worktree at `preflight` with exit 2. The manifest records what the last sync wrote to the MAIN checkout's disk, and `skills:hydrate` populates a worktree by copying those same files — so a run there would re-read bytes hydrate just copied and report agreement it manufactured. Hydrate now carries the manifest as well as the tooling tree (upstream 5bc7ff30), so that refusal is explicit rather than the accident of a missing file. `npm run sync:dry` from here is the pre-check, not the verdict | zero unexpected diffs; no orphans |",
+      "reason": "Step 6.8's retrieval table row. Names sync-isolation-verify's own `preflight` refusal of a linked worktree — an enforcement claim about THAT module (tested in tests/upstream-triage-2026-09-07.test.mjs), reported to the reader so they run it in the right tree. /ship enforces nothing here; the whole step is advisory by construction."
+    },
+    {
+      "line": "**Write the outcome with `pending-note write` (body on stdin) — never by",
+      "reason": "The instruction that the note is written by the CLI rather than by re-opening a pushed status.md entry. `never` bars an ACTION the agent might take, which is what a skill step is for; it asserts no gate. Reworded 2026-09-07 when the fixed filename became one file per ship."
+    },
+    {
+      "line": "simply sit there unread — an acceptable loss for advisory documentation (never a",
+      "reason": "Says explicitly that an undrained note is tolerated and that this step is NOT a gate — the opposite of an enforcement claim. Rewrapped 2026-09-07; the pre-existing disposition covered the same sentence on one line."
+    },
+    {
+      "line": "gate), not a reason to force a push now.",
+      "reason": "Continuation of the line above — the word `gate` appears only inside \"(never a gate)\". Rewrapped 2026-09-07."
+    },
+    {
+      "line": "> never appears. `.claude/tmp/` resolves per-tree, so a hand-written path means",
+      "reason": "The 2026-08-14 incident callout: a note written in a deleted worktree is lost silently. Describes a past failure, claims no enforcement. Reworded 2026-09-07 because both steps now resolve the path in code rather than quoting a recipe."
     }
   ]
 }

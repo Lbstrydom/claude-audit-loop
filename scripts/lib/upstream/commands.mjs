@@ -414,6 +414,19 @@ export async function upstreamReport({
   const manifest = readBundleStamp(repoRoot);
   const { recognised, normalised } = validateAffectedPath(affectedPath, manifest);
 
+  // THE OPERATOR READS ONE LINE — it said `ok: true, created: true` with every
+  // null in a JSON blob beside it. A report with no bundle stamp cannot be aged
+  // against the source and its path cannot be ownership-checked (upstream
+  // 5bc7ff30). Returned, not printed: quality.mjs writes these to stderr.
+  const warnings = [];
+  if (!manifest) {
+    warnings.push(
+      `no bundle stamp: scripts/.sync-manifest.json is absent or unreadable under ${repoRoot}, `
+      + 'so this report is filed as "version unknown" and its affected path cannot be checked '
+      + 'for upstream ownership. In a linked worktree run `npm run skills:hydrate` (it carries '
+      + 'the manifest as well as the tooling tree); in a main checkout, re-sync.');
+  }
+
   const payload = redactReport({
     repoId: repoId ?? null,
     title: String(title).trim(),
@@ -440,7 +453,7 @@ export async function upstreamReport({
   if (!cloudEnabled) {
     return {
       ok: true, cloud: false, spooled: true, path: envelopePath, fingerprint,
-      pathRecognised: recognised, bundleSha: payload.reportedBundleSha,
+      pathRecognised: recognised, bundleSha: payload.reportedBundleSha, warnings,
     };
   }
 
@@ -449,12 +462,12 @@ export async function upstreamReport({
     fs.rmSync(envelopePath, { force: true, recursive: true, maxRetries: 3, retryDelay: 50 });
     return {
       ok: true, cloud: true, spooled: false, id: res.id, created: res.created,
-      fingerprint, pathRecognised: recognised, bundleSha: payload.reportedBundleSha,
+      fingerprint, pathRecognised: recognised, bundleSha: payload.reportedBundleSha, warnings,
     };
   }
   return {
     ok: true, cloud: false, spooled: true, path: envelopePath, fingerprint,
-    pathRecognised: recognised, bundleSha: payload.reportedBundleSha,
+    pathRecognised: recognised, bundleSha: payload.reportedBundleSha, warnings,
     error: res?.error ?? null,
   };
 }
