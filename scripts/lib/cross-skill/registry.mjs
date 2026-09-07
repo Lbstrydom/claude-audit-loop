@@ -105,7 +105,14 @@ export const REGISTRY = Object.freeze([
     // join; declaring --repo required for label would break its documented
     // invocation). A per-verb scope grammar for one command is the
     // over-engineered cliff; this note is the honest middle (audit CA-r2).
-    scope: 'explicit-required',
+    //
+    // 'explicit-preferred' since 2026-09-07: identical to 'explicit-required'
+    // for every caller that names a repo, and the ambient fallback is reachable
+    // ONLY from the two READ verbs — `summary` and `--worksheet` — because
+    // `backfill-hash` (mutating) still validates `--repo` before resolving, and
+    // `label` never resolves scope at all. The read/write split the mode is
+    // named for is therefore enforced by the handlers, not merely intended.
+    scope: 'explicit-preferred',
     kind: 'write',
     cloud: 'degrade-noop',
     degradeShape: {},
@@ -445,7 +452,10 @@ export const REGISTRY = Object.freeze([
     name: 'get-persona-sessions-by-repo',
     flags: ['repo', 'repo-id', 'limit', 'select', { name: 'p0-only', kind: 'boolean' }],
     positionals: 'none', payload: 'both',
-    scope: 'explicit-required', kind: 'read', cloud: 'degrade-noop',
+    // 'explicit-preferred' (2026-09-07): a pure read, and /ship Step 0.5a's
+    // fallback — refusing it for want of a name the caller's shell never had is
+    // how the gate went blind. `--repo` still wins wherever it is given.
+    scope: 'explicit-preferred', kind: 'read', cloud: 'degrade-noop',
     degradeShape: { rows: [] },
     load: () => import('./commands/persona.mjs').then((m) => m.getPersonaSessionsByRepoCmd),
   },

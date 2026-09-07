@@ -384,18 +384,41 @@ describe('F7 — repo resolution failure is distinguishable from absence', () =>
 
 describe('F4/F5 — a flag that is accepted must decide something', () => {
   it('persona-outcomes resolves scope from --repo, not from the ambient checkout', async () => {
-    // RETARGETED (command-registry Cluster A): cmdPersonaOutcomes migrated to
-    // the registry, where the F4 guarantee is now STRUCTURAL — the entry
-    // declares `scope: 'explicit-required'`, whose resolver (scope.mjs) is
-    // `--repo`-authoritative by construction, and the behavioural half lives
-    // in tests/cross-skill-store-calls.test.mjs ("the ambient checkout must
-    // play NO part in an explicitly-named read"). This case pins the
-    // declaration so a future re-declaration to an ambient policy is loud.
+    // RETARGETED (command-registry Cluster A), then RE-EXPRESSED 2026-09-07.
+    // This used to pin the literal string `scope: 'explicit-required'`. That
+    // spelling stopped being the property: `explicit-preferred` adds an ambient
+    // fallback reachable ONLY when no repo was named, which does not weaken F4
+    // at all — F4 was a NAMED `--repo` losing to the ambient checkout. A string
+    // equality could not tell those two apart, so it now asserts the PROPERTY
+    // directly, against the resolver: whatever the mode is called, a named repo
+    // must resolve identically under `explicit-required` and must never consult
+    // the ambient identity.
     const { REGISTRY } = await import('../scripts/lib/cross-skill/registry.mjs');
+    const { resolveCommandScope } = await import('../scripts/lib/cross-skill/scope.mjs');
     const entry = REGISTRY.find((e) => e.name === 'persona-outcomes');
     assert.ok(entry, 'persona-outcomes must be a registry command');
-    assert.equal(entry.scope, 'explicit-required',
-      'the F4 fix IS this declaration — an ambient policy here reintroduces the silently-overridden --repo');
+    assert.ok(['explicit-required', 'explicit-preferred'].includes(entry.scope),
+      `a --repo-authoritative policy is required here; got ${entry.scope}`);
+
+    let ambientAsked = false;
+    const deps = {
+      isCloudEnabled: async () => true,
+      getRepoIdByName: async () => 'row-by-name',
+      resolveRepoForStoreResult: async () => { ambientAsked = true; return { kind: 'resolved', repoRowId: 'row-ambient', repoUuid: 'u', name: 'o/ambient' }; },
+    };
+    const declared = await resolveCommandScope(entry.scope, { explicitRepoName: 'o/named' }, deps);
+    const required = await resolveCommandScope('explicit-required', { explicitRepoName: 'o/named' }, deps);
+    assert.deepEqual(declared, required,
+      'the F4 fix IS this behaviour — a NAMED repo must resolve exactly as explicit-required does');
+    assert.equal(ambientAsked, false,
+      'the ambient checkout must play NO part in an explicitly-named read');
+
+    // An unknown name stays an error: the fallback may never rescue a typo into
+    // an answer about a different repo.
+    const typo = await resolveCommandScope(entry.scope, { explicitRepoName: 'o/typo' },
+      { ...deps, getRepoIdByName: async () => null });
+    assert.equal(typo.kind, 'error');
+    assert.equal(typo.code, 'UNKNOWN_REPO');
     // The legacy resolver survives for the not-yet-migrated reader below.
     assert.ok(/async function resolveRequestedRepoScope/.test(CODE));
   });
@@ -409,15 +432,36 @@ describe('F4/F5 — a flag that is accepted must decide something', () => {
     // produced `rows: []` WITH `scopedByRepoId: true` — a false zero wearing a
     // field that asserts correct scoping.
     const { REGISTRY } = await import('../scripts/lib/cross-skill/registry.mjs');
+    const { resolveCommandScope } = await import('../scripts/lib/cross-skill/scope.mjs');
     const entry = REGISTRY.find((e) => e.name === 'get-persona-sessions-by-repo');
     assert.ok(entry, 'must be a registry command');
-    assert.equal(entry.scope, 'explicit-required',
-      'an ambient policy here reintroduces the false zero (F10)');
+    assert.ok(['explicit-required', 'explicit-preferred'].includes(entry.scope),
+      `a --repo-authoritative policy is required here; got ${entry.scope}`);
+
+    // RE-EXPRESSED 2026-09-07 (see the sibling case above). F10 was an AMBIENT
+    // id sitting beside a REQUESTED name, so the two SQL clauses named different
+    // repos. Omitting --repo entirely resolves both halves from one identity and
+    // cannot produce that mismatch — what must still hold is that a named repo
+    // never picks up an ambient id.
+    let ambientAsked = false;
+    const deps = {
+      isCloudEnabled: async () => true,
+      getRepoIdByName: async () => 'row-by-name',
+      resolveRepoForStoreResult: async () => { ambientAsked = true; return { kind: 'resolved', repoRowId: 'row-ambient', repoUuid: 'u', name: 'o/ambient' }; },
+    };
+    const named = await resolveCommandScope(entry.scope, { explicitRepoName: 'o/named' }, deps);
+    assert.equal(named.repoId, 'row-by-name');
+    assert.equal(ambientAsked, false, 'a requested name must never be paired with an ambient id (F10)');
+
     const src = stripComments(fs.readFileSync(
       fileURLToPath(new URL('../scripts/lib/cross-skill/commands/persona.mjs', import.meta.url)), 'utf8',
     ));
-    assert.ok(/resolveScope\(\{ explicitRepoName: parsed\.data\.repoName \}\)/.test(src),
-      'the handler must resolve from the REQUESTED name');
+    assert.ok(/resolveScope\(\{ explicitRepoName: requestedName \}\)/.test(src),
+      'the handler must resolve from the REQUESTED name when it has one');
+    // And it must never hand the store a name from one identity beside an id
+    // from another — the shape F10 actually was.
+    assert.ok(/repoName: effectiveName, repoId/.test(src),
+      'the store call must take BOTH halves from the scope that was resolved');
   });
 
   it('an unresolvable --repo is refused even when --repo-id is valid', () => {

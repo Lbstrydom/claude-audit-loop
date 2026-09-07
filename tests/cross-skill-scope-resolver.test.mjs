@@ -169,3 +169,53 @@ describe("scope 'global-optin' (--all-repos chain — legacy resolveShipNudgeSco
     assert.equal(s2.kind, 'error');
   });
 });
+
+describe("scope 'explicit-preferred' (the READ chain — /ship's persona gate)", () => {
+  it('a NAMED repo takes the explicit-required path byte-for-byte', async () => {
+    const named = await resolveCommandScope('explicit-preferred', { explicitRepoName: 'o/r' }, okDeps());
+    const required = await resolveCommandScope('explicit-required', { explicitRepoName: 'o/r' }, okDeps());
+    assert.deepEqual(named, required);
+  });
+
+  it('an UNKNOWN named repo is still an ERROR — the fallback must not rescue a typo', async () => {
+    // The whole hazard of a fallback chain: a caller names the wrong repo and
+    // silently gets an answer about a DIFFERENT one. `--repo` losing to the
+    // ambient checkout would be F4 all over again, in a read.
+    const s = await resolveCommandScope('explicit-preferred', { explicitRepoName: 'o/typo' },
+      okDeps({ getRepoIdByName: async () => null }));
+    assert.equal(s.kind, 'error');
+    assert.equal(s.code, 'UNKNOWN_REPO');
+  });
+
+  it('NO name falls back to the ambient identity, carrying the slug', async () => {
+    const s = await resolveCommandScope('explicit-preferred', {}, okDeps());
+    assert.deepEqual(s, { kind: 'scoped', repoId: 'row-ambient', slug: 'o/r' });
+  });
+
+  it('an unresolvable ambient identity is UNRESOLVED, never a scoped read of nothing', async () => {
+    const s = await resolveCommandScope('explicit-preferred', {},
+      okDeps({ resolveRepoForStoreResult: async () => ({ kind: 'unresolved', repoUuid: 'u', name: 'o/r' }) }));
+    assert.deepEqual(s, { kind: 'unresolved', reason: 'repo-identity-unresolvable' });
+  });
+
+  it('cloud-off is its OWN reason, distinct from an unresolvable identity', async () => {
+    const s = await resolveCommandScope('explicit-preferred', {},
+      okDeps({ resolveRepoForStoreResult: async () => ({ kind: 'cloud-off' }) }));
+    assert.deepEqual(s, { kind: 'unresolved', reason: 'cloud-off' });
+  });
+
+  it('a THROWN ambient lookup is an ERROR, never unresolved — the F17 cell', async () => {
+    const s = await resolveCommandScope('explicit-preferred', {},
+      okDeps({ resolveRepoForStoreResult: THROWING }));
+    assert.equal(s.kind, 'error');
+    assert.equal(s.code, 'REPO_RESOLVE_FAILED');
+  });
+
+  it('an explicit repoId with no name short-circuits without an ambient lookup', async () => {
+    let asked = false;
+    const s = await resolveCommandScope('explicit-preferred', { explicitRepoId: 'given' },
+      okDeps({ resolveRepoForStoreResult: async () => { asked = true; return { kind: 'cloud-off' }; } }));
+    assert.deepEqual(s, { kind: 'scoped', repoId: 'given' });
+    assert.equal(asked, false);
+  });
+});

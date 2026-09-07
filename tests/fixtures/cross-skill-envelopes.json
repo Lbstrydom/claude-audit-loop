@@ -80,13 +80,18 @@
         "persona-outcomes",
         "summary"
       ],
-      "status": 2,
+      "status": 0,
       "envelope": {
-        "ok": false,
-        "error": {
-          "code": "BAD_INPUT",
-          "message": "--repo <name> is required (or set PERSONA_TEST_REPO_NAME)"
-        }
+        "ok": true,
+        "cloud": false,
+        "measured": false,
+        "reason": "cloud-off",
+        "scope": {
+          "mode": "unresolved",
+          "repoId": null,
+          "slug": null
+        },
+        "sessionId": null
       }
     },
     "po-summary-cloud-off": {
@@ -100,7 +105,13 @@
       "envelope": {
         "ok": true,
         "cloud": false,
-        "sessionId": null
+        "sessionId": null,
+        "measured": false,
+        "scope": {
+          "mode": "explicit",
+          "repoId": null,
+          "slug": "owner/repo"
+        }
       }
     },
     "po-label-missing-args": {
@@ -164,12 +175,17 @@
         "persona-outcomes",
         "--worksheet"
       ],
-      "status": 2,
+      "status": 0,
       "envelope": {
-        "ok": false,
-        "error": {
-          "code": "BAD_INPUT",
-          "message": "--repo <name> is required for --worksheet"
+        "ok": true,
+        "cloud": false,
+        "measured": false,
+        "reason": "cloud-off",
+        "count": 0,
+        "scope": {
+          "mode": "unresolved",
+          "repoId": null,
+          "slug": null
         }
       }
     },
@@ -1087,23 +1103,11 @@
       "args": [
         "get-persona-sessions-by-repo"
       ],
-      "status": 2,
+      "status": 0,
       "envelope": {
-        "ok": false,
-        "error": {
-          "code": "BAD_INPUT",
-          "message": "--repo <name> required (optional: --limit <n>, --p0-only, --select <csv>)",
-          "issues": [
-            {
-              "expected": "string",
-              "code": "invalid_type",
-              "path": [
-                "repoName"
-              ],
-              "message": "Invalid input: expected string, received undefined"
-            }
-          ]
-        }
+        "ok": true,
+        "cloud": false,
+        "rows": []
       }
     },
     "sessions-by-repo-cloud-off": {

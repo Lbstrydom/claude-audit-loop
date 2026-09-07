@@ -117,32 +117,66 @@ is accurate. Best-effort — if a query fails, log and proceed.
 
 ### 0.5a — Recent persona-test P0s for this repo
 
-If `PERSONA_TEST_REPO_NAME` is set, the PRIMARY source (WS4,
-`docs/plans/persona-nav-feedback-recovery.md`) joins the latest
-session's raw P0/P1 findings against the durable per-repo outcome ledger —
-a finding labeled `dismissed`/`wont_fix` no longer counts as open, but one
-labeled `fixed` that STILL appears in the latest session correctly
-re-flags as an open regression:
+**Never pass `--repo "$PERSONA_TEST_REPO_NAME"`.** That is a SHELL expansion,
+and a Claude Code session inherits neither this repo's `.env` nor
+`~/.audit-loop.env` — so in every consumer that had not exported the variable
+into the shell, the flag arrived empty and the gate refused. The command
+resolves the repo itself: `--repo` -> `PERSONA_TEST_REPO_NAME` (read from
+`.env` by the CLI, not by your shell) -> the ambient `git remote` identity.
+Run it bare; pass `--repo <slug>` only to override.
+
+The PRIMARY source (WS4, `docs/plans/persona-nav-feedback-recovery.md`) joins
+the latest session's raw P0/P1 findings against the durable per-repo outcome
+ledger — a finding labeled `dismissed`/`wont_fix` no longer counts as open, and
+one labeled `fixed` that reappears in a LATER session re-flags as an open
+regression:
 
 ```bash
-node scripts/cross-skill.mjs persona-outcomes summary --repo "$PERSONA_TEST_REPO_NAME"
+node scripts/cross-skill.mjs persona-outcomes summary
 ```
 
-Returns `{ok, cloud, sessionId, sessionCreatedAt, persona, verdict, rawP0,
-rawP1, labeled: {closed, open_relabeled_fixed, open_relabeled_stale,
-unlabeled}, openP0, openP1}`. **Closed failure semantics — never a NEW
-blocker**:
+Returns `{ok, cloud, measured, scope:{mode,repoId,slug}, sessionId,
+sessionCreatedAt, persona, verdict, rawP0, rawP1, labeled: {closed,
+open_relabeled_fixed, open_relabeled_stale, unlabeled, pending_verification},
+openP0, openP1, pendingVerificationP0, pendingVerificationP1}`.
+
+**Check `measured` BEFORE reading any count** (same rule as Step 0.5b).
+`measured: false` means the gate asked nothing — report it as UNMEASURED,
+naming the resolution it attempted, and NEVER as "gate silent":
+
+```
+⚠ UX GATE — UNMEASURED (<reason>)
+  No repo slug resolved (tried: --repo, PERSONA_TEST_REPO_NAME, git remote).
+  This is NOT "no open P0s" — nothing was read.
+  Scope it: node scripts/cross-skill.mjs persona-outcomes summary --repo owner/name
+```
+
+**Closed failure semantics — never a NEW blocker**:
 - `cloud: false` → proceed without the UX gate, exactly as today.
-- `sessionId: null` (no recent session) → gate silent, exactly as today.
+- `measured: false` → print the UNMEASURED card above, then proceed.
+- `sessionId: null` **with `measured: true`** → the gate is genuinely silent:
+  the repo resolved and has no persona session. Name the repo it resolved
+  (`scope.slug`, `scope.mode`), so a silent gate can be told apart from one
+  pointed at the wrong repo.
 - `ok: false` (a real store/query failure) → log one warning line and fall
   back to the legacy raw read (below) — a summary-command regression can
-  never make the gate stricter OR blind:
+  never make the gate stricter OR blind. It takes the same resolution chain
+  and carries the same `measured`/`scope` fields, so run it bare too:
   ```bash
-  node scripts/cross-skill.mjs get-persona-sessions-by-repo \
-    --repo "$PERSONA_TEST_REPO_NAME" --limit 1 --p0-only \
-    --select persona,focus,verdict,p0_count,p1_count,created_at,debrief_md
+  node scripts/cross-skill.mjs get-persona-sessions-by-repo     --limit 1 --p0-only     --select persona,focus,verdict,p0_count,p1_count,created_at,debrief_md
   ```
   (uses that session's raw `p0_count`/`p1_count` as `open_p0_count`/`open_p1_count`).
+
+**`pendingVerification*` is neither open nor clear.** A finding labeled `fixed`
+from the very session being read carries no newer evidence either way — the fix
+is claimed and no persona run has tested it. Counting it open made the gate
+unclearable by construction: label the fix, the same session is still the
+latest, and the gate re-flags what it was just told. When
+`pendingVerificationP0 > 0`, print one line and proceed:
+
+```
+  <n> P0 fix(es) awaiting verification — re-run /persona-test to confirm.
+```
 
 Capture `openP0` + `openP1` from the primary read (or the legacy
 `p0_count`/`p1_count` from the fallback) as `open_p0_count`/`open_p1_count`.
@@ -154,7 +188,7 @@ These feed the ship_event record. If `openP0 > 0` (or the legacy fallback's
   Last persona test: "<persona>" — <N> days ago → <verdict> (P0: <n>, P1: <n>)
   Unresolved P0s detected. These are user-visible broken flows.
   Shipping anyway — consider fixing before next user-facing release.
-  Label fixed/dismissed P0s: node scripts/cross-skill.mjs persona-outcomes --worksheet --repo "$PERSONA_TEST_REPO_NAME"
+  Label fixed/dismissed P0s: node scripts/cross-skill.mjs persona-outcomes --worksheet
 ```
 
 The worksheet line only appears when the PRIMARY read succeeded (labeling

@@ -83,6 +83,13 @@
       "statedIn": "skills/ship/SKILL.md",
       "stated": "Never blocks, and there is no override flag",
       "reason": "Step 0.5h's nudge-not-gate guarantee for the upstream issue queue. The READ half is mechanically honest: `upstream list` is a cross-skill.mjs subcommand, so it returns {ok:true, cloud:false} on cloud-off and a JSON error payload on a store failure rather than throwing, and the step is instructed to skip silently in both cases -- a query failure can make it neither stricter nor blind. But 'never BLOCKS the ship' is a claim about what the AGENT does with a non-empty row set, and there is deliberately no override flag to assert against (the absence of one is the point: an override implies something to override). Same shape and same document-only rationale as step-0-5-gates-non-blocking and unremediated-acceptances-never-blocks above. The deeper reason it can only ever advise is the gate-level rule this repo already applies elsewhere: the queue is CLOUD state, and the commit being pushed cannot change it, so blocking on it would be the cried-wolf shape that earns --no-verify."
+    },
+    {
+      "id": "persona-gate-unmeasured-is-not-silent",
+      "kind": "document-only",
+      "statedIn": "skills/ship/SKILL.md",
+      "stated": "`measured: false` means the gate asked nothing",
+      "reason": "Step 0.5a, added 2026-09-07 after a consumer measured the gate printing `gate silent` — the phrase for *no session exists* — while holding 2 open P0, because `--repo \"$PERSONA_TEST_REPO_NAME\"` was a shell expansion the host never populated. The DATA half is mechanically enforced and tested, and this reason names it so the claim is not unbacked: `explicit-preferred` resolves `--repo` -> PERSONA_TEST_REPO_NAME -> ambient git identity -> `{measured:false, reason}` (scripts/lib/cross-skill/scope.mjs), the handlers make NO store call against an unresolved scope, and tests/cross-skill-scope-resolver.test.mjs + tests/cross-skill-store-calls.test.mjs pin both directions — including that a NAMED repo never consults the ambient checkout and an unknown one is still UNKNOWN_REPO. Document-only for the same reason as unit-test-lock-refuses-unverifiable-claims and step-0-5-gates-non-blocking: what is being contracted HERE is which CARD /ship prints from that payload, cross-skill.mjs exits 0 for every subcommand by design, and `cli-exit` is the only oracle in a CLOSED scenario registry — asserting an exit code the command never produces would itself be the fake-check class this suite exists to catch."
     }
   ],
   "ignoredCandidates": [
@@ -541,6 +548,46 @@
     {
       "line": "> condition nothing could clear: `lock-with-test` refuses an already-locked finding, and",
       "reason": "States why the new verb was needed: `lock-with-test` refuses an already-locked finding (its own documented behaviour, correct for its purpose) and `record-regression-spec` inserts a second row. Both are facts about OTHER commands' behaviour, reported so the reader knows which verb to reach for; /ship enforces neither."
+    },
+    {
+      "line": "**Never pass `--repo \"$PERSONA_TEST_REPO_NAME\"`.** That is a SHELL expansion,",
+      "reason": "Step 0.5a operator instruction about how to INVOKE the command, not a gate /ship enforces. `never` here forbids a shell form: a Claude Code session inherits neither the consumer's .env nor ~/.audit-loop.env, so the expansion yields an empty flag (and on Windows a second time over, since PowerShell spells it $env:NAME). Nothing in this repo can assert what an agent types into a shell; the defence that IS mechanical is the CLI's own resolution chain, contracted at persona-gate-unmeasured-is-not-silent."
+    },
+    {
+      "line": "into the shell, the flag arrived empty and the gate refused. The command",
+      "reason": "Past-tense narrative of the 2026-09-07 consumer measurement, continuing the line above. `gate` and `refused` describe the defect being fixed, not a behaviour /ship still has — the refusal was REMOVED by this change. Contracting a claim about superseded behaviour would bind a gate to code that no longer exists."
+    },
+    {
+      "line": "naming the resolution it attempted, and NEVER as \"gate silent\":",
+      "reason": "The second half of the claim contracted at persona-gate-unmeasured-is-not-silent, split across two lines by the 80-column wrap. `stated` is a single-line span, so the continuation needs its own disposition; the claim, its enforcing code and its tests are named in that gate's reason."
+    },
+    {
+      "line": "⚠ UX GATE — UNMEASURED (<reason>)",
+      "reason": "The literal first line of the card /ship prints. `gate` is the card's own title text, not an enforcement claim about the card. The behaviour the card reports is contracted at persona-gate-unmeasured-is-not-silent."
+    },
+    {
+      "line": "**Closed failure semantics — never a NEW blocker**:",
+      "reason": "Pre-existing Step 0.5a heading, re-emitted as a changed line because the block around it was rewritten. It is the exact claim step-0-5-gates-non-blocking already dispositions as document-only: asserting an absence-of-blocking across cloud-off / unmeasured / query-failure / no-session states is a judgement about agent flow, not a single CLI exit."
+    },
+    {
+      "line": "`sessionId: null` **with `measured: true`** → the gate is genuinely silent:",
+      "reason": "Names the ONE state in which \"gate silent\" is an honest report — the repo resolved and has no persona session — as against the unmeasured state above it. An instruction about which of two cards the agent prints, under step-0-5-gates-non-blocking's document-only disposition; the `measured` field it branches on is the tested half named at persona-gate-unmeasured-is-not-silent."
+    },
+    {
+      "line": "(`scope.slug`, `scope.mode`), so a silent gate can be told apart from one",
+      "reason": "Continuation of the line above: tells the agent to name the repo it resolved, so a genuinely-silent gate is distinguishable from one pointed at the wrong repo. `scope` is emitted by the reader and asserted in tests/cross-skill-store-calls.test.mjs; what this line adds is a reporting instruction with no exit code to assert."
+    },
+    {
+      "line": "never make the gate stricter OR blind. It takes the same resolution chain",
+      "reason": "Pre-existing \"a summary-command regression can never make the gate stricter OR blind\" claim, re-emitted because the sentence gained a trailing clause about the fallback taking the same resolution chain. Same claim, same disposition: step-0-5-gates-non-blocking, document-only."
+    },
+    {
+      "line": "is claimed and no persona run has tested it. Counting it open made the gate",
+      "reason": "Rationale for the pendingVerification bucket — why a `fixed` label from the session being read is neither open nor clear. The RULE is mechanically enforced by one oracle (classifyPersonaFindingState in scripts/lib/store/persona-outcomes.mjs, called by both the ship-gate summary and the worksheet that clears it) and pinned by tests/persona-outcomes.test.mjs, including the direction it must NOT fire in: a `fixed` label from an OLDER session reappearing is still a regression. This line is the explanation, not the claim."
+    },
+    {
+      "line": "latest, and the gate re-flags what it was just told. When",
+      "reason": "Continuation of the line above, completing the unclearable-by-construction description. Same disposition and the same enforcing oracle and tests."
     }
   ]
 }

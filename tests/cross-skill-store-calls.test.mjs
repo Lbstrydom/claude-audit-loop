@@ -447,3 +447,108 @@ describe('snapshot reads bind to the repo the CLI is running in', () => {
     assert.equal(read.args[0].repoId, 'repo-row-1');
   });
 });
+
+describe('persona-outcomes — the ambient READ fallback (/ship gate blindness, 2026-09-07)', () => {
+  // PERSONA_TEST_REPO_NAME sits in the developer's own .env, and the CLI loads
+  // it. Leaving it in scope would make every assertion below pass or fail by
+  // WHOSE machine ran the suite — the same class as the AZURE_* scrub.
+  const withoutEnv = async (fn) => {
+    const saved = process.env.PERSONA_TEST_REPO_NAME;
+    delete process.env.PERSONA_TEST_REPO_NAME;
+    try { return await fn(); } finally {
+      if (saved === undefined) delete process.env.PERSONA_TEST_REPO_NAME;
+      else process.env.PERSONA_TEST_REPO_NAME = saved;
+    }
+  };
+
+  it('summary with NO --repo reads the ambient identity and says so in scope.mode', async () => {
+    await withoutEnv(async () => {
+      const { deps, calls } = recordingDeps();
+      const r = await dispatch(argv('persona-outcomes', 'summary'), { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.ok(calls.some((c) => c.fn === 'resolveRepoForStoreResult'));
+      assert.deepEqual(calls.find((c) => c.fn === 'getPersonaOutcomesSummary').args,
+        [{ repoName: 'o/r', repoId: 'repo-row-1' }]);
+      assert.deepEqual(r.envelope.scope, { mode: 'ambient', repoId: 'repo-row-1', slug: 'o/r' });
+      assert.equal(r.envelope.measured, true);
+    });
+  });
+
+  it('summary with NO resolvable identity reports measured:false, NOT a silent gate', async () => {
+    // The whole defect: a gate that asked nothing rendered as a gate that found
+    // nothing. `measured:false` + a reason is the only honest shape.
+    await withoutEnv(async () => {
+      const { deps, calls } = recordingDeps({
+        resolveRepoForStoreResult: async () => ({ kind: 'unresolved', repoUuid: 'u', name: 'o/r' }),
+      });
+      const r = await dispatch(argv('persona-outcomes', 'summary'), { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.equal(r.envelope.measured, false);
+      assert.equal(r.envelope.reason, 'repo-identity-unresolvable');
+      assert.equal(r.envelope.scope.mode, 'unresolved');
+      assert.ok(!calls.some((c) => c.fn === 'getPersonaOutcomesSummary'),
+        'nothing may be read against an unresolved scope — an empty answer would be indistinguishable from a clean one');
+    });
+  });
+
+  it('an EXPLICIT --repo still wins over the ambient checkout (F4/F10 unchanged)', async () => {
+    // The direction the fallback must NOT fire in.
+    await withoutEnv(async () => {
+      const { deps, calls } = recordingDeps();
+      const r = await dispatch(argv('persona-outcomes', 'summary', '--repo', 'other/repo'), { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.ok(!calls.some((c) => c.fn === 'resolveRepoForStoreResult'));
+      assert.equal(r.envelope.scope.mode, 'explicit');
+      assert.equal(r.envelope.scope.slug, 'other/repo');
+    });
+  });
+
+  it('PERSONA_TEST_REPO_NAME is read by the CLI, so no shell expansion is needed', async () => {
+    const saved = process.env.PERSONA_TEST_REPO_NAME;
+    process.env.PERSONA_TEST_REPO_NAME = 'env/repo';
+    try {
+      const { deps, calls } = recordingDeps();
+      const r = await dispatch(argv('persona-outcomes', 'summary'), { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.deepEqual(calls.find((c) => c.fn === 'getRepoIdByName').args, ['env/repo']);
+      assert.equal(r.envelope.scope.mode, 'explicit');
+      assert.ok(!calls.some((c) => c.fn === 'resolveRepoForStoreResult'));
+    } finally {
+      if (saved === undefined) delete process.env.PERSONA_TEST_REPO_NAME;
+      else process.env.PERSONA_TEST_REPO_NAME = saved;
+    }
+  });
+
+  it('get-persona-sessions-by-repo (the gate FALLBACK) resolves ambiently too', async () => {
+    await withoutEnv(async () => {
+      const { deps, calls } = recordingDeps({
+        isPersonaCloudEnabled: async () => true,
+        getPersonaSessionsByRepo: async () => [],
+      });
+      deps.isPersonaCloudEnabled = async () => true;
+      deps.getPersonaSessionsByRepo = async (args) => { calls.push({ fn: 'getPersonaSessionsByRepo', args: [args] }); return []; };
+      const r = await dispatch(argv('get-persona-sessions-by-repo', '--limit', '1', '--p0-only'),
+        { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.equal(calls.find((c) => c.fn === 'getPersonaSessionsByRepo').args[0].repoName, 'o/r');
+      assert.equal(r.envelope.measured, true);
+      assert.equal(r.envelope.scope.mode, 'ambient');
+    });
+  });
+
+  it('get-persona-sessions-by-repo with no identity reports measured:false beside its empty rows', async () => {
+    await withoutEnv(async () => {
+      const { deps, calls } = recordingDeps({
+        resolveRepoForStoreResult: async () => ({ kind: 'unresolved', repoUuid: 'u', name: 'o/r' }),
+      });
+      deps.isPersonaCloudEnabled = async () => true;
+      deps.getPersonaSessionsByRepo = async (args) => { calls.push({ fn: 'getPersonaSessionsByRepo', args: [args] }); return []; };
+      const r = await dispatch(argv('get-persona-sessions-by-repo', '--limit', '1', '--p0-only'),
+        { deps, cloudGate: 'ready' });
+      assert.equal(r.exitCode, 0, JSON.stringify(r.envelope));
+      assert.equal(r.envelope.measured, false);
+      assert.deepEqual(r.envelope.rows, []);
+      assert.ok(!calls.some((c) => c.fn === 'getPersonaSessionsByRepo'));
+    });
+  });
+});

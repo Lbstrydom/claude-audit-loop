@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "bundleVersion": "5e6d88b3e9bb49c3",
+  "bundleVersion": "25b380ecaf6eb240",
   "repoUrl": "https://github.com/Lbstrydom/claude-engineering-skills",
   "rawUrlBase": "https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main",
   "skills": {
@@ -329,8 +329,8 @@
         },
         {
           "relPath": "references/interop.md",
-          "sha": "9cbe9dc0254c",
-          "size": 3575
+          "sha": "26fb81c7e23e",
+          "size": 3952
         },
         {
           "relPath": "references/persona-debrief-format.md",
@@ -346,14 +346,14 @@
     },
     "plan": {
       "path": "skills/plan/SKILL.md",
-      "sha": "6d72516f6ef4",
-      "size": 36423,
+      "sha": "bbb64a1275a5",
+      "size": 36738,
       "summary": "Unified architecture + UX planner with engineering principles. Auto-detects",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "6d72516f6ef4",
-          "size": 36423
+          "sha": "bbb64a1275a5",
+          "size": 36738
         },
         {
           "relPath": "examples/mermaid-blocks.md",
@@ -407,14 +407,14 @@
     },
     "ship": {
       "path": "skills/ship/SKILL.md",
-      "sha": "68504a03641a",
-      "size": 84597,
+      "sha": "f8f1d57402d7",
+      "size": 86390,
       "summary": "Sync all project documentation, optionally update a plan, then commit and push to git.",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "68504a03641a",
-          "size": 84597
+          "sha": "f8f1d57402d7",
+          "size": 86390
         },
         {
           "relPath": "references/input-acquisition.md",

@@ -1,5 +1,117 @@
 # Project Status Log
 
+## 2026-09-07 — the ship persona gate asked the shell for a name the shell never had
+
+### Consumer Verification (previous ship)
+
+**Locator**: `9e5761840dff30c056eeffcb28dceb09b1748916` on `main` (pushed 2026-09-06, range `2c032112..9e576184`).
+
+**Retrieval actually run**: none of the three rows in Step 6.8's table.
+
+**Outcome: `unverified`** — and the blocked prerequisite is concrete, not a shrug.
+The authoritative consumer-bundle check is
+`node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run **in a consumer's MAIN
+checkout**; this ship ran from a linked worktree of the source repo, which has no
+`scripts/.claude-skills/` tree and no `scripts/.sync-manifest.json` (both gitignored),
+so the run stops at `manifest missing` with exit 2. Hydrating them would compare files
+hydrate had just copied and manufacture the agreement.
+
+**What IS known, and its limit**: the pre-push hook's own sync reported
+`Targets: 3/3 reached  Created: 0  Updated: 21  Unchanged: 2353  Errors: 0`, so the
+21 changed skill/tooling files were written to all three consumers. That is the
+PRODUCER's report of its own writes — exactly the green Step 6.8 says not to inherit.
+It says nothing about whether a consumer's tree verifies clean afterwards.
+
+**What this ship changed for consumers** (worth a real check next time): the two synced
+SKILL.md files (`ship` Step 0.5b/0.5e banners, `audit-code` Round-1 `$SCOPE`) and
+`scripts/lib/upstream/{commands,disposition-ledger}.mjs` — the second of which carries
+the `--apply` repair that was dead by construction, so a consumer's
+`upstream:reconcile:gate` could not be cleared by the documented remedy either.
+
+### Changes
+
+Reported from a consumer (`storyline`) with a measurement: the store held a 2026-08-25
+persona session with **2 open P0 and 2 P1**, and every `/ship` since had printed
+`gate silent`. One word from a clean gate, and the wrong one — *no session exists* being
+used to report *nobody asked*.
+
+`/ship` Step 0.5a read the gate as
+`persona-outcomes summary --repo "$PERSONA_TEST_REPO_NAME"`. That is a **shell**
+expansion, and a Claude Code session inherits neither the consumer's `.env` nor
+`~/.audit-loop.env`, so the flag arrived empty and the command refused. On Windows it is
+empty for a second, independent reason — PowerShell spells it `$env:NAME`. The only place
+the value reliably lived was `settings.json`'s `env` block, which the sync owns and
+overwrites.
+
+**The env var was never the problem.** The CLI already loads the consumer's `.env` itself
+via `lib/load-env.mjs` (walk-up, main-worktree fallback, shared layer), and the handler
+already fell back to `process.env.PERSONA_TEST_REPO_NAME`. Running the command *bare*
+would have worked. The prose interpolating it into an argument is what broke it — so the
+fix is to stop interpolating, not merely to add another fallback. Same defect, uncorrected,
+in `/plan`'s persona pre-step and in `persona-test/references/interop.md`.
+
+Reads now take one chain — `--repo` → `PERSONA_TEST_REPO_NAME` → ambient
+`git remote` → `{measured:false, reason}` — and echo `scope:{mode,repoId,slug}`, so an
+unmeasured gate is visible in the transcript instead of wearing a measured gate's clothes.
+Verified live in this very ship: `scope.mode: "ambient"`, `measured: true`,
+`Lbstrydom/claude-engineering-skills`, with no `--repo` passed.
+
+**A `fixed` label could not clear the gate, by construction.** The plan's regression rule
+says a fix that *"reappears in a NEWER session"* is a regression; only the newer-session
+half was implemented, so a finding labeled `fixed` from the latest session re-flagged as
+open forever — label the fix, the same session is still the latest, and the gate re-raises
+what it was just told. `persona_finding_outcomes.last_seen_session_id` already answered
+this exactly, and now does: such a row is `pendingVerification`, neither open nor clear,
+and only a new persona run moves it.
+
+### Files Affected
+- `scripts/lib/cross-skill/scope.mjs` — new `explicit-preferred` read mode
+- `scripts/lib/cross-skill/registry.mjs` — `persona-outcomes`, `get-persona-sessions-by-repo`
+- `scripts/lib/cross-skill/commands/persona.mjs` — the read chain + `measured`/`scope` echo
+- `scripts/lib/store/persona-outcomes.mjs` — `classifyPersonaFindingState`, the one open/closed oracle
+- `skills/ship/SKILL.md`, `skills/plan/SKILL.md`, `skills/persona-test/references/interop.md`
+- `AGENTS.md` (consumer shape 7), `docs/reference/consumer-repo-layout.md`
+- 6 test files, `tests/fixtures/cross-skill-envelopes.json` (4 goldens re-captured by id)
+
+### Decisions Made
+- **A new scope mode rather than reusing `global-optin`.** Its ambient tail is exactly the
+  behaviour wanted, but its refusal messages differ from `explicit-required`'s, and
+  re-declaring the command would have moved goldens on the *explicit* path — the half that
+  is not changing. `explicit-preferred` delegates to `explicit-required` whenever a name is
+  present, so that path is byte-identical.
+- **Reads only.** `label` derives its repo from the addressed session and `backfill-hash`
+  validates `--repo` before resolving, so the ambient branch is unreachable from either
+  write. The split the mode is named for is enforced by the handlers, not merely intended.
+- **An unknown `--repo` is still `UNKNOWN_REPO`.** A fallback that rescues a typo into an
+  answer about a different repo is F4 again, in a read.
+- **Two F4/F10 guards re-expressed, not deleted.** They pinned the literal string
+  `scope: 'explicit-required'`, and that spelling had stopped being the property. They now
+  assert against the resolver that a named repo resolves identically under either mode and
+  never triggers an ambient lookup — and they still fail when `explicitPreferred` is
+  sabotaged to prefer ambient.
+- **One oracle for open/closed.** `classifyPersonaFindingState` is called by both the gate
+  and the worksheet that exists to clear it. The plan requires the two to agree; two copies
+  of a rule that has now been amended once is how they stop agreeing.
+- **`pendingVerification` is `fixed`-only.** `stale` asserts the finding no longer applies,
+  which a re-observation genuinely contradicts even inside one session.
+- **AGENTS.md left at 84 characters of headroom.** The context gate passes but advises
+  condensing rather than shaving; the depth went to `docs/reference/consumer-repo-layout.md`
+  and only a 250-char stub here. A condensation pass is owed and is not this change.
+
+### Verification
+- `npm test`: 15530 tests, 15489 pass, **1 fail**, 40 skipped (176s) — the one failure is
+  `every manifest entry matches the sha of the file as COMMITTED`, which reads
+  `git show HEAD:…` against a manifest regenerated from an uncommitted edit. Structural,
+  and cleared by this commit.
+- `npm run check`: clean apart from `status:integrity:gate` failing closed on an
+  uncommitted tree (base resolves to HEAD, so conservation would hold having compared
+  nothing) — the sandbox-honesty rule working.
+- Red-then-green on both new rules: the pending-verification test fails against the old
+  classifier; both F4/F10 guards fail against a sabotaged `explicitPreferred`.
+
+Backlog 2026-09-07T10:00Z: Q1 38c/16p (+219 aged) · Q2 115c/102p (50 perm) · Q3 2212 · debt unmeasured · upstream 0
+
+
 ## 2026-09-06 — a lock directory vanishing mid-walk killed a whole suite at describe-time
 
 ### Changes

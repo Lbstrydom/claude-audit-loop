@@ -42,6 +42,10 @@ function run(argv, env = {}) {
   delete cleanEnv.SUPABASE_AUDIT_ANON_KEY;
   delete cleanEnv.AUDIT_DB_URL;
   delete cleanEnv.AUDIT_DB_SSL_MODE;
+  // The CLI reads this one itself (the 2026-09-07 read chain), and it lives in
+  // the developer's own .env — leaving it in scope would make the no-repo cases
+  // below pass or fail by WHOSE machine ran the suite.
+  delete cleanEnv.PERSONA_TEST_REPO_NAME;
   cleanEnv.AUDIT_LOOP_DISABLE_SHARED = '1';
   return spawnSync('node', [CLI, ...argv], {
     encoding: 'utf-8',
@@ -55,12 +59,30 @@ function run(argv, env = {}) {
 const EXIT_BAD_INPUT = 2;
 
 describe('cross-skill: get-persona-sessions-by-repo', () => {
-  it('rejects missing --repo with BAD_INPUT', () => {
+  it('missing --repo no longer REFUSES — it resolves ambiently, and says when it could not', () => {
+    // CHANGED 2026-09-07. This refusal is what made /ship's persona gate blind:
+    // Step 0.5a passed `--repo "$PERSONA_TEST_REPO_NAME"`, a shell expansion the
+    // host never populated, so the flag arrived empty and the gate refused in
+    // every consumer. `--repo` is now optional and the chain ends in
+    // `measured:false`. Here the cwd is a non-git temp dir with cloud off, so
+    // the cloud-off degrade fires first — the point being that it EXITS 0 and
+    // carries a shape a caller can distinguish, not a BAD_INPUT.
     const r = run(['get-persona-sessions-by-repo']);
-    assert.equal(r.status, EXIT_BAD_INPUT);
+    assert.equal(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout);
-    assert.equal(j.ok, false);
-    assert.equal(j.error?.code, 'BAD_INPUT');
+    assert.equal(j.ok, true);
+    assert.equal(j.cloud, false);
+    assert.notEqual(j.error?.code, 'BAD_INPUT');
+  });
+
+  it('an explicitly-named repo is STILL authoritative (the fallback must not rescue a typo)', () => {
+    // The direction the new fallback must not fire in — an unknown --repo may
+    // never silently become an answer about the ambient checkout (F4/F10).
+    const r = run(['get-persona-sessions-by-repo', '--repo', 'my-repo']);
+    assert.equal(r.status, 0, r.stderr);
+    const j = JSON.parse(r.stdout);
+    assert.equal(j.ok, true);
+    assert.equal(j.cloud, false);
   });
 
   it('accepts --repo flag form', () => {

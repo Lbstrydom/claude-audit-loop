@@ -16,6 +16,16 @@
  *   - 'explicit-required' ← `resolveRequestedRepoScope` (--repo-documented)
  *   - 'global-optin'      ← `resolveShipNudgeScope`     (--all-repos chain)
  *
+ * 'explicit-preferred' is the one mode with no legacy ancestor, added 2026-09-07
+ * for the ship persona gate. It is `explicit-required` for every caller that
+ * NAMES a repo — byte-identical codes and messages, so no golden moves — and
+ * falls through to the ambient identity ONLY when no name was supplied. That
+ * asymmetry is the whole point: `explicit-required` exists because a WRITE must
+ * never land on the ambient checkout when the caller named a repo (F4/F10), and
+ * nothing about that reasoning says a READ with NO name should refuse rather
+ * than answer about the repo it is standing in. Reserve it for reads: a mode
+ * that silently picks a subject is the wrong default for anything that mutates.
+ *
  * @returns discriminated union:
  *   {kind:'scoped', repoId: string|null, slug?: string|null}
  * | {kind:'global'}
@@ -25,7 +35,7 @@
  */
 
 /**
- * @param {'none'|'ambient-ok'|'explicit-required'|'global-optin'} policy
+ * @param {'none'|'ambient-ok'|'explicit-required'|'explicit-preferred'|'global-optin'} policy
  * @param {{
  *   explicitRepoId?: string|null,   // --repo-id flag or payload.repoId
  *   explicitRepoUuid?: string|null, // payload.repoUuid (ambient-ok writers)
@@ -38,6 +48,7 @@ export async function resolveCommandScope(policy, input = {}, deps) {
   if (policy === 'none') return { kind: 'none' };
   if (policy === 'ambient-ok') return ambientOk(input, deps);
   if (policy === 'explicit-required') return explicitRequired(input, deps);
+  if (policy === 'explicit-preferred') return explicitPreferred(input, deps);
   if (policy === 'global-optin') return globalOptin(input, deps);
   return { kind: 'error', code: 'BAD_SCOPE_POLICY', message: `unknown scope policy "${policy}"` };
 }
@@ -109,6 +120,41 @@ async function explicitRequired({ explicitRepoId, explicitRepoName }, deps) {
         + 'It is NOT an empty result; nothing was measured.' };
   }
   return { kind: 'scoped', repoId: explicitRepoId || byName };
+}
+
+/**
+ * READ-side chain: `--repo` (or its env stand-in) → ambient git identity →
+ * `unresolved`. Never used by a write.
+ *
+ * **Why this exists.** `/ship` Step 0.5a's persona gate reached the store as
+ * `--repo "$PERSONA_TEST_REPO_NAME"`, a SHELL expansion — and a Claude Code
+ * session inherits neither the consumer's `.env` nor `~/.audit-loop.env`, so in
+ * every consumer that had not exported the variable into the shell the flag
+ * arrived empty and the gate refused. Measured in a consumer 2026-09-07: the
+ * store held a session with 2 open P0 and 2 P1, and every ship since had
+ * printed "gate silent" — a phrase that means *no session exists* being used to
+ * report *nobody asked*. The repo's own persona-test skill had resolved this
+ * from `git remote get-url origin` since its Phase 0c; only the gate had not.
+ *
+ * An unresolvable ambient identity is `unresolved`, NEVER a scoped read against
+ * nothing — the caller must render that as unmeasured. A thrown ambient lookup
+ * stays `error`, per the F17 doctrine the sibling modes carry: the store being
+ * unreachable is not a repo without an identity.
+ */
+async function explicitPreferred({ explicitRepoId, explicitRepoName }, deps) {
+  if (explicitRepoName) return explicitRequired({ explicitRepoId, explicitRepoName }, deps);
+  if (explicitRepoId) return { kind: 'scoped', repoId: explicitRepoId };
+
+  const ref = await deps.resolveRepoForStoreResult({}).catch(
+    (err) => ({ kind: 'error', error: err?.message ?? String(err) }),
+  );
+  if (ref.kind === 'resolved') return { kind: 'scoped', repoId: ref.repoRowId, slug: ref.name ?? null };
+  if (ref.kind === 'error') {
+    return { kind: 'error', code: 'REPO_RESOLVE_FAILED',
+      message: `ambient repo identity lookup failed (${ref.error}) — the store was unreachable; `
+        + 'nothing was measured (this is NOT "no sessions" and NOT a repo without identity).' };
+  }
+  return { kind: 'unresolved', reason: ref.kind === 'cloud-off' ? 'cloud-off' : 'repo-identity-unresolvable' };
 }
 
 /** `resolveShipNudgeScope()` semantics — explicit global before ambient. */

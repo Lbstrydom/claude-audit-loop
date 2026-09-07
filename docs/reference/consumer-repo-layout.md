@@ -15,7 +15,7 @@ there.
 
 ---
 
-## Six shapes consumers keep reporting
+## Seven shapes consumers keep reporting
 
 Check for these when adding a gate or a nudge. Each was measured in a real
 consumer repo, and each has a gate now.
@@ -62,6 +62,43 @@ were dead in `.claude/skills/**` and in every consumer while resolving correctly
 from `skills/**`. The two gates above read `docs/…md` *tokens* and see no href
 at all, which is why this shape survived both. Use an absolute upstream URL
 unless the target is inside `skills/`. Gate: `npm run docs:synced-links:gate`.
+
+### 7. A synced SKILL.md resolving its own subject through the SHELL
+
+`/ship` Step 0.5a read the persona P0 gate as
+`persona-outcomes summary --repo "$PERSONA_TEST_REPO_NAME"`. A Claude Code
+session inherits neither the consumer's `.env` nor `~/.audit-loop.env`, so the
+variable was unset in the shell and the flag arrived **empty**; on Windows the
+PowerShell form (`$env:NAME`) differs again, so the same line is empty there for
+a second, independent reason. The only place the value reliably lived was
+`settings.json`'s `env` block — which the sync owns and overwrites.
+
+Measured in a consumer 2026-09-07: the store held a 2026-08-25 session with
+**2 open P0 and 2 P1**, and every ship since had printed `gate silent` — a phrase
+that means *no session exists* being used to report *nobody asked*. The
+consumer's own `/persona-test` had resolved the repo from
+`git remote get-url origin` since its Phase 0c; only the gate had not.
+
+Two rules, and the second is the one that generalises past this bug:
+
+- **A synced SKILL.md may not interpolate an env var into a command.** The
+  runner already loads `.env` (`lib/load-env.mjs`); let the CLI read the
+  variable, and document the command **bare**. Anything the prose expands is
+  resolved by whichever shell the host happened to spawn.
+- **A gate's subject is resolved by a CHAIN that ends in `measured:false`, never
+  in a refusal and never in a zero.** `--repo` → env → ambient `git remote` →
+  `{measured:false, reason}`. `persona-outcomes summary`,
+  `persona-outcomes --worksheet` and `get-persona-sessions-by-repo` all take
+  that chain (scope mode `explicit-preferred`) and echo
+  `scope:{mode,repoId,slug}`, so an unmeasured gate is visible in the ship
+  transcript. An explicitly-NAMED repo still wins over the ambient checkout, and
+  an unknown name is still an error — the fallback must never rescue a typo into
+  an answer about a different repo (F4/F10).
+
+Writes keep requiring `--repo`: `persona-outcomes label` derives its repo from
+the addressed session, and `backfill-hash` validates the flag before resolving.
+No gate; the shape is pinned by `tests/cross-skill-store-calls.test.mjs`
+("the ambient READ fallback") and `tests/cross-skill-scope-resolver.test.mjs`.
 
 ---
 

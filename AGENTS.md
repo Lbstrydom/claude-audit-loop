@@ -341,7 +341,7 @@ consumer instead of the named one. Verified 2026-07-20.)
 > never a second `fixed`. Recipe + closure flags:
 > [consumer-adoption.md](docs/runbooks/consumer-adoption.md) §Reporting an upstream bug.
 
-> **SIX shapes consumers keep reporting — check for them when adding a gate or a
+> **SEVEN shapes consumers keep reporting — check for them when adding a gate or a
 > nudge.** *(1)* a read handing back a key its writer rejects · *(2)* a gate
 > judging files the repo does not own — **ignored AND untracked**, asked of the
 > **candidates** · *(3)* a check verifying one direction only — ask **which side
@@ -351,8 +351,11 @@ consumer instead of the named one. Verified 2026-07-20.)
 > · *(5)* a synced SKILL.md naming an `npm run` alias or an out-of-closure
 > `docs/` file — name synced tooling BY PATH (`npm run skills:consumer-refs:gate`)
 > · *(6)* a **relative link** in synced markdown, whose href resolves where the
-> file LANDS (`npm run docs:synced-links:gate`). Each shape, its measurement and
-> its predicate: [consumer-repo-layout.md](docs/reference/consumer-repo-layout.md).
+> file LANDS (`npm run docs:synced-links:gate`) · *(7)* a synced SKILL.md
+> resolving its own subject through the **shell** — the host loads neither `.env`
+> nor `~/.audit-loop.env`, so document the command BARE and let the CLI's chain
+> end in `measured:false`, never a refusal and never a zero. Each shape, its
+> measurement and its predicate: [consumer-repo-layout.md](docs/reference/consumer-repo-layout.md).
 
 > **"Is this file mine to fix?" must be answerable OFFLINE**, and no single
 > signal answers it: git-ignore state misses the `.claude/**` trees consumers

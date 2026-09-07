@@ -28,6 +28,46 @@ import { retireMissedCorrelationsForHash } from './plans-ship.mjs';
 const OUTCOMES = ['fixed', 'dismissed', 'wont_fix', 'stale'];
 const DISMISSIVE = new Set(['dismissed', 'wont_fix']);
 
+/**
+ * The ONE open/closed oracle for a persona finding observed in the latest
+ * session. Both readers below call it — the ship gate (`getPersonaOutcomesSummary`)
+ * and the worksheet that exists to clear that gate
+ * (`getActionablePersonaOutcomeItems`). The plan requires the two to agree
+ * about what is still open; two copies of the rule is how they stop agreeing,
+ * and this rule has now been amended once.
+ *
+ * Three verdicts, not two:
+ * - `closed` — `dismissed`/`wont_fix`. A durable adjudication that survives
+ *   re-observation across sessions.
+ * - `pending-verification` — labeled `fixed` FROM the very session being read.
+ *   There is no newer persona run, so the finding reappearing here is not
+ *   evidence of anything: the operator claimed a fix and nothing has tested it.
+ *   Counting this open made the gate unclearable by construction — label the
+ *   fix, the same session is still the latest, and the gate re-flags what it
+ *   was just told, forever. Reported by a consumer 2026-09-07.
+ * - `open` — everything else, INCLUDING a `fixed` label whose
+ *   `last_seen_session_id` is an older session: that is the regression case the
+ *   plan's rule is about ("reappears in a NEWER session"), and it is untouched.
+ *
+ * Deliberately `fixed`-only: `stale` asserts the finding no longer applies,
+ * which a re-observation genuinely contradicts even within the same session.
+ *
+ * @param {{outcome?: string|null, last_seen_session_id?: string|null}|null|undefined} ledgerRow
+ * @param {string} latestSessionId
+ * @returns {'closed'|'pending-verification'|'open'}
+ */
+export function classifyPersonaFindingState(ledgerRow, latestSessionId) {
+  const outcome = ledgerRow?.outcome ?? null;
+  if (DISMISSIVE.has(outcome)) return 'closed';
+  if (outcome === 'fixed'
+    && ledgerRow?.last_seen_session_id
+    && latestSessionId
+    && ledgerRow.last_seen_session_id === latestSessionId) {
+    return 'pending-verification';
+  }
+  return 'open';
+}
+
 // Gemini gate finding G1: a malformed finding (missing element/observed)
 // collapses onto the SAME synthetic personaFindingHash as every other
 // malformed finding in the repo — decideCorrelations already quarantines
@@ -222,8 +262,13 @@ async function getStaleHashSummary(repoId, repoName) {
  * joined against the repo-level outcome ledger's row per hash.
  * `dismissed`/`wont_fix` close a finding durably across sessions;
  * `fixed`/`stale`/no-row leave it OPEN — a finding relabeled `fixed` that
- * the current session still observes is exactly a regression, and must
+ * a LATER session still observes is exactly a regression, and must
  * re-flag, not silently close (the plan's regression-handling rule).
+ *
+ * The one exception, added 2026-09-07: a `fixed` row whose
+ * `last_seen_session_id` is the very session being read carries no
+ * newer evidence either way, so it is counted as
+ * `pendingVerification*` rather than open — see the loop below.
  *
  * Closed failure semantics (never a NEW ship-gate blocker):
  * `cloud:false` → caller falls back to today's raw p0_count read exactly
@@ -254,7 +299,12 @@ async function getStaleHashSummary(repoId, repoName) {
  * @param {{repoName: string, repoId?: string|null}} args
  */
 export async function getPersonaOutcomesSummary({ repoName, repoId: callerRepoId = null }) {
-  if (!repoName) return { ok: false, error: 'repoName is required' };
+  // Either identity suffices. `repoId` is the STRONGER of the two (it selects
+  // by the session's own canonical column instead of a caller-supplied display
+  // string), so requiring the weaker one alongside it made an ambient-resolved
+  // read impossible for no gain — which is precisely the caller /ship acquired
+  // on 2026-09-07.
+  if (!repoName && !callerRepoId) return { ok: false, error: 'repoName or repoId is required' };
   if (!await isCloudEnabled()) return { ok: true, cloud: false, sessionId: null };
   try {
     // persona/verdict included (code-audit M1 fix) — /ship's UX-GATE
@@ -289,20 +339,29 @@ export async function getPersonaOutcomesSummary({ repoName, repoId: callerRepoId
     if (repoId && p0p1.length > 0) {
       const hashes = p0p1.map((f) => personaFindingHash(f, stepUrlByNumber));
       const rows = await many(
-        `SELECT persona_finding_hash, outcome
+        `SELECT persona_finding_hash, outcome, last_seen_session_id
            FROM persona_finding_outcomes
           WHERE repo_id = $1 AND persona_finding_hash = ANY($2)`,
         [repoId, hashes],
       );
-      for (const r of rows) outcomeByHash.set(r.persona_finding_hash, r.outcome);
+      for (const r of rows) outcomeByHash.set(r.persona_finding_hash, r);
     }
 
     let closed = 0, openRelabeledFixed = 0, openRelabeledStale = 0, unlabeled = 0, openP0 = 0, openP1 = 0;
+    let pendingVerification = 0, pendingVerificationP0 = 0, pendingVerificationP1 = 0;
     for (const f of p0p1) {
       const hash = personaFindingHash(f, stepUrlByNumber);
-      const outcome = outcomeByHash.get(hash);
-      const isOpen = !DISMISSIVE.has(outcome);
-      if (!isOpen) { closed += 1; continue; }
+      const ledger = outcomeByHash.get(hash);
+      const outcome = ledger?.outcome;
+      const state = classifyPersonaFindingState(ledger, session.id);
+      if (state === 'closed') { closed += 1; continue; }
+      // Neither open nor clear — the rule and its rationale live in
+      // classifyPersonaFindingState, which the worksheet reads too.
+      if (state === 'pending-verification') {
+        pendingVerification += 1;
+        if (personaSeverityCode(f) === 'P0') pendingVerificationP0 += 1; else pendingVerificationP1 += 1;
+        continue;
+      }
       if (outcome === 'fixed') openRelabeledFixed += 1;
       else if (outcome === 'stale') openRelabeledStale += 1;
       else unlabeled += 1;
@@ -318,8 +377,13 @@ export async function getPersonaOutcomesSummary({ repoName, repoId: callerRepoId
       sessionId: session.id, sessionCreatedAt: session.created_at,
       persona: session.persona, verdict: session.verdict,
       rawP0, rawP1,
-      labeled: { closed, open_relabeled_fixed: openRelabeledFixed, open_relabeled_stale: openRelabeledStale, unlabeled },
+      labeled: {
+        closed, open_relabeled_fixed: openRelabeledFixed,
+        open_relabeled_stale: openRelabeledStale, unlabeled,
+        pending_verification: pendingVerification,
+      },
       openP0, openP1,
+      pendingVerificationP0, pendingVerificationP1,
       staleHashCount, hint,
     };
   } catch (err) {
@@ -342,7 +406,10 @@ const WORKSHEET_ROW_LIMIT = 50;
  * latest outcome is `fixed`/`stale` AND the finding reappears in the
  * CURRENT (latest) session (a genuine regression) — the same
  * open-vs-closed rule `getPersonaOutcomesSummary` uses, so the worksheet
- * and the ship gate can never disagree about what's still open.
+ * and the ship gate can never disagree about what's still open. That
+ * includes the 2026-09-07 pending-verification carve-out: a `fixed` row
+ * labeled FROM the latest session is not actionable, because re-labeling it
+ * is the one action that cannot change anything — only a new persona run can.
  *
  * Bounded + ordered: last `WORKSHEET_SESSION_LIMIT` sessions, max
  * `WORKSHEET_ROW_LIMIT` rows, newest first — never a silent truncation
@@ -363,7 +430,9 @@ const WORKSHEET_ROW_LIMIT = 50;
  * @returns {Promise<{ok: boolean, cloud: boolean, items: Array<object>, truncated: boolean, error?: string}>}
  */
 export async function getActionablePersonaOutcomeItems({ repoName, repoId: callerRepoId = null }) {
-  if (!repoName) return { ok: false, cloud: false, items: [], truncated: false, error: 'repoName is required' };
+  if (!repoName && !callerRepoId) {
+    return { ok: false, cloud: false, items: [], truncated: false, error: 'repoName or repoId is required' };
+  }
   if (!await isCloudEnabled()) return { ok: true, cloud: false, items: [], truncated: false };
   try {
     const sessions = callerRepoId
@@ -412,18 +481,25 @@ export async function getActionablePersonaOutcomeItems({ repoName, repoId: calle
     const outcomeByHash = new Map();
     if (repoId && byHash.size > 0) {
       const rows = await many(
-        `SELECT persona_finding_hash, outcome
+        `SELECT persona_finding_hash, outcome, last_seen_session_id
            FROM persona_finding_outcomes
           WHERE repo_id = $1 AND persona_finding_hash = ANY($2)`,
         [repoId, [...byHash.keys()]],
       );
-      for (const r of rows) outcomeByHash.set(r.persona_finding_hash, r.outcome);
+      for (const r of rows) outcomeByHash.set(r.persona_finding_hash, r);
     }
 
     const actionable = [];
     for (const [hash, entry] of byHash) {
-      const outcome = outcomeByHash.get(hash);
-      const isActionable = !outcome || ((outcome === 'fixed' || outcome === 'stale') && latestHashes.has(hash));
+      const ledger = outcomeByHash.get(hash);
+      const outcome = ledger?.outcome;
+      // Mirrors the summary's pending-verification carve-out EXACTLY — the two
+      // are required to agree about what is still open, and a row the gate stops
+      // counting must stop appearing on the surface whose only job is to clear
+      // the gate. See `getPersonaOutcomesSummary`.
+      const state = classifyPersonaFindingState(ledger, latestSessionId);
+      const isActionable = !outcome
+        || (state === 'open' && (outcome === 'fixed' || outcome === 'stale') && latestHashes.has(hash));
       if (!isActionable) continue;
       actionable.push({
         personaFindingHash: hash,

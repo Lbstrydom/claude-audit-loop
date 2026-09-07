@@ -16,6 +16,7 @@ process.env.AUDIT_DB_URL = ''; // must precede the dynamic import below
 const {
   upsertPersonaFindingOutcome, getPersonaOutcomesSummary,
   getActionablePersonaOutcomeItems, resolveLabelTarget,
+  classifyPersonaFindingState,
 } = await import('../scripts/lib/store/persona-outcomes.mjs');
 
 import test from 'node:test';
@@ -160,4 +161,70 @@ test('getActionablePersonaOutcomeItems: cloud-off shape stays minimal — no sta
   assert.equal(r.ok, true);
   assert.equal(r.cloud, false);
   assert.equal('staleHashCount' in r, false);
+});
+
+// ── classifyPersonaFindingState — the ONE open/closed oracle ────────────────
+// Extracted 2026-09-07 so the ship gate and the worksheet that clears it cannot
+// drift apart; the DB-side round trip stays out of scope here by the file's own
+// doctrine, but the DECISION is pure and gets asserted directly.
+
+test('classify: dismissed/wont_fix close durably, whatever session labeled them', () => {
+  for (const outcome of ['dismissed', 'wont_fix']) {
+    assert.equal(classifyPersonaFindingState({ outcome, last_seen_session_id: 's1' }, 's1'), 'closed');
+    assert.equal(classifyPersonaFindingState({ outcome, last_seen_session_id: 's0' }, 's1'), 'closed');
+  }
+});
+
+test('classify: no ledger row is OPEN — an untriaged finding is not a cleared one', () => {
+  assert.equal(classifyPersonaFindingState(null, 's1'), 'open');
+  assert.equal(classifyPersonaFindingState(undefined, 's1'), 'open');
+  assert.equal(classifyPersonaFindingState({ outcome: null }, 's1'), 'open');
+});
+
+test('classify: "fixed" labeled FROM the session being read is pending-verification', () => {
+  assert.equal(
+    classifyPersonaFindingState({ outcome: 'fixed', last_seen_session_id: 's1' }, 's1'),
+    'pending-verification',
+  );
+});
+
+test('classify: "fixed" from an OLDER session reappearing is still a REGRESSION', () => {
+  // The direction the carve-out must NOT fire in. If this ever returns
+  // pending-verification, the regression rule the whole ledger exists for is
+  // gone and nothing else would say so.
+  assert.equal(
+    classifyPersonaFindingState({ outcome: 'fixed', last_seen_session_id: 's0' }, 's1'),
+    'open',
+  );
+});
+
+test('classify: "stale" is never pending-verification, even from the same session', () => {
+  // `stale` asserts the finding no longer applies; re-observing it in the very
+  // session it was labeled from CONTRADICTS the label rather than awaiting it.
+  assert.equal(
+    classifyPersonaFindingState({ outcome: 'stale', last_seen_session_id: 's1' }, 's1'),
+    'open',
+  );
+});
+
+test('classify: a "fixed" row with NO last_seen_session_id stays open', () => {
+  // The column is nullable, and a null must not compare equal to a null
+  // latestSessionId and silently suppress the finding.
+  assert.equal(classifyPersonaFindingState({ outcome: 'fixed', last_seen_session_id: null }, 's1'), 'open');
+  assert.equal(classifyPersonaFindingState({ outcome: 'fixed', last_seen_session_id: null }, null), 'open');
+  assert.equal(classifyPersonaFindingState({ outcome: 'fixed', last_seen_session_id: 's1' }, null), 'open');
+});
+
+test('getPersonaOutcomesSummary: a repoId alone is sufficient identity', async () => {
+  // Before 2026-09-07 this refused for want of a display string it would not
+  // have used — which made an ambient-resolved ship gate impossible.
+  const r = await getPersonaOutcomesSummary({ repoName: null, repoId: 'a0000000-0000-0000-0000-000000000000' });
+  assert.equal(r.ok, true);
+  assert.equal(r.cloud, false, 'cloud is off in this hermetic file — the point is that it got PAST the guard');
+});
+
+test('getPersonaOutcomesSummary: neither identity is still a refusal', async () => {
+  const r = await getPersonaOutcomesSummary({ repoName: null, repoId: null });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /repoName or repoId/);
 });

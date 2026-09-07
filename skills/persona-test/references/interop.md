@@ -10,14 +10,21 @@ is optional — the skill degrades gracefully when a sibling is absent.
 ## /ship — Pre-Push UX Gate
 
 Before committing and pushing, `/ship` surfaces unresolved persona P0s as a
-non-blocking warning. When `PERSONA_TEST_REPO_NAME` is set, `/ship` queries
-via the cross-skill bridge (which holds the service-role key — anon reads
-were locked down in the 20260507 RLS hardening):
+non-blocking warning, via the cross-skill bridge (which holds the
+service-role key — anon reads were locked down in the 20260507 RLS
+hardening). The bridge resolves the repo itself (`--repo` ->
+`PERSONA_TEST_REPO_NAME`, read from `.env` by the CLI -> the ambient
+`git remote` identity), so `/ship` runs it bare. A shell-expanded
+`--repo "$PERSONA_TEST_REPO_NAME"` is what made this gate silently blind in
+every consumer that had not exported the variable into its shell (measured
+2026-09-07):
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-repo \
-  --repo "<repo>" --limit 1 --p0-only
+node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 1 --p0-only
 ```
+
+Read `measured` before any count — `measured:false` means no repo resolved and
+nothing was read, which is NOT "no P0s".
 
 If recent P0s exist, `/ship` adds to `status.md`:
 
@@ -34,12 +41,11 @@ the most recent session can also be appended as a "User Perspective" section.
 
 When planning a new feature, `/plan` benefits from knowing what
 persona tests have already found. At the start of Phase 1 (codebase
-exploration), if `PERSONA_TEST_REPO_NAME` is set, it queries via the
-cross-skill bridge (service-role only post-RLS-hardening):
+exploration) it queries via the cross-skill bridge (service-role only
+post-RLS-hardening), letting the bridge resolve the repo:
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-repo \
-  --repo "<repo>" --limit 5 \
+node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 5 \
   --select persona,focus,verdict,findings,debrief_md
 ```
 

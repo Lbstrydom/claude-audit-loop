@@ -36,7 +36,7 @@ const COMMANDS_DIR = fileURLToPath(new URL('../scripts/lib/cross-skill/commands'
 // the two-oracles defect.
 import { stripComments } from '../scripts/check-cli-flags.mjs';
 
-const SCOPES = new Set(['none', 'ambient-ok', 'explicit-required', 'global-optin']);
+const SCOPES = new Set(['none', 'ambient-ok', 'explicit-required', 'explicit-preferred', 'global-optin']);
 const KINDS = new Set(['read', 'write', 'local']);
 const CLOUDS = new Set(['none', 'degrade-noop', 'require']);
 const PAYLOADS = new Set(['json', 'flags', 'both', 'none']);

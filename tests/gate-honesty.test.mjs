@@ -170,7 +170,7 @@ const PINNED_DOCUMENT_ONLY = {
   // DISTINCT entry rather than a widening of its `passed` sibling: that entry's
   // claim is specifically about passed's evidence requirement, and one entry per
   // declared gate state keeps each claim independently traceable.
-  ship: ['gate-passed-refused-without-evidence', 'gate-converged-requires-verified-divergence', 'gate-no-tests-caps-the-verdict', 'category-a-never-staged', 'step-0-5-gates-non-blocking', 'unremediated-acceptances-never-blocks', 'unit-test-lock-refuses-unverifiable-claims', 'final-review-credit-advisory-exit-zero', 'upstream-queue-never-blocks'],
+  ship: ['gate-passed-refused-without-evidence', 'gate-converged-requires-verified-divergence', 'gate-no-tests-caps-the-verdict', 'category-a-never-staged', 'step-0-5-gates-non-blocking', 'unremediated-acceptances-never-blocks', 'unit-test-lock-refuses-unverifiable-claims', 'final-review-credit-advisory-exit-zero', 'upstream-queue-never-blocks', 'persona-gate-unmeasured-is-not-silent'],
   // +1 cluster-start-ref-validated-on-use (worktree-identity-guards Phase 5):
   // document-only because /cycle delegates and emits no exit code of its own —
   // the enforcing refusal lives in the audit resolver and IS bound there.
@@ -285,7 +285,16 @@ describe('gate-honesty — real skills/', () => {
     //   Round-1 invocation, not what a command returns — the ship/category-a-never-staged
     //   shape. Not unchecked prose: the skill TEXT is guarded by
     //   tests/skill-staging-instructions.test.mjs, negative-controlled at the fix.
-    assert.equal(totalDocOnly, 51);   // +2 ux-lock, +5 ship, +4 cycle, +4 plan (Phase C final — ALL 15 contracted); +1 cycle cluster-start-ref (Phase 5); +2 ship: converged + no-tests cap (2026-09-04)
+    // 51 -> 52: +1 ship (persona-gate-unmeasured-is-not-silent, Step 0.5a,
+    //   2026-09-07). Document-only because what it contracts is which CARD /ship
+    //   prints from the summary payload; cross-skill.mjs exits 0 for every
+    //   subcommand by design, so a cli-exit oracle would assert a code the
+    //   command never produces. The DATA half is mechanically covered:
+    //   tests/cross-skill-scope-resolver.test.mjs pins the explicit-preferred
+    //   chain in both directions, and tests/cross-skill-store-calls.test.mjs
+    //   pins that an unresolved scope makes NO store call — so `measured:false`
+    //   can never be a measured zero.
+    assert.equal(totalDocOnly, 52);   // +2 ux-lock, +5 ship, +4 cycle, +4 plan (Phase C final — ALL 15 contracted); +1 cycle cluster-start-ref (Phase 5); +2 ship: converged + no-tests cap (2026-09-04)
 
     const allSkillNames = listSkillNames(skillsRoot);
     const expectedUncontracted = allSkillNames.filter((n) => !PINNED_CONTRACTED_SKILLS.includes(n));

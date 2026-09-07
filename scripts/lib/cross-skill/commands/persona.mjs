@@ -72,21 +72,33 @@ export async function personaOutcomesCmd(ctx) {
   const sub = ctx.verb;
 
   if (ctx.hasFlag('worksheet')) {
-    const repoName = ctx.flag('repo');
-    if (!repoName) throw new CommandError('BAD_INPUT', '--repo <name> is required for --worksheet');
+    // Same read chain as `summary` (2026-09-07): this worksheet is the surface
+    // the ship gate's own remediation line points at, so if the gate can now be
+    // read without `--repo`, refusing here would send the operator to a command
+    // that cannot run. Writes (`label`, `backfill-hash`) keep requiring it.
+    const repoName = ctx.flag('repo') || process.env.PERSONA_TEST_REPO_NAME || null;
     // 88bc75e1/8993b96f: repoName alone is an ambiguous, caller-supplied
     // display string — the scope policy resolves the stable repoId FROM
-    // `--repo` itself, never from the ambient checkout.
+    // `--repo` itself when one is given, and only falls back to the ambient
+    // checkout when the caller named nothing at all.
     const scope = await ctx.resolveScope({ explicitRepoName: repoName });
+    if (scope.kind === 'unresolved') {
+      return {
+        ok: true, cloud: scope.reason !== 'cloud-off', measured: false,
+        reason: scope.reason, count: 0,
+        scope: { mode: 'unresolved', repoId: null, slug: null },
+      };
+    }
     const repoId = scope.repoId;
-    const res = await ctx.deps.getActionablePersonaOutcomeItems({ repoName, repoId });
+    const effectiveName = repoName ?? scope.slug ?? null;
+    const res = await ctx.deps.getActionablePersonaOutcomeItems({ repoName: effectiveName, repoId });
     if (!res.ok) throw new CommandError('STORE_ERROR', res.error || 'worksheet query failed');
     if (!res.cloud) return { ok: true, cloud: false, count: 0 };
     const { renderAdjudicationWorksheet } = await import('../../adjudication-worksheet.mjs');
     const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
     const { dirname } = await import('node:path');
     const md = renderAdjudicationWorksheet({
-      title: `Persona-finding outcome labels — repo ${repoName}`,
+      title: `Persona-finding outcome labels — repo ${effectiveName ?? '(ambient)'}`,
       introLines: [
         'Actionable P0/P1 persona findings: never labeled, OR labeled fixed/stale but' +
         ' reappearing in the latest session (a regression). Labeling a finding' +
@@ -128,16 +140,47 @@ export async function personaOutcomesCmd(ctx) {
   }
 
   if (sub === 'summary') {
-    const repoName = ctx.flag('repo') || process.env.PERSONA_TEST_REPO_NAME;
-    if (!repoName) throw new CommandError('BAD_INPUT', '--repo <name> is required (or set PERSONA_TEST_REPO_NAME)');
+    // THE READ CHAIN (2026-09-07). `--repo` → `PERSONA_TEST_REPO_NAME` →
+    // ambient git identity → `measured:false`. The env layer alone was not
+    // enough: `/ship` invoked this as `--repo "$PERSONA_TEST_REPO_NAME"`, a
+    // SHELL expansion, and a Claude Code session inherits neither the
+    // consumer's `.env` nor `~/.audit-loop.env` — so the flag arrived EMPTY,
+    // the env fallback never ran (an empty flag is falsy but the CLI never saw
+    // the variable either), and the gate refused in every consumer that had not
+    // exported it. `scope.mode` is echoed so a blind gate is visible in the
+    // ship transcript instead of reading like a quiet repo.
+    const repoName = ctx.flag('repo') || process.env.PERSONA_TEST_REPO_NAME || null;
     const scope = await ctx.resolveScope({ explicitRepoName: repoName });
+    if (scope.kind === 'unresolved') {
+      return {
+        ok: true, cloud: scope.reason !== 'cloud-off',
+        measured: false, reason: scope.reason,
+        scope: { mode: 'unresolved', repoId: null, slug: null },
+        sessionId: null,
+      };
+    }
     const repoId = scope.repoId;
+    // The ambient slug is `audit_repos.name`; `--repo`/env is the caller's
+    // display string. Whichever produced the scope is the one that must reach
+    // the store, so the name-fallback query inside it can never land on a
+    // different repo than the id-scoped one did.
+    const effectiveName = repoName ?? scope.slug ?? null;
     // The store's result travels VERBATIM, INCLUDING its `{ok:false}` error
     // shape — which is a real store failure carrying its own diagnosis, so
     // `reportsFailure` keeps the payload and exits 1. Under the old softFail
     // it exited 0, telling every caller that checks $? that a failed summary
     // query had succeeded.
-    return ctx.deps.getPersonaOutcomesSummary({ repoName, repoId });
+    const res = await ctx.deps.getPersonaOutcomesSummary({ repoName: effectiveName, repoId });
+    if (!res || res.ok !== true) return res;
+    return {
+      ...res,
+      measured: res.cloud !== false,
+      scope: {
+        mode: repoName ? 'explicit' : 'ambient',
+        repoId: repoId ?? null,
+        slug: effectiveName,
+      },
+    };
   }
 
   if (sub === 'label') {
@@ -423,7 +466,11 @@ export async function recordCorrelationCmd(ctx) {
 const ListPersonasRequestSchema = z.object({ url: z.url() });
 
 const GetPersonaSessionsByRepoSchema = z.object({
-  repoName: z.string().min(1),
+  // OPTIONAL since 2026-09-07 — omitted means "the repo I am standing in".
+  // The store still needs a NAME (its predicate is `repo_name = $1`), so the
+  // handler supplies the ambient slug; what is optional is the CALLER having
+  // to know it.
+  repoName: z.string().min(1).optional(),
   limit: z.number().int().positive().max(100).optional(),
   p0Only: z.boolean().optional(),
   select: z.array(z.string().min(1)).optional(),
@@ -452,11 +499,18 @@ export async function listPersonasCmd(ctx) {
 /**
  * `get-persona-sessions-by-repo` — sessions for a named repo.
  *
- * The repoId comes from the REQUESTED name, never the ambient checkout: the
- * store predicate is `repo_name = $1 AND (repo_id = $3 OR repo_id IS NULL)`,
- * so an ambient id made the two clauses name different repos and returned
- * `rows: []` alongside `scopedByRepoId: true` — a false zero wearing a field
- * that asserts correct scoping (F10).
+ * When the caller NAMES a repo, the repoId comes from that name and never from
+ * the ambient checkout: the store predicate is
+ * `repo_name = $1 AND (repo_id = $3 OR repo_id IS NULL)`, so an ambient id
+ * beside a requested name made the two clauses name different repos and
+ * returned `rows: []` alongside `scopedByRepoId: true` — a false zero wearing a
+ * field that asserts correct scoping (F10).
+ *
+ * Since 2026-09-07 `--repo` is OPTIONAL, and omitting it resolves BOTH halves
+ * from the ambient identity — which is not the F10 shape: F10 was an ambient id
+ * contradicting a requested name, and here there is no requested name to
+ * contradict. An unresolvable ambient identity reports `measured:false`; it must
+ * never degrade to an unscoped read, and never to a bare empty `rows`.
  */
 export async function getPersonaSessionsByRepoCmd(ctx) {
   const repoFlag = ctx.flag('repo');
@@ -473,13 +527,37 @@ export async function getPersonaSessionsByRepoCmd(ctx) {
 
   const parsed = GetPersonaSessionsByRepoSchema.safeParse(p);
   if (!parsed.success) {
-    throw new CommandError('BAD_INPUT', '--repo <name> required (optional: --limit <n>, --p0-only, --select <csv>)', { issues: parsed.error.issues });
+    throw new CommandError('BAD_INPUT', 'optional: --repo <name>, --limit <n>, --p0-only, --select <csv>', { issues: parsed.error.issues });
   }
   if (!await ctx.deps.isPersonaCloudEnabled()) return { ...ctx.degrade(), rows: [] };
-  const scope = await ctx.resolveScope({ explicitRepoName: parsed.data.repoName });
+  const requestedName = parsed.data.repoName ?? process.env.PERSONA_TEST_REPO_NAME ?? null;
+  const scope = await ctx.resolveScope({ explicitRepoName: requestedName });
+  if (scope.kind === 'unresolved') {
+    // NOT `rows: []` alone. This command is /ship Step 0.5a's LEGACY fallback,
+    // and an empty row list there is read as "no session with open P0s" — the
+    // exact false-clean the 2026-09-07 consumer report was about.
+    return {
+      ok: true, cloud: true, measured: false, reason: scope.reason,
+      scope: { mode: 'unresolved', repoId: null, slug: null },
+      rows: [], scopedByRepoId: false,
+    };
+  }
   const repoId = scope.repoId;
-  const rows = await ctx.deps.getPersonaSessionsByRepo({ ...parsed.data, repoId });
-  return { ok: true, cloud: true, rows, scopedByRepoId: Boolean(repoId) };
+  const effectiveName = requestedName ?? scope.slug ?? null;
+  if (!effectiveName) {
+    // The store filters on `repo_name`; without one it would return [] for a
+    // reason that has nothing to do with the repo's persona history.
+    return {
+      ok: true, cloud: true, measured: false, reason: 'repo-name-unresolvable',
+      scope: { mode: 'unresolved', repoId: repoId ?? null, slug: null },
+      rows: [], scopedByRepoId: false,
+    };
+  }
+  const rows = await ctx.deps.getPersonaSessionsByRepo({ ...parsed.data, repoName: effectiveName, repoId });
+  return {
+    ok: true, cloud: true, measured: true, rows, scopedByRepoId: Boolean(repoId),
+    scope: { mode: requestedName ? 'explicit' : 'ambient', repoId: repoId ?? null, slug: effectiveName },
+  };
 }
 
 /** `get-persona-sessions-by-url` — sessions for an app URL (no repo scope). */
