@@ -210,6 +210,60 @@ export function latestReceiptEntry(readResult) {
 }
 
 /**
+ * PURE. Would this sync move the consumer BACKWARDS — writing bytes from a
+ * commit the consumer has already moved past?
+ *
+ * The incident (2026-09-07). The sync runs from the pre-push hook, against
+ * `$REPO_ROOT` — the pushing worktree's OWN tree — and git runs a pre-push hook
+ * BEFORE the remote accepts anything. So a push that is rejected, abandoned, or
+ * simply made from a stale worktree still rewrites every consumer, from whatever
+ * tree that session happens to be holding. Measured: a fix delivered to three
+ * consumers at 08:45 was overwritten at 10:48 by a session pushing from a tree
+ * that predated it; that push never landed (origin/main did not move) but the
+ * sync side-effect had already fired, and all three consumers silently went back
+ * to the broken code. Nothing detected it — each consumer's own receipt recorded
+ * the rollback as an ordinary successful sync, because a receipt says what a sync
+ * DID, never whether it should have.
+ *
+ * **Strict ancestry is the whole predicate, and the narrowness is deliberate.**
+ * Only "the incoming commit is an ancestor of what the consumer already has" is
+ * unambiguously a rollback; there is no legitimate sync with that shape. DIVERGENT
+ * sources are explicitly allowed through — two sessions syncing from two feature
+ * branches is the normal state of this repo, and neither is an ancestor of the
+ * other, so a "must be a descendant" rule would break everyday work while catching
+ * nothing extra.
+ *
+ * Every can't-tell answers `null` (not a rollback), never a refusal: no prior
+ * receipt, a receipt from another machine whose sha is not in this checkout, a
+ * source with no git identity at all. An unknown is not a yes — the same rule the
+ * `overridesHeld` reader above already follows, and the direction that matters,
+ * since a false refusal stops a legitimate delivery.
+ *
+ * @param {object|null} priorEntry — from `latestReceiptEntry`
+ * @param {string|null} incomingSha — the sha this sync is about to stamp
+ * @param {(ancestor: string, descendant: string) => 'yes'|'no'|'unknown'} ancestry
+ *   — injected so this stays pure and directly testable; production passes a
+ *   `git merge-base --is-ancestor` oracle. It must answer `unknown` rather than
+ *   `no` when git could not be run, or this function inherits the exit-code trap
+ *   that `worktree-identity.mjs` documents.
+ * @returns {null | {recordedSha: string, incomingSha: string, recordedAt: string|null}}
+ */
+export function detectSourceRollback(priorEntry, incomingSha, ancestry) {
+  if (!priorEntry || typeof priorEntry !== 'object') return null;
+  const recordedSha = priorEntry.source?.commitSha;
+  if (typeof recordedSha !== 'string' || recordedSha === '') return null;
+  if (typeof incomingSha !== 'string' || incomingSha === '') return null;
+  // Re-syncing the same commit is idempotent, not a regression.
+  if (recordedSha === incomingSha) return null;
+  if (ancestry(incomingSha, recordedSha) !== 'yes') return null;
+  return {
+    recordedSha,
+    incomingSha,
+    recordedAt: typeof priorEntry.syncedAt === 'string' ? priorEntry.syncedAt : null,
+  };
+}
+
+/**
  * Should this sync be recorded?
  *
  * Two conditions, and the first is the load-bearing one:

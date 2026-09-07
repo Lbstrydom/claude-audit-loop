@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildReceiptEntry, receiptShouldWrite, readSyncReceipt, latestReceiptEntry,
-  appendReceiptEntry, RECEIPT_VERSION, RECEIPT_HISTORY_LIMIT,
+  appendReceiptEntry, RECEIPT_VERSION, RECEIPT_HISTORY_LIMIT, detectSourceRollback,
 } from '../scripts/lib/sync-receipt.mjs';
 
 const SOURCE = {
@@ -263,5 +263,98 @@ describe('receiptShouldWrite', () => {
       divergenceRefused: [{ path: 'x', reason: 'diverged-committed' }],
     });
     assert.equal(receiptShouldWrite(prev, next), true);
+  });
+});
+
+// ── detectSourceRollback — the 2026-09-07 silent-rollback incident ──────────
+//
+// The sync runs from the pre-push hook against the PUSHING WORKTREE's tree, and
+// git fires pre-push BEFORE the remote accepts. A fix delivered to three
+// consumers at 08:45 was overwritten at 10:48 by a session pushing from a tree
+// that predated it; that push never landed, the sync side-effect did, and all
+// three consumers went silently back to the broken code -- each receipt
+// recording the rollback as an ordinary successful sync.
+//
+// The asymmetry these cases must preserve: a strict ANCESTOR is a rollback, and
+// DIVERGENT is not. Two sessions syncing from two feature branches is the normal
+// state of this repo, so a "must be a descendant" rule would refuse everyday work.
+
+const ANCESTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const DESCENDANT = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const SIBLING = 'cccccccccccccccccccccccccccccccccccccccc';
+
+/** A fake ancestry oracle over one declared edge: ANCESTOR -> DESCENDANT. */
+const oracle = (a, d) => {
+  if (a === ANCESTOR && d === DESCENDANT) return 'yes';
+  if (a === DESCENDANT && d === ANCESTOR) return 'no';
+  return 'no'; // siblings: neither is an ancestor of the other
+};
+const entryAt = (sha, syncedAt = '2026-09-07T08:45:00.000Z') => ({
+  syncedAt, source: { repo: 'x', branch: 'y', commitSha: sha, sourceDirty: false },
+});
+
+describe('detectSourceRollback', () => {
+  test('an ANCESTOR source is a rollback — the incident', () => {
+    const hit = detectSourceRollback(entryAt(DESCENDANT), ANCESTOR, oracle);
+    assert.ok(hit, 'syncing a commit the consumer has already moved past must be refused');
+    assert.equal(hit.recordedSha, DESCENDANT);
+    assert.equal(hit.incomingSha, ANCESTOR);
+    assert.equal(hit.recordedAt, '2026-09-07T08:45:00.000Z');
+  });
+
+  test('NEGATIVE CONTROL: a DESCENDANT source is the normal forward sync', () => {
+    assert.equal(detectSourceRollback(entryAt(ANCESTOR), DESCENDANT, oracle), null);
+  });
+
+  test('NEGATIVE CONTROL: DIVERGENT sources are allowed — two feature branches is normal here', () => {
+    assert.equal(detectSourceRollback(entryAt(SIBLING), DESCENDANT, oracle), null,
+      'a "must be a descendant" rule would break everyday multi-session work');
+    assert.equal(detectSourceRollback(entryAt(DESCENDANT), SIBLING, oracle), null);
+  });
+
+  test('re-syncing the SAME commit is idempotent, not a regression', () => {
+    assert.equal(detectSourceRollback(entryAt(DESCENDANT), DESCENDANT, oracle), null);
+  });
+
+  test("an UNKNOWN ancestry answer is not a rollback — a git problem must not block delivery", () => {
+    const unknown = () => 'unknown';
+    assert.equal(detectSourceRollback(entryAt(DESCENDANT), ANCESTOR, unknown), null,
+      'a sha recorded on another machine is absent from this checkout; an unknown is not a yes');
+  });
+
+  test('absent or shapeless prior state is never a rollback', () => {
+    assert.equal(detectSourceRollback(null, ANCESTOR, oracle), null);
+    assert.equal(detectSourceRollback(undefined, ANCESTOR, oracle), null);
+    assert.equal(detectSourceRollback({}, ANCESTOR, oracle), null);
+    assert.equal(detectSourceRollback({ source: {} }, ANCESTOR, oracle), null);
+    assert.equal(detectSourceRollback(entryAt(''), ANCESTOR, oracle), null);
+  });
+
+  test('a source with no git identity cannot be judged', () => {
+    assert.equal(detectSourceRollback(entryAt(DESCENDANT), null, oracle), null);
+    assert.equal(detectSourceRollback(entryAt(DESCENDANT), '', oracle), null);
+  });
+
+  test('the oracle is asked in the ROLLBACK direction, not the reverse', () => {
+    // Getting the argument order backwards inverts the guard: it would pass every
+    // real rollback and refuse every legitimate forward sync. Asserted on the
+    // arguments themselves, because both mistakes still return a boolean.
+    const seen = [];
+    detectSourceRollback(entryAt(DESCENDANT), ANCESTOR, (a, d) => { seen.push([a, d]); return 'no'; });
+    assert.deepEqual(seen, [[ANCESTOR, DESCENDANT]],
+      'must ask "is the INCOMING sha an ancestor of what the consumer HAS"');
+  });
+
+  test('WIRING PIN: the sync aborts the target and offers the consent flag', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const src = fs.readFileSync(path.join(import.meta.dirname, '../scripts/sync-to-repos.mjs'), 'utf-8');
+    assert.match(src, /detectSourceRollback/, 'the guard must actually be wired into the sync');
+    assert.match(src, /--allow-rollback/, 'a deliberate rollback needs a consent flag, not a code edit');
+    assert.match(src, /'--allow-rollback'/, 'the flag must be registered so assertKnownFlags accepts it');
+    // The refusal must precede the copy loop; a guard that reports after writing
+    // is a log line, not a guard.
+    assert.ok(src.indexOf('detectSourceRollback(') < src.indexOf('buildReceiptEntry('),
+      'the rollback check must run before the sync writes and stamps its receipt');
   });
 });

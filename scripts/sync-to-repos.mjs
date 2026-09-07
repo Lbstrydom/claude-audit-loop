@@ -46,8 +46,9 @@ import {
 import { guardPinDowngrades, assertNoPinDowngrade } from './lib/sync-pin-guard.mjs';
 import {
   RECEIPT_PATH, RECEIPT_VERSION, buildReceiptEntry, receiptShouldWrite,
-  readSyncReceipt, latestReceiptEntry, appendReceiptEntry,
+  readSyncReceipt, latestReceiptEntry, appendReceiptEntry, detectSourceRollback,
 } from './lib/sync-receipt.mjs';
+import { createGitAncestry, planRollbackResponse } from './lib/sync-rollback-guard.mjs';
 import { untrackNewlyIgnored } from './lib/sync-untrack.mjs';
 import { computeEolPins, renderEolPinLines, canonicaliseOutboundEol } from './lib/sync-eol-pins.mjs';
 import { getGitLocalEnvVarNames } from './lib/git-env-sanitize.mjs';
@@ -194,6 +195,12 @@ const ADOPT_ORPHANS = process.argv.includes('--adopt-orphans');
 // reaffirms it per run. Every path it consumes is named in the output and
 // recorded in `.sync-receipt.json`.
 const OVERWRITE_DIVERGED = process.argv.includes('--overwrite-diverged');
+
+// Consent to ship a bundle OLDER than what a consumer already has. Same shape
+// and same reasoning as --overwrite-diverged above: a deliberate rollback is a
+// legitimate operation, it is just never the DEFAULT, because the failure it
+// guards is silent (see detectSourceRollback).
+const ALLOW_ROLLBACK = process.argv.includes('--allow-rollback');
 
 // The single banner line used as an ownership fingerprint when adopting
 // orphans. `BANNER_BODY` is an ARRAY of lines — passing it straight to
@@ -1188,6 +1195,7 @@ function assessConsumerAzureEmbed(repoPath) {
 const KNOWN_FLAGS = [
   '--dry-run', '--no-prompt', '--adopt-orphans', '--target',
   '--target-path', '--quiet-legacy-check', '--overwrite-diverged',
+  '--allow-rollback',
 ];
 
 /**
@@ -1544,6 +1552,18 @@ async function main() {
     for (const h of latestReceiptEntry(priorReceipt)?.overridesHeld || []) {
       if (h && typeof h.path === 'string') priorReceiptHeld.set(h.path, h);
     }
+
+    // Would this sync move the consumer BACKWARDS? A pre-push hook fires before
+    // the remote accepts, so a rejected push from a stale tree used to rewrite
+    // every consumer and log it as a success — see lib/sync-rollback-guard.mjs.
+    const rollback = detectSourceRollback(
+      latestReceiptEntry(priorReceipt), sourceGitMeta?.commitSha ?? null, createGitAncestry(SOURCE_ROOT),
+    );
+    const rollbackPlan = planRollbackResponse(rollback, {
+      repoName: repo.name, allowRollback: ALLOW_ROLLBACK, colors: { R, Y, D, X },
+    });
+    for (const line of rollbackPlan.lines) console.log(line);
+    if (rollbackPlan.abort) { totalErrors++; console.log(''); continue; }
 
     // ── Ownership-rollback detection ──────────────────────────────────────
     // The manifest is TRACKED while the files it owns are gitignored, so a
