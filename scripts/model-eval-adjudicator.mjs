@@ -46,7 +46,7 @@ import { RunPreflightError, parseJsonArg } from './lib/model-eval/cli-shared.mjs
 // D7a layering fix — moved to a lib module so EXECUTORS.adjudicator (D7c, a
 // lib module itself) can import the SAME function without importing this
 // entry point.
-import { scoreAgainstGroundTruth, selectBalancedSample } from './lib/model-eval/adjudicator-executor.mjs';
+import { scoreAgainstGroundTruth, selectBalancedSample, degenerateBaselines, DEGENERATE_MARGIN } from './lib/model-eval/adjudicator-executor.mjs';
 // D7c — CLI parity with model-eval-auditor.mjs: the role-generic manifest
 // driver dispatches on manifest.role, so an adjudicator manifest belongs on
 // THIS entry point, not the auditor one, even though both call the same
@@ -174,6 +174,11 @@ async function main() {
       );
     }
 
+    // Free (no model call — the labels are enough) and reported on EVERY run,
+    // whether or not it trips the margin below, so the bar a score cleared is
+    // always visible next to the score.
+    const baselines = degenerateBaselines(sampled);
+
     const runBundle = {
       repoId, role: 'adjudicator', tier,
       candidateRef: { candidateSpec: candidateRoute.candidateSpec, resolvedModel: candidateRoute.resolvedModel, deploymentId: candidateRoute.deploymentId },
@@ -188,16 +193,34 @@ async function main() {
       // in `candidateMetrics` would fail that schema outright. Destructure it out.
       const { usage: candidateUsage, ...candidateMetrics } = await scoreAgainstGroundTruth({ route: candidateRoute, rows: sampled });
       const routeEvidence = { judgeTier: candidateRoute.judgeTier, lineageStatus: candidateRoute.lineageStatus, independenceEligible: candidateRoute.independenceEligible, lineageSource: candidateRoute.lineageSource };
-      const v = computeVerdict({
-        mode: 'oracle', role: 'adjudicator', tier: 'screen', routeEvidence,
-        candidateMetrics, sampleSize: sampled.length, minSampleSize: tierConfig.minSampleSize,
-        corpusVersion: 'ground-truth', thresholds: tierConfig.thresholds,
-      });
-      result = {
-        verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics,
-        cost: { candidateUsd: candidateUsage.costUsd, candidateTokens: { input: candidateUsage.inputTokens, output: candidateUsage.outputTokens } },
-        evidence: { mode: 'ground-truth', sampleSize: sampled.length, sampleComposition: draw.composition, reasons: v.reasons },
-      };
+      const cost = { candidateUsd: candidateUsage.costUsd, candidateTokens: { input: candidateUsage.inputTokens, output: candidateUsage.outputTokens } };
+      const baseEvidence = { mode: 'ground-truth', sampleSize: sampled.length, sampleComposition: draw.composition, degenerateBaselines: baselines };
+      const beatsDegenerate = (candidateMetrics.f1 ?? 0) >= baselines.bestF1 + DEGENERATE_MARGIN;
+      if (!beatsDegenerate) {
+        // computeVerdict is NOT consulted here, and that is the point rather
+        // than an omission: its floors answer "is this good enough", a question
+        // that presumes the score measured discrimination. It did not, so the
+        // honest outcome is the DECISION_TABLE's own fallback pair — a human
+        // must look — not a floor verdict computed over arithmetic.
+        result = {
+          verdict: 'manual_review_required', nextAction: 'reject', metrics: candidateMetrics, cost,
+          evidence: { ...baseEvidence, reasons: [
+            `candidate F1 ${(candidateMetrics.f1 ?? 0).toFixed(3)} did not beat the best degenerate classifier `
+            + `(${baselines.bestF1.toFixed(3)}) by the required ${DEGENERATE_MARGIN} margin — this sample cannot `
+            + `distinguish the candidate from a classifier that reads nothing`,
+          ] },
+        };
+      } else {
+        const v = computeVerdict({
+          mode: 'oracle', role: 'adjudicator', tier: 'screen', routeEvidence,
+          candidateMetrics, sampleSize: sampled.length, minSampleSize: tierConfig.minSampleSize,
+          corpusVersion: 'ground-truth', thresholds: tierConfig.thresholds,
+        });
+        result = {
+          verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics, cost,
+          evidence: { ...baseEvidence, reasons: v.reasons },
+        };
+      }
     } else {
       const [
         { usage: candidateUsage, ...candidateMetrics },
@@ -232,7 +255,7 @@ async function main() {
         writeOutput({ runId, tier, ...result }, outFile, `[model-eval-adjudicator] tier=promotion ground-truth inconclusive — starting live-shadow collection (need ${tierConfig.minSampleSize} terminal observations)`);
         return;
       }
-      result = { verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics, cost: groundTruthCost, evidence: { mode: 'ground-truth', baselineMetrics, sampleSize: sampled.length, sampleComposition: draw.composition, reasons: v.reasons } };
+      result = { verdict: v.verdict, nextAction: v.nextAction, metrics: candidateMetrics, cost: groundTruthCost, evidence: { mode: 'ground-truth', baselineMetrics, sampleSize: sampled.length, sampleComposition: draw.composition, degenerateBaselines: baselines, reasons: v.reasons } };
     }
 
     if (created.runId) {

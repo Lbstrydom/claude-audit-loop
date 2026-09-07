@@ -20,18 +20,18 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { selectBalancedSample } from '../scripts/lib/model-eval/adjudicator-executor.mjs';
+import { selectBalancedSample, degenerateBaselines, DEGENERATE_MARGIN } from '../scripts/lib/model-eval/adjudicator-executor.mjs';
 import { resolveCandidateRoute } from '../scripts/lib/model-eval/route-catalog.mjs';
 
-const tp = (i) => ({ humanLabel: 'true_positive', id: `tp${i}` });
-const fp = (i) => ({ humanLabel: 'false_positive', id: `fp${i}` });
+const tp = (i) => ({ triageLabel: 'true_positive', id: `tp${i}` });
+const fp = (i) => ({ triageLabel: 'false_positive', id: `fp${i}` });
 
 describe('selectBalancedSample', () => {
   it('draws both classes from a corpus whose head is single-label', () => {
     // The exact live shape: every recent row is a true_positive, negatives sit
     // deeper in the corpus. A recency slice sees only the head.
     const rows = [...Array.from({ length: 20 }, (_, i) => tp(i)), ...Array.from({ length: 10 }, (_, i) => fp(i))];
-    assert.equal(new Set(rows.slice(0, 10).map((r) => r.humanLabel)).size, 1, 'precondition: the head is single-label');
+    assert.equal(new Set(rows.slice(0, 10).map((r) => r.triageLabel)).size, 1, 'precondition: the head is single-label');
 
     const drawn = selectBalancedSample(rows, 10);
     assert.equal(drawn.sample.length, 10);
@@ -114,5 +114,46 @@ describe('pinned-model candidate routes', () => {
       () => resolveCandidateRoute({ role: 'adjudicator', candidateSpec: { kind: 'sentinel', value: 'gemini-3.8-flash' } }),
       /is not a registered sentinel/,
     );
+  });
+});
+
+describe('degenerateBaselines — a score must beat a classifier that reads nothing', () => {
+  const balanced = [...Array.from({ length: 25 }, () => tp(0)), ...Array.from({ length: 25 }, () => fp(0))];
+
+  it('reproduces the 0.667 that the incumbent cleared by 0.010', () => {
+    // The measured defect: gemini-pro-latest scored F1 0.677 at n=50 (2026-09-07)
+    // while always-yes scores 0.667 on the same balanced sample. `minF1` was the
+    // screen tier's ONLY threshold, so nothing in the harness could see that.
+    const b = degenerateBaselines(balanced);
+    assert.ok(Math.abs(b.alwaysTruePositive.f1 - 2 / 3) < 1e-9, `always-yes F1 was ${b.alwaysTruePositive.f1}`);
+    assert.equal(b.alwaysTruePositive.recall, 1, 'always-yes catches every positive');
+    assert.equal(b.alwaysTruePositive.falsePositiveRate, 1, '...and every negative too');
+    assert.ok(Math.abs(b.bestF1 - 2 / 3) < 1e-9);
+    assert.ok(0.677 < b.bestF1 + DEGENERATE_MARGIN, 'the real incumbent score must NOT clear the margin');
+  });
+
+  it('treats an undefined baseline F1 as no-bar, never as zero', () => {
+    // always-`false_positive` has no true positives, so its F1 is null. Reading
+    // that as 0 would let a candidate clear a bar that was never established.
+    const b = degenerateBaselines(balanced);
+    assert.equal(b.alwaysFalsePositive.f1, null);
+    assert.ok(b.bestF1 > 0, 'bestF1 still comes from the arm that DID score');
+  });
+
+  it('does not fire on a genuinely discriminating candidate (the direction it must NOT block)', () => {
+    // A candidate at F1 0.90 on this sample clears 0.667 + 0.05 comfortably.
+    // Without this case the suite would pass against a guard that rejects
+    // everything.
+    const b = degenerateBaselines(balanced);
+    assert.ok(0.90 >= b.bestF1 + DEGENERATE_MARGIN);
+  });
+
+  it('raises the bar on a skewed sample, where always-yes scores higher', () => {
+    // 90% positives: always-yes reaches F1 0.947, so a candidate needs ~1.0.
+    // The bar is a property of the SAMPLE, which is why it is computed per run
+    // rather than pinned as a constant.
+    const skewed = [...Array.from({ length: 45 }, () => tp(0)), ...Array.from({ length: 5 }, () => fp(0))];
+    const b = degenerateBaselines(skewed);
+    assert.ok(b.bestF1 > 0.94, `expected a high bar on a skewed sample, got ${b.bestF1}`);
   });
 });

@@ -57,7 +57,13 @@ export async function scoreAgainstGroundTruth({ route, rows }) {
   for (const row of rows) {
     const { data, usage: rawUsage } = await extractStructured({ role: 'adjudicator', route, rawContext: toRawContext(row) });
     candidatePredictions.push(data.verdict);
-    groundTruthLabels.push(row.humanLabel);
+    // `triageLabel`, not `humanLabel` (renamed 2026-09-07): it records the
+    // audit loop's own disposition, and 86% of the dismissals were written by
+    // the deliberation ledger rather than a person. The store now excludes the
+    // four self-contradicting dismissal classes, but the remaining label is
+    // still "agreement with triage" and should not be read as ground truth
+    // about whether a claim was true.
+    groundTruthLabels.push(row.triageLabel);
     const cost = costFromUsage(rawUsage, route.pricingModel);
     inputTokens += cost.inputTokens;
     outputTokens += cost.outputTokens;
@@ -92,15 +98,15 @@ export async function scoreAgainstGroundTruth({ route, rows }) {
  * Deterministic: no RNG, so two runs over one corpus draw the same sample and
  * a verdict is reproducible.
  *
- * @param {Array<{humanLabel: string}>} rows - as returned by getAdjudicatorGroundTruth
+ * @param {Array<{triageLabel: string}>} rows - as returned by getAdjudicatorGroundTruth
  * @param {number} size - desired sample size
  * @returns {{sample: Array<object>, composition: Record<string, number>,
  *   balanced: boolean, classesPresent: number}}
  */
 export function selectBalancedSample(rows, size) {
   if (!Number.isInteger(size) || size < 1) throw new Error(`selectBalancedSample: size must be a positive integer, got ${size}`);
-  const positives = rows.filter((r) => r.humanLabel === 'true_positive');
-  const negatives = rows.filter((r) => r.humanLabel === 'false_positive');
+  const positives = rows.filter((r) => r.triageLabel === 'true_positive');
+  const negatives = rows.filter((r) => r.triageLabel === 'false_positive');
 
   // Round-robin from each class until `size` is met or both are exhausted.
   // Whichever class is scarce contributes everything it has; the other fills
@@ -115,7 +121,7 @@ export function selectBalancedSample(rows, size) {
   }
 
   const composition = {};
-  for (const r of sample) composition[r.humanLabel] = (composition[r.humanLabel] || 0) + 1;
+  for (const r of sample) composition[r.triageLabel] = (composition[r.triageLabel] || 0) + 1;
   const classesPresent = Object.keys(composition).length;
   return {
     sample,
@@ -126,4 +132,45 @@ export function selectBalancedSample(rows, size) {
     balanced: classesPresent >= 2,
     classesPresent,
   };
+}
+
+/**
+ * The margin by which a candidate must beat the best degenerate classifier
+ * before its score counts as discrimination rather than arithmetic.
+ *
+ * Not a tunable policy knob, so deliberately NOT in `adjudicator-thresholds
+ * .json`: `minF1` there encodes "how good must a working adjudicator be", a
+ * judgement call. This encodes "did it classify at all", which is a property of
+ * the measurement. 0.05 is a judgement about noise at these sample sizes
+ * (n=10..50), not a proof.
+ */
+export const DEGENERATE_MARGIN = 0.05;
+
+/**
+ * **Score the two classifiers that read nothing.** On a BALANCED binary sample,
+ * always answering `true_positive` scores precision 0.5, recall 1.0 and
+ * **F1 0.667** — while the production incumbent measured **F1 0.677** (n=50,
+ * 2026-09-07). A gate keyed on F1 alone therefore cannot tell a working
+ * adjudicator from a stuck one; the incumbent cleared always-yes by 0.010 and
+ * nothing in the harness noticed.
+ *
+ * This is the "audit your success paths" rule pointed at a scorer: *can this
+ * emit a passing-shaped number without having discriminated anything?* Here it
+ * could, so every run now scores both constants over its OWN sample and reports
+ * them beside the candidate. Free — no model is called; the labels are enough.
+ *
+ * @param {Array<{triageLabel: string}>} rows - the sample actually scored
+ * @returns {{alwaysTruePositive: object, alwaysFalsePositive: object, bestF1: number}}
+ */
+export function degenerateBaselines(rows) {
+  const labels = rows.map((r) => r.triageLabel);
+  const constant = (v) => scoreBinaryClassification(labels.map(() => v), labels);
+  const alwaysTruePositive = constant('true_positive');
+  const alwaysFalsePositive = constant('false_positive');
+  // A null F1 (undefined for a degenerate confusion matrix) is NOT a zero — it
+  // is "no bar established", and treating it as 0 would let a candidate clear a
+  // bar that was never measured. Coalesce to 0 only for the MAX, and let the
+  // caller see the raw pair.
+  const bestF1 = Math.max(alwaysTruePositive.f1 ?? 0, alwaysFalsePositive.f1 ?? 0);
+  return { alwaysTruePositive, alwaysFalsePositive, bestF1 };
 }

@@ -31,7 +31,7 @@ import { getAdjudicatorGroundTruth } from '../scripts/lib/store/model-ab.mjs';
 const TEST_URL = process.env.AUDIT_DB_TEST_URL;
 const skip = TEST_URL ? false : 'AUDIT_DB_TEST_URL not set';
 
-let savedUrl, repoRowId, textRepoRowId;
+let savedUrl, repoRowId, textRepoRowId, seededFindingId;
 // resolveRepoIdentity() emits a v5 uuid, so this is the real-world shape...
 const repoUuid = crypto.randomUUID();
 // ...but the column is TEXT and other callers store free-form values, which
@@ -55,12 +55,13 @@ describe('assertRepoRowId — a repo_uuid must never read as an empty corpus', {
       `INSERT INTO audit_runs (repo_id, plan_file, mode) VALUES ($1, 'docs/plans/id-space.md', 'code') RETURNING id`,
       [repoRowId],
     );
-    await pool.query(
+    const { rows: seeded } = await pool.query(
       `INSERT INTO audit_findings (run_id, finding_fingerprint, pass_name, severity, category,
          primary_file, detail_snapshot, adjudication_outcome, decided_at)
-       VALUES ($1, $2, 'structure', 'HIGH', 'crash', 'src/a.ts', 'boom', 'accepted', now())`,
+       VALUES ($1, $2, 'structure', 'HIGH', 'crash', 'src/a.ts', 'boom', 'accepted', now()) RETURNING id`,
       [rows[0].id, crypto.randomUUID().slice(0, 8)],
     );
+    seededFindingId = seeded[0].id;
   });
 
   after(async () => {
@@ -120,11 +121,54 @@ describe('assertRepoRowId — a repo_uuid must never read as an empty corpus', {
     );
   });
 
+  it('excludes a dismissal the store itself contradicts, and counts what it removed', async () => {
+    // `adjudication_outcome` is TRIAGE, not a verdict on truth: 86% of this
+    // repo's dismissals were written by the deliberation ledger, not a person.
+    // A dismissed finding someone then FIXED is not a false positive, and
+    // scoring a model against it penalises the model for being right.
+    const pool = await getPool();
+    const mk = async (outcome, extra = {}) => {
+      const { rows: r } = await pool.query(
+        `INSERT INTO audit_runs (repo_id, plan_file, mode) VALUES ($1, 'docs/plans/contam.md', 'code') RETURNING id`,
+        [repoRowId],
+      );
+      const { rows: f } = await pool.query(
+        `INSERT INTO audit_findings (run_id, finding_fingerprint, pass_name, severity, category,
+           primary_file, detail_snapshot, adjudication_outcome, decided_at, remediation_state, user_action)
+         VALUES ($1, $2, 'structure', 'HIGH', 'crash', 'src/c.ts', 'boom', $3, now(), $4, $5) RETURNING id`,
+        [r[0].id, crypto.randomUUID().slice(0, 8), outcome, extra.remediation ?? null, extra.userAction ?? null],
+      );
+      return f[0].id;
+    };
+
+    const cleanDismissal = await mk('dismissed');            // user_action NULL — the 86% case
+    const fixedDismissal = await mk('dismissed', { remediation: 'fixed' });
+    const deferredDismissal = await mk('dismissed', { userAction: 'auto_dismissed' });
+
+    const { rows, excludedContaminated } = await getAdjudicatorGroundTruth({ repoId: repoRowId, limit: 500 });
+    const ids = new Set(rows.map((r) => r.findingId));
+
+    // The direction the exclusion must NOT fire. A dismissal with no
+    // contradicting signal is the overwhelmingly common shape, and `x IN (...)`
+    // is NULL (not false) when x is NULL — un-coalesced, three-valued logic
+    // drops exactly these rows and leaves a 100%-true_positive corpus. That is
+    // what the first draft of this exclusion actually did.
+    assert.ok(ids.has(cleanDismissal), 'an uncontradicted dismissal must survive');
+    assert.equal(rows.find((r) => r.findingId === cleanDismissal).triageLabel, 'false_positive');
+
+    assert.ok(!ids.has(fixedDismissal), 'a dismissal someone FIXED is not a false positive');
+    assert.ok(!ids.has(deferredDismissal), 'auto-deferral is out-of-scope, not disproved');
+    assert.ok(excludedContaminated >= 2, `expected the removals to be counted, got ${excludedContaminated}`);
+  });
+
   it('the correct id still returns the seeded row (negative control)', async () => {
     // Without this, the suite would pass just as well against a function that
     // rejects EVERYTHING.
-    const { rows } = await getAdjudicatorGroundTruth({ repoId: repoRowId });
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].humanLabel, 'true_positive');
+    // Asserted BY ID, not by row count: a sibling case in this suite seeds its
+    // own rows, and node's test order is not a contract to hang an assertion on.
+    const { rows } = await getAdjudicatorGroundTruth({ repoId: repoRowId, limit: 500 });
+    const mine = rows.find((r) => r.findingId === seededFindingId);
+    assert.ok(mine, 'the seeded accepted finding must come back');
+    assert.equal(mine.triageLabel, 'true_positive');
   });
 });

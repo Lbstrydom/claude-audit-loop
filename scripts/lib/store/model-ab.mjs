@@ -579,8 +579,64 @@ const GROUND_TRUTH_LIMIT_MAX = 1000;
  * enough context for a candidate to classify against.
  *
  * @param {{repoId: string, limit?: number, cursor?: {decidedAt: string, findingId: string}|null, sinceDecidedAt?: string|null}} args
- * @returns {Promise<{cloud: boolean, rows: Array<{repoId, runId, findingId, findingFingerprint, sourceModel, severity, category, primaryFile, detailSnapshot, humanLabel: 'true_positive'|'false_positive', adjudicationOutcome, decidedAt}>}>}
+ * @returns {Promise<{cloud: boolean, rows: Array<{repoId, runId, findingId, findingFingerprint, sourceModel, severity, category, primaryFile, detailSnapshot, triageLabel: 'true_positive'|'false_positive', adjudicationOutcome, decidedAt}>, excludedContaminated: number}>}
  */
+/**
+ * **Why a `dismissed` finding is not automatically a false positive.**
+ *
+ * `adjudication_outcome` records the audit loop's own TRIAGE disposition, not a
+ * human verdict on whether the claim was true. Measured 2026-09-07 on this
+ * repo: of 1,085 dismissed rows in the 180-day window, **931 (86%) have
+ * `user_action IS NULL`** — neither writer that records a human disposition
+ * leaves that null, so those rows came from `recordAdjudicationEvent`, fed by
+ * the audit's own R2+ deliberation ledger.
+ *
+ * Four classes are self-contradicting: the store itself carries a signal that
+ * the claim was NOT false. Counts measured the same day, over that window:
+ *
+ *   - a `sustain` ruling (51) — the deliberation UPHELD the finding
+ *   - `remediation_state` planned/fixed/regressed (35) — someone planned or
+ *     shipped a fix for it
+ *   - a semantic-duplicate suppression (17) — `semantic-suppress.mjs` dismisses
+ *     the duplicate while its own rationale says the canonical stays OPEN, and
+ *     a duplicate of a true finding is true
+ *   - `user_action` auto_dismissed / needs_triage / fix-now (11) —
+ *     auto-deferral is out-of-scope, and needs_triage is not yet decided
+ *
+ * Union: **97 rows (8.9%)**, and that is a FLOOR, not an estimate — 854 of the
+ * 1,085 carry no rationale at all and cannot be tested in either direction.
+ *
+ * Scoring a model against these penalises it for being RIGHT. It is also not a
+ * common-mode error that cancels in a comparison: it penalises whichever
+ * candidate is more permissive, so it systematically favours a conservative
+ * model over the incumbent.
+ *
+ * A deliberate NON-member: a `defer` ruling. The sanctioned shape for a
+ * deferral is `accepted` + `pending` (lib/ledger.mjs), so deferrals are already
+ * labelled `true_positive` and never reach this predicate.
+ *
+ * Applied to the `dismissed` side ONLY — an `accepted` row with
+ * `remediation_state='fixed'` is consistent, not contradictory.
+ *
+ * **Every use site must COALESCE this to `false`.** `x IN (...)` yields NULL,
+ * not false, when `x` is NULL — and 931 of the 1,085 dismissed rows have
+ * `user_action IS NULL`. Un-coalesced, `NOT (dismissed AND NULL)` is NULL, so
+ * the WHERE clause drops the row: the first draft of this exclusion silently
+ * removed EVERY uncontaminated dismissal and returned a 200-row corpus that
+ * was 100% `true_positive`. (The COUNT below is the one place the bare
+ * predicate is correct — there, NULL means "not known to be contaminated",
+ * which is the direction that under-counts rather than over-excludes.)
+ */
+const CONTAMINATED_DISMISSAL_SQL = `(
+  f.remediation_state IN ('planned', 'fixed', 'regressed')
+  OR f.user_action IN ('auto_dismissed', 'needs_triage', 'fix-now')
+  OR EXISTS (
+    SELECT 1 FROM finding_adjudication_events e
+     WHERE e.finding_id = f.id
+       AND (e.ruling = 'sustain' OR e.ruling_rationale ILIKE '%Semantic re-raise duplicate%')
+  )
+)`;
+
 export async function getAdjudicatorGroundTruth({ repoId, limit = GROUND_TRUTH_LIMIT_DEFAULT, cursor = null, sinceDecidedAt = 'default' } = {}) {
   if (!repoId) throw new Error('getAdjudicatorGroundTruth: repoId is required');
   if (!await isCloudEnabled()) return { cloud: false, rows: [] };
@@ -598,11 +654,16 @@ export async function getAdjudicatorGroundTruth({ repoId, limit = GROUND_TRUTH_L
   // the former means "give me the full unbounded history."
   const windowClause = [];
   const params = [repoId];
+  // The window params alone, for the contamination COUNT below: `params` also
+  // accumulates cursor values and the limit, and postgres rejects a statement
+  // handed more parameters than its text references.
+  const windowParams = [repoId];
   if (sinceDecidedAt !== null) {
     const since = sinceDecidedAt === 'default'
       ? new Date(Date.now() - DEFAULT_GROUND_TRUTH_WINDOW_DAYS * 24 * 60 * 60 * 1000)
       : new Date(sinceDecidedAt);
     params.push(since);
+    windowParams.push(since);
     windowClause.push(`AND f.decided_at >= $${params.length}`);
   }
 
@@ -627,6 +688,7 @@ export async function getAdjudicatorGroundTruth({ repoId, limit = GROUND_TRUTH_L
          WHERE r.repo_id = $1
            AND f.adjudication_outcome IN ('accepted', 'dismissed')
            AND f.decided_at IS NOT NULL
+           AND NOT (f.adjudication_outcome = 'dismissed' AND COALESCE(${CONTAMINATED_DISMISSAL_SQL}, false))
            ${windowClause.join(' ')}
          ORDER BY f.finding_fingerprint, f.decided_at DESC, f.id
        )
@@ -636,13 +698,38 @@ export async function getAdjudicatorGroundTruth({ repoId, limit = GROUND_TRUTH_L
        LIMIT $${limitParamIdx}`,
       params,
     );
+    // Count what the exclusion removed. An exclusion that silently shrinks the
+    // corpus is the same shape as the bug this whole seam exists to prevent: a
+    // number that got smaller for a reason nobody can see. Its own try/catch —
+    // failing to COUNT must not fail the read, but it must not report 0 either,
+    // so it degrades to null ("not counted"), never to a fabricated zero.
+    let excludedContaminated = null;
+    try {
+      const exc = await one(
+        `SELECT count(DISTINCT f.finding_fingerprint) AS n
+           FROM audit_findings f
+           JOIN audit_runs r ON r.id = f.run_id
+          WHERE r.repo_id = $1
+            AND f.adjudication_outcome = 'dismissed'
+            AND f.decided_at IS NOT NULL
+            AND COALESCE(${CONTAMINATED_DISMISSAL_SQL}, false)
+            ${windowClause.join(' ')}`,
+        windowParams,
+      );
+      excludedContaminated = Number(exc?.n ?? 0);
+    } catch (err) {
+      process.stderr.write(`  [model-ab] contamination count failed (corpus still returned): ${err.message}
+`);
+    }
+
     return {
       cloud: true,
+      excludedContaminated,
       rows: rows.map((r) => ({
         repoId: r.repo_id, runId: r.run_id, findingId: r.finding_id, findingFingerprint: r.finding_fingerprint,
         sourceModel: r.source_model, severity: r.severity,
         category: r.category, primaryFile: r.primary_file, detailSnapshot: r.detail_snapshot,
-        humanLabel: r.adjudication_outcome === 'accepted' ? 'true_positive' : 'false_positive',
+        triageLabel: r.adjudication_outcome === 'accepted' ? 'true_positive' : 'false_positive',
         adjudicationOutcome: r.adjudication_outcome, decidedAt: r.decided_at,
       })),
     };
