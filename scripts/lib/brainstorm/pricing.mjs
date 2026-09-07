@@ -15,12 +15,17 @@ import { priceFor as resolvePrice, FALLBACK_PRICE_USD } from '../model-pricing.m
 
 /**
  * @param {string} modelId
+ * @param {{inputTokens?: number}} [opts] - forwarded to the SSoT. It MUST be
+ *   forwarded: some entries are size-tiered, and `priceFor` falls back to the
+ *   cheapest tier without a token count. This wrapper previously took only
+ *   `modelId`, which made a caller's `{ inputTokens }` silently inert — a
+ *   dropped argument looks identical to a correct call at every call site.
  * @returns {{input:number, output:number}|null} null when the model is
  * unpriced — every caller already treats a null/absent estimatedCostUsd as
  * "unknown", per the SSoT's null-cost policy (never a guessed fallback rate).
  */
-export function priceFor(modelId) {
-  return resolvePrice(modelId);
+export function priceFor(modelId, opts = {}) {
+  return resolvePrice(modelId, opts);
 }
 
 /**
@@ -29,7 +34,11 @@ export function priceFor(modelId) {
  * estimate misled by 10–100x on large topic-paste inputs).
  */
 export function estimateCostUsd({ modelId, inputTokens, outputTokens }) {
-  const rate = priceFor(modelId);
+  // `inputTokens` is forwarded because some entries are size-TIERED (grok-4.6,
+  // and gemini-pro since 2026-09-07): without it `priceFor` falls back to the
+  // cheapest tier, which silently under-counts exactly the long-prompt calls
+  // that cost the most.
+  const rate = priceFor(modelId, { inputTokens });
   if (!rate) return null;
   return (inputTokens * rate.input + outputTokens * rate.output) / 1_000_000;
 }
@@ -43,6 +52,8 @@ export function estimateCostUsd({ modelId, inputTokens, outputTokens }) {
  */
 export function preflightEstimateUsd({ modelId, inputChars, maxOutputTokens }) {
   const inputTokens = Math.ceil(inputChars / 4);
-  const rate = priceFor(modelId) || FALLBACK_PRICE_USD;
+  // Tier-aware for the same reason as estimateCostUsd — and it matters more
+  // here, because this figure IS the pre-call spend ceiling.
+  const rate = priceFor(modelId, { inputTokens }) || FALLBACK_PRICE_USD;
   return (inputTokens * rate.input + maxOutputTokens * rate.output) / 1_000_000;
 }

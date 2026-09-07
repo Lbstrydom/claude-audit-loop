@@ -47,7 +47,25 @@ describe('brainstorm prompt module', () => {
 describe('brainstorm pricing', () => {
   it('delegates to the repo-wide pricing SSoT (model-pricing.mjs) for known models', () => {
     assert.deepEqual(priceFor('gpt-5'), { input: 2.5, output: 10 });
-    assert.deepEqual(priceFor('gemini-pro-latest'), { input: 1.25, output: 5 });
+    // gemini-pro became size-TIERED on 2026-09-07 (Google prices Pro by prompt
+    // size), so the SSoT hands back the selected tier rather than a flat pair.
+    // Asserted field-wise: the rates are the contract, `maxInputTokens` is the
+    // tier's own boundary and would make a deepEqual brittle to a re-tiering.
+    const pro = priceFor('gemini-pro-latest');
+    assert.equal(pro.input, 2, 'the <=200k input rate');
+    assert.equal(pro.output, 12, 'the <=200k output rate');
+  });
+
+  it('selects the RIGHT tier for a large prompt, not just the cheapest', () => {
+    // The direction that silently under-counts: without forwarding inputTokens
+    // a 300k-token prompt would price at the <=200k rate.
+    const small = priceFor('gemini-pro-latest', { inputTokens: 1_000 });
+    const large = priceFor('gemini-pro-latest', { inputTokens: 300_000 });
+    assert.equal(small.input, 2);
+    assert.equal(large.input, 4, 'a >200k prompt takes the higher tier');
+    const cost = estimateCostUsd({ modelId: 'gemini-pro-latest', inputTokens: 300_000, outputTokens: 1_000 });
+    // 300k * 4/1M + 1k * 18/1M = 1.2 + 0.018
+    assert.ok(Math.abs(cost - 1.218) < 1e-9, `unexpected cost: ${cost}`);
   });
 
   it('resolves versioned IDs by FAMILY via pricingKey(), not raw prefix matching', () => {

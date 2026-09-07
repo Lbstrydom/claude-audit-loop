@@ -136,7 +136,7 @@ function selectTier(tiers, inputTokens) {
 export const EUR_PER_USD = 0.92;
 
 /** Effective-date stamp for the price table — bump when refreshing OSS_PRICING (audit R1 L4). */
-export const PRICING_VERSION = '2026-07-01';
+export const PRICING_VERSION = '2026-09-07';
 
 /**
  * Multiple of the priciest KNOWN model used to derive the spend-cap fallback.

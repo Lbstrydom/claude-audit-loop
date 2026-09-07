@@ -642,29 +642,38 @@ export const modelPricing = Object.freeze({
   // Legacy key preserved for callers not yet migrated
   'claude':        { input: 3,    output: 15  },
 
-  // Google (per-tier; covers aliases + versioned variants)
-  'gemini-pro':        { input: 1.25, output: 5   },
-  'gemini-flash':      { input: 0.15, output: 0.6 },
-  'gemini-flash-lite': { input: 0.075, output: 0.3 },
-  // Legacy key preserved for callers still reading `gemini-3.1`
-  'gemini-3.1':        { input: 1.25, output: 5   },
-
-  // xAI (final-review shadow arm — plan: final-review-scoped-second-reviewer.md
-  // KD-4, KD-7). Keyed by the CONCRETE id, not a family/tier key: xai has no
-  // parseXaiModel (model-resolver.mjs explains why — mixed chat/non-chat ids
-  // on one endpoint, no uniform version grammar), so there is no family axis
-  // to key on, and a pricing table must be keyed by billed identity anyway.
-  // This is NOT the "don't pin concrete ids" anti-pattern — that rule governs
-  // CALL PATHS (which model gets invoked), and a price schedule is priced
-  // against a specific, already-chosen model, which is a different question.
+  // Google — refreshed 2026-09-07 from ai.google.dev/gemini-api/docs/pricing.
+  // The prior values (flash 0.15/0.60, pro 1.25/5, set 2026-04-23 in 900f58e5)
+  // priced the 2.x generation, so 3.x flash was costed at ~1/5 of its real rate
+  // — and `adjudicator-thresholds.json` decides a model swap on
+  // `switchIfCostImprovesByPct`, the exact axis a stale row corrupts.
   //
-  // TIERED, unlike every other entry above: rates are `{tiers: […]}` ordered
-  // ascending by `maxInputTokens` (inclusive upper edge — 200,000 is tier 1,
-  // 200,001 is tier 2), selected in model-pricing.mjs's costFromUsage by the
-  // ACTUAL measured input-token count, never estimated. `cachedInput` is a
-  // real per-1M rate, not a multiplier — xAI's cached-input ratio (0.25) does
-  // not match the global CACHE_MULTIPLIER.read (0.10) used for Anthropic.
-  // Operator-supplied rate card, verified against api.x.ai 2026-08-14.
+  // TWO CAVEATS. (1) The flash rates are PROMOTIONAL: 3.6/3.7/3.8 Flash are
+  // $0.75/$3.75 "through December 31, 2026", then $1.50/$7.50 — re-check before
+  // acting on any cost delta. (2) `pricingKey()` keys on TIER, not version, so
+  // every *-flash id shares one row; 3.6/3.7/3.8 agree, but **3.5 Flash is
+  // $1.50/$9.00** and is mis-priced here. Tolerable only while `latest-flash`
+  // resolves to the always-current `gemini-flash-latest` alias.
+  //
+  // `gemini-pro` is TIERED for the same reason `grok-4.6` below is: Google
+  // prices Pro by prompt size, and a flat row under-counts every long audit
+  // diff — precisely the call shape the final-review gate makes.
+  'gemini-pro': {
+    tiers: [
+      { maxInputTokens: 200_000, input: 2.00, output: 12.00 },
+      { maxInputTokens: Infinity, input: 4.00, output: 18.00 },
+    ],
+  },
+  'gemini-flash':      { input: 0.75, output: 3.75 },
+  'gemini-flash-lite': { input: 0.30, output: 2.50 },
+  // Legacy key for callers still reading `gemini-3.1` — 3.1 Pro, same schedule.
+  'gemini-3.1': {
+    tiers: [
+      { maxInputTokens: 200_000, input: 2.00, output: 12.00 },
+      { maxInputTokens: Infinity, input: 4.00, output: 18.00 },
+    ],
+  },
+
   'grok-4.6': {
     tiers: [
       { maxInputTokens: 200_000, input: 2.00, output: 6.00, cachedInput: 0.50 },
