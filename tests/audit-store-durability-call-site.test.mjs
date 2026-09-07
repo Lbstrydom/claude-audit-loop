@@ -84,8 +84,20 @@ const STORE_MODULES = (function listStoreModules(rel = STORE_DIR) {
  * entry already carries. A verb-based oracle can never be proven exhaustive
  * (there is always some hypothetical next verb), so this remains an accepted,
  * deliberately-broad list rather than a claim of completeness.
+ *
+ * `update`/`remove`/`set`/`repoint` added 2026-09-07, and the pattern held a
+ * THIRD time: adding `repoint` for upstream 429683ac's new writer surfaced SIX
+ * more exports the oracle had never examined — `removeDebtEntryCloud`,
+ * `setActiveEmbeddingModel`, `updateEvalRunTerminal`,
+ * `updatePassStatsPostDeliberation`, `updatePlanStatus`, `updateRunMeta`. The
+ * temptation was to add only `repoint`, which would have censused exactly the
+ * writer being added while leaving six measured-and-known exports invisible;
+ * that is gaming the oracle, not widening it. All six are classified below, and
+ * one of them (`updateRunMeta`) turned out to be a genuinely fire-and-forget
+ * swallowing write — named as declared debt rather than hidden, exactly as
+ * `deleteRefreshRuns` already is.
  */
-const WRITER_NAME = /^(record|sync|upsert|save|persist|write|delete|retire|mark|insert|create)[A-Z]/;
+const WRITER_NAME = /^(record|sync|upsert|save|persist|write|delete|retire|mark|insert|create|update|remove|set|repoint)[A-Z]/;
 
 /**
  * Exports that are write-shaped but are NOT durable audit-store writes, each
@@ -135,6 +147,17 @@ const NOT_A_DURABLE_WRITE = {
   recordBandCalibration: 'arch:refresh pipeline; returns a discriminated result, and an uncalibrated repo bands `review` only — an honest degraded state, not a silent one.',
   upsertDomainSummary: 'arch:refresh pipeline; LLM-authored summaries regenerated per refresh.',
   deleteRefreshRuns: 'symbol-index prune CLI, not the orchestrator. NOTE: it swallows a failed DELETE to 0, which is indistinguishable from "nothing matched" — real, out of §2b F2 scope (F2 is scoped to cross-skill writers), and carried as declared debt rather than hidden by this exemption.',
+  setActiveEmbeddingModel: 'arch:refresh pipeline (cross-skill.mjs set-active-embedding-model, and arch-refresh.mjs). Operator/pipeline-initiated and awaited by its command handler; the active-model row is re-asserted by the next refresh, and a deployment/resource switch already forces a full re-embed rather than trusting a stale marker.',
+
+  // ── The update/remove/set widening (2026-09-07) ──────────────────────────
+  //
+  // Six exports the verb list had never reached. Each is classified on its own
+  // call sites, not on the assumption that a pre-existing export must be fine.
+  removeDebtEntryCloud: 'Debt-ledger CLI write via lib/debt-memory.mjs. NOTE: the call site is `.catch(() => ({ ok: false }))` — the failure is coerced to a discriminated false rather than swallowed to a success, and the caller reports it, so the outcome stays representable. Not in the orchestrator cloud block.',
+  updatePlanStatus: 'Operator CLI write (cross-skill.mjs update-plan-status). Awaited through ctx.deps by its command handler, which returns the store result to the envelope — a failed write reaches the operator as a non-zero exit under the emit/exit coupling.',
+  updateEvalRunTerminal: 'model-eval harness CLI; terminal-state write on an experiment run, awaited by its executor, and a lost row invalidates that experiment rather than corrupting an audit. Same class as the arm-eval harness entries above.',
+  updatePassStatsPostDeliberation: 'finalize-outcomes CLI (lib/finalize-outcomes.mjs), not the orchestrator cloud block. Awaited, and the ledger on disk is the durable copy of the deliberation it summarises — a spill would be a second queue over the same evidence.',
+  updateRunMeta: 'finalize-outcomes CLI, awaited there. NOTE, as declared debt rather than hidden by this exemption: audit-loop.mjs:373 ALSO calls it fire-and-forget with `.catch(() => null)` to stamp r2SkipReason, so on that one path a failed write is silently lost. It is metadata on an already-recorded run rather than the run evidence itself, and audit-loop.mjs is outside decision 6\'s boundary (the orchestrator cloud block in legacy-production-audit.mjs) — same shape and same treatment as deleteRefreshRuns above.',
 
   // (b) Experiment harnesses (arm-eval, campaign). Operator-initiated from
   // their own CLIs, each returns a discriminated result its caller checks, and
@@ -172,6 +195,8 @@ const NOT_A_DURABLE_WRITE = {
   markRunFindingsAutoDismissed: 'finalize-outcomes CLI; same ledger-on-disk reasoning as markRunFindingsNeedsTriage.',
   persistKeptEmbeddings: 'Semantic-suppression side table. Fail-open by design (AUDIT_SEMANTIC_SUPPRESS_ENABLED) — a missing embedding costs a re-raise, never a lost finding.',
   recordRegressionSpec: 'Operator/ux-lock CLI write. Returns {ok, reason} since §2b F2 and its handler exits 1 on a failed write, so the failure reaches the caller synchronously.',
+  repointRegressionSpec: 'Operator CLI write (cross-skill.mjs repoint-regression-spec). Awaited, returns a discriminated {ok, reason}, and an UPDATE that matched no row is reported as write-failed rather than ok — Postgres reports success for an UPDATE affecting nothing. Same class as recordRegressionSpec beside it.',
+  deleteRegressionSpec: 'Operator CLI write (cross-skill.mjs repoint-regression-spec --delete). Same discriminated-result contract as repointRegressionSpec; a DELETE matching no row is write-failed, not ok. Removing a lock is the honest outcome when no test discharges the finding, so a lost delete leaves a FALSE claim standing and must be loud — which it is, synchronously, to the operator who ran it.',
   recordRegressionSpecRun: 'Operator/ux-lock CLI write; discriminated since 2026-08-12 and its caller counts persist failures into the run summary.',
   recordPlanVerificationRun: 'Operator/ux-lock-verify CLI write. Returns {ok, reason} since §2b F2 and its handler exits 1 on a failed write.',
   recordPlanVerificationItems: 'Operator/ux-lock-verify CLI write; already reports {ok, inserted} — the row count Postgres accepted, not the count requested.',

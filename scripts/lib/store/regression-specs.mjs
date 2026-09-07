@@ -308,3 +308,167 @@ export async function getRecordedSpecPaths(repoId) {
     return [];
   }
 }
+
+// ── Re-pointing and removing a lock ────────────────────────────────────────
+
+/**
+ * Every regression-spec row this repo holds for one finding.
+ *
+ * The read half of `repoint`/`delete`: those operate on a row identified by
+ * (repo, finding), and that pair is NOT unique by construction — the unit-test
+ * arbiter is (repo_id, spec_path, source_finding_id), so a finding can legally
+ * carry rows citing two different paths. The caller therefore has to SEE the
+ * candidates before it can act on one, and a command that silently picked the
+ * newest would be guessing which citation the operator meant.
+ *
+ * Cloud-off and a query failure are DISTINCT here, unlike `getRecordedSpecPaths`
+ * above: this feeds a write, not a nudge, and a write must not proceed on a
+ * read that never happened.
+ *
+ * @param {string} repoId
+ * @param {string} sourceFindingId
+ * @returns {Promise<{ok:true, cloud:true, rows:Array<{id:string, specPath:string|null,
+ *            description:string|null, sourceKind:string|null, createdAt:string|null}>}
+ *          |{ok:false, cloud:boolean, reason:'cloud-off'|'invalid-input'|'read-failed', message:string}>}
+ */
+export async function getRegressionSpecsForFinding(repoId, sourceFindingId) {
+  if (!repoId || !sourceFindingId) {
+    return { ok: false, cloud: true, reason: 'invalid-input', message: 'repoId and sourceFindingId are both required' };
+  }
+  if (!await isCloudEnabled()) {
+    return { ok: false, cloud: false, reason: 'cloud-off', message: 'cloud store is disabled' };
+  }
+  try {
+    const { many } = await import('../db/query.mjs');
+    const rows = await many(
+      `SELECT id, spec_path, description, source_kind, created_at
+         FROM regression_specs
+        WHERE repo_id = $1 AND source_finding_id = $2
+        ORDER BY created_at ASC`,
+      [repoId, sourceFindingId],
+    );
+    return {
+      ok: true,
+      cloud: true,
+      rows: rows.map((r) => ({
+        id: r.id,
+        specPath: r.spec_path ?? null,
+        description: r.description ?? null,
+        sourceKind: r.source_kind ?? null,
+        createdAt: r.created_at ? String(r.created_at) : null,
+      })),
+    };
+  } catch (err) {
+    process.stderr.write(`  [learning] getRegressionSpecsForFinding failed: ${err.message}\n`);
+    return { ok: false, cloud: true, reason: 'read-failed', message: err.message };
+  }
+}
+
+/**
+ * Re-point an existing lock at a different test file.
+ *
+ * **UPDATE, deliberately — not delete-then-insert.** The row's `id` is the
+ * parent of any `regression_spec_runs` children, and `created_at` is when the
+ * obligation was first discharged. Re-creating the row would orphan the runs
+ * and reset the date, turning "this lock has been in place since July" into
+ * "this lock is new" — a claim the re-point never established. That is why the
+ * consumer's local repair (upstream 429683ac) used UPDATE too.
+ *
+ * **Why this could not be done with the existing verbs.** `lock-with-test`
+ * refuses an already-locked finding, correctly, because its job is to discharge
+ * an OPEN obligation. `record-regression-spec` cannot re-point either: for
+ * `unit-test` the arbiter includes `spec_path`, so a call naming a NEW path
+ * does not conflict — it INSERTS a second row and leaves the stale citation
+ * standing. So the read side reported dangling locks (`danglingLocks`) that no
+ * write side could clear.
+ *
+ * **Scoped by `repo_id` in the WHERE clause, not just by the id.** A spec id is
+ * a uuid an operator can paste from anywhere, and a cross-tenant UPDATE is the
+ * same fence `lock-with-test` grew after it adopted a foreign row's repo_id.
+ *
+ * A write returning no row is `write-failed`, never `ok` — Postgres reports
+ * success for an UPDATE that matched nothing.
+ *
+ * @param {string} repoId
+ * @param {{specId: string, specPath: string, description: string}} change
+ * @returns {Promise<{ok:true, cloud:true, specId:string, specPath:string}
+ *          |{ok:false, cloud:boolean, reason:'cloud-off'|'invalid-input'|'write-failed', message:string}>}
+ */
+export async function repointRegressionSpec(repoId, { specId, specPath, description } = {}) {
+  if (!repoId || !specId || !specPath || !description?.trim()) {
+    return {
+      ok: false,
+      cloud: true,
+      reason: 'invalid-input',
+      message: 'repoId, specId, specPath and a non-empty description are all required — '
+        + 'an unexplained re-point is as unverifiable as an unexplained lock',
+    };
+  }
+  if (!await isCloudEnabled()) {
+    return { ok: false, cloud: false, reason: 'cloud-off', message: 'cloud store is disabled' };
+  }
+  try {
+    const row = await one(
+      `UPDATE regression_specs
+          SET spec_path = $1, description = $2, updated_at = now()
+        WHERE id = $3 AND repo_id = $4
+        RETURNING id, spec_path`,
+      [specPath, description, specId, repoId],
+    );
+    if (!row?.id) {
+      return {
+        ok: false,
+        cloud: true,
+        reason: 'write-failed',
+        message: `no regression spec "${specId}" in this repo — the UPDATE matched nothing`,
+      };
+    }
+    return { ok: true, cloud: true, specId: row.id, specPath: row.spec_path };
+  } catch (err) {
+    process.stderr.write(`  [learning] repointRegressionSpec failed: ${err.message}\n`);
+    return { ok: false, cloud: true, reason: 'write-failed', message: err.message };
+  }
+}
+
+/**
+ * Remove a lock entirely.
+ *
+ * The honest counterpart to re-pointing: where NO test discharges the finding,
+ * the row is a false claim, and deleting it returns the finding to
+ * `unlocked_fixes` where it can be raised again. Re-pointing it at some
+ * loosely-related file to make the dangling count go down would be the band-aid
+ * — it keeps the number clean and the claim false.
+ *
+ * Same repo fence and same no-row-means-failure rule as `repointRegressionSpec`.
+ *
+ * @param {string} repoId
+ * @param {string} specId
+ * @returns {Promise<{ok:true, cloud:true, specId:string, specPath:string|null}
+ *          |{ok:false, cloud:boolean, reason:'cloud-off'|'invalid-input'|'write-failed', message:string}>}
+ */
+export async function deleteRegressionSpec(repoId, specId) {
+  if (!repoId || !specId) {
+    return { ok: false, cloud: true, reason: 'invalid-input', message: 'repoId and specId are both required' };
+  }
+  if (!await isCloudEnabled()) {
+    return { ok: false, cloud: false, reason: 'cloud-off', message: 'cloud store is disabled' };
+  }
+  try {
+    const row = await one(
+      'DELETE FROM regression_specs WHERE id = $1 AND repo_id = $2 RETURNING id, spec_path',
+      [specId, repoId],
+    );
+    if (!row?.id) {
+      return {
+        ok: false,
+        cloud: true,
+        reason: 'write-failed',
+        message: `no regression spec "${specId}" in this repo — the DELETE matched nothing`,
+      };
+    }
+    return { ok: true, cloud: true, specId: row.id, specPath: row.spec_path ?? null };
+  } catch (err) {
+    process.stderr.write(`  [learning] deleteRegressionSpec failed: ${err.message}\n`);
+    return { ok: false, cloud: true, reason: 'write-failed', message: err.message };
+  }
+}

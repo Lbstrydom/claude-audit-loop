@@ -926,6 +926,35 @@
         "locked": false
       }
     },
+    "repoint-regression-spec-missing": {
+      "args": [
+        "repoint-regression-spec"
+      ],
+      "status": 0,
+      "envelope": {
+        "ok": true,
+        "cloud": false,
+        "repointed": false,
+        "deleted": false
+      }
+    },
+    "repoint-regression-spec-delete-with-test": {
+      "args": [
+        "repoint-regression-spec",
+        "--finding",
+        "a4969127-d5d0-47bb-8b2e-0acb0ed71546",
+        "--delete",
+        "--test",
+        "tests/x.test.mjs"
+      ],
+      "status": 0,
+      "envelope": {
+        "ok": true,
+        "cloud": false,
+        "repointed": false,
+        "deleted": false
+      }
+    },
     "plan-satisfaction-no-id": {
       "args": [
         "plan-satisfaction"

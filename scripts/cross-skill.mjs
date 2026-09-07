@@ -230,6 +230,10 @@ export const KNOWN_FLAGS = [
   // referential check can validate.
   '--affected-path', '--id', '--note', '--before', '--disposition', '--gate',
   '--apply', '--allow-exempt',
+  // ── repoint-regression-spec ───────────────────────────────────────────────
+  // `--delete` removes a lock outright: where NO test discharges the finding,
+  // the honest outcome is that it returns to unlocked_fixes.
+  '--delete',
   // ── write-spill <status|drain> (durable audit-store writes) ───────────────
   '--cap',
   // `--paths` is deliberately NOT here. An older acceptance criterion

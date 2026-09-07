@@ -127,6 +127,11 @@ export const CASES = [
   { id: 'rec-layering-missing', args: ['record-layering-violations', '--json', '{}'] },
   { id: 'set-embed-model-missing', args: ['set-active-embedding-model', '--json', '{}'] },
   { id: 'lock-with-test-missing', args: ['lock-with-test'] },
+  // Its repair sibling (upstream 429683ac). Two rows, because the two refusals
+  // are different facts: no --finding at all, and --delete asked alongside the
+  // --test it is mutually exclusive with.
+  { id: 'repoint-regression-spec-missing', args: ['repoint-regression-spec'] },
+  { id: 'repoint-regression-spec-delete-with-test', args: ['repoint-regression-spec', '--finding', 'a4969127-d5d0-47bb-8b2e-0acb0ed71546', '--delete', '--test', 'tests/x.test.mjs'] },
 
   // ── Cluster C (Phase 4) — readers ────────────────────────────────────────
   // Captured from the LEGACY handlers before migration. Readers degrade rather

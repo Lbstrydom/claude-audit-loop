@@ -132,6 +132,7 @@ const EXPECTED_EXPORTS = [
   // file — so the reader returns citations and the caller resolves them through
   // `classifyTestPath`, the same oracle `lock-with-test` already refuses on.
   'getRecordedSpecPaths',
+  'getRegressionSpecsForFinding',
   'getUnlockedFixes',
   // Repo-scoped single-finding lookup. Exists because the LIMIT-20 sampler
   // above must never be used to find ONE finding: unscoped it returned an
@@ -166,8 +167,10 @@ const EXPECTED_EXPORTS = [
   'recordPersonaAuditCorrelation',
   'recordPlanVerificationItems',
   'recordPlanVerificationRun',
+  'deleteRegressionSpec',
   'recordRegressionSpec',
   'recordRegressionSpecRun',
+  'repointRegressionSpec',
   'recordShipEvent',
   'retireMissedCorrelationsForHash', // WS1 — dismissal cascade (Gemini gate round-3 finding)
   'updatePlanStatus',
@@ -550,6 +553,18 @@ describe('learning-store.mjs — public export surface (plan §2 / R3/M2)', () =
     // no longer resolves reads as coverage and is never re-raised — measured here at 3 of
     // 235 rows. Existence is not answerable in SQL, so the reader hands citations to the
     // caller and `classifyTestPath` resolves them.
-    assert.equal(EXPECTED_EXPORTS.length, 201);
+    // 201 → 204: the WRITE half of the dangling-lock loop (upstream 429683ac,
+    // 2026-09-07). `getRecordedSpecPaths` above gave /ship the ability to REPORT
+    // a lock whose test file is gone; nothing could act on the report.
+    // `lock-with-test` refuses an already-locked finding, and
+    // `recordRegressionSpec` cannot re-point one either — its unit-test arbiter
+    // includes `spec_path`, so a new path inserts a SECOND row and leaves the
+    // stale citation standing. `getRegressionSpecsForFinding` reads the
+    // candidates (that pair is not unique, so the caller must SEE them rather
+    // than have one guessed), `repointRegressionSpec` moves the row by UPDATE so
+    // its id, created_at and spec-run children survive, and
+    // `deleteRegressionSpec` removes it where no test discharges the finding at
+    // all — which returns the finding to `unlocked_fixes`, the honest outcome.
+    assert.equal(EXPECTED_EXPORTS.length, 204);
   });
 });

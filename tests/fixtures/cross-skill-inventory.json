@@ -64,6 +64,7 @@
     "record-symbol-definitions",
     "record-symbol-embedding",
     "record-symbol-index",
+    "repoint-regression-spec",
     "resolve-repo-identity",
     "set-active-embedding-model",
     "shadow-overlap",

@@ -24,7 +24,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { listUnlockedFixesCmd, recordRegressionSpecCmd } from '../scripts/lib/cross-skill/commands/ship.mjs';
+import {
+  listUnlockedFixesCmd, recordRegressionSpecCmd, repointRegressionSpecCmd,
+} from '../scripts/lib/cross-skill/commands/ship.mjs';
 import { CommandError } from '../scripts/lib/cross-skill/dispatch.mjs';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
@@ -147,5 +149,167 @@ describe('record-regression-spec does NOT probe the filesystem — and that is t
     const lockFn = src.slice(src.indexOf('export async function lockWithTestCmd'));
     assert.match(lockFn.slice(0, 4000), /classifyTestPath/,
       'lock-with-test must keep refusing a citation it cannot resolve');
+  });
+});
+
+
+// ── The WRITE half — upstream 429683ac ─────────────────────────────────────
+//
+// The read half above reports dangling locks. For its whole life nothing could
+// act on that report: `lock-with-test` refuses an already-locked finding (correctly
+// — its job is discharging an OPEN obligation), and `record-regression-spec`
+// cannot re-point a unit-test row either, because its arbiter is
+// (repo_id, spec_path, source_finding_id) — a call naming a NEW path does not
+// conflict, so it INSERTS a second row and leaves the stale citation standing.
+//
+// Every case below is a REFUSAL or an outcome that must not be guessed, because
+// the failure mode being closed is a lock that reads as coverage while claiming
+// something false. A repair that quietly picked a row would reproduce it.
+
+function makeRepointCtx({
+  flags = {}, boolFlags = {}, repoId = 'repo-1', cloud = true,
+  found = { ok: true, cloud: true, rows: [] },
+  repoint = { ok: true, cloud: true, specId: 'spec-1', specPath: 'tests/new.test.mjs' },
+  del = { ok: true, cloud: true, specId: 'spec-1', specPath: 'tests/old.test.mjs' },
+  calls = {},
+} = {}) {
+  return {
+    verb: 'repoint-regression-spec',
+    cloud: { enabled: cloud },
+    flag: (n) => flags[n] ?? null,
+    hasFlag: (n) => Boolean(boolFlags[n]),
+    payload: () => ({}),
+    git: { commitSha: () => 'abc1234', branch: () => 'main' },
+    degrade: () => ({ ok: true, cloud: false }),
+    resolveScope: async () => (repoId
+      ? { kind: 'scoped', repoId, slug: 'owner/repo' }
+      : { kind: 'unresolved', reason: 'repo-identity-unresolvable' }),
+    deps: {
+      getRegressionSpecsForFinding: async (...a) => { calls.found = a; return found; },
+      repointRegressionSpec: async (...a) => { calls.repoint = a; return repoint; },
+      deleteRegressionSpec: async (...a) => { calls.delete = a; return del; },
+    },
+  };
+}
+
+const FINDING = 'a4969127-d5d0-47bb-8b2e-0acb0ed71546';
+
+describe('repoint-regression-spec — the write half the dangling report had no verb for', () => {
+  it('re-points a single lock, and names where it came FROM', async () => {
+    const calls = {};
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC, description: 'the old spec was deleted by a refactor' },
+      found: { ok: true, cloud: true, rows: [{ id: 'spec-1', specPath: GONE_SPEC }] },
+      repoint: { ok: true, cloud: true, specId: 'spec-1', specPath: REAL_SPEC },
+      calls,
+    }));
+    assert.equal(out.ok, true);
+    assert.equal(out.repointed, true);
+    assert.equal(out.previousPath, GONE_SPEC, 'the operator must be able to see what was replaced');
+    // The repo id comes from the resolved identity, never from the row — the
+    // cross-tenant fence lock-with-test grew after adopting a foreign repo_id.
+    assert.equal(calls.repoint[0], 'repo-1');
+    assert.equal(calls.repoint[1].specId, 'spec-1');
+  });
+
+  it('THE DIRECTION THAT MUST FIRE: an AMBIGUOUS (repo, finding) is refused and its candidates named', async () => {
+    // Not unique by construction — the unit-test arbiter includes spec_path, so
+    // one finding may legitimately carry two citations. Picking the newest would
+    // repair one and silently leave the other.
+    const calls = {};
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC, description: 'why' },
+      found: { ok: true, cloud: true, rows: [
+        { id: 'spec-1', specPath: GONE_SPEC },
+        { id: 'spec-2', specPath: 'tests/other.test.mjs' },
+      ] },
+      calls,
+    }));
+    assert.equal(out.ok, false);
+    assert.equal(out.reason, 'ambiguous-lock');
+    assert.match(out.error, /spec-1/);
+    assert.match(out.error, /spec-2/);
+    assert.equal(calls.repoint, undefined, 'nothing may be written while the target is ambiguous');
+  });
+
+  it('a READ that failed is not reported as "no lock"', async () => {
+    // "could not look" and "nothing there" must not be the same answer: the
+    // second reads as "nothing to fix" over a store outage.
+    const calls = {};
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC, description: 'why' },
+      found: { ok: false, cloud: true, reason: 'read-failed', message: 'connection reset' },
+      calls,
+    }));
+    assert.equal(out.ok, false);
+    assert.equal(out.reason, 'read-failed');
+    assert.equal(calls.repoint, undefined);
+  });
+
+  it('refuses a new path that does not exist — moving a dangling lock is not fixing it', async () => {
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: GONE_SPEC, description: 'why' },
+    }));
+    assert.equal(out.ok, false);
+    assert.equal(out.reason, 'test-file-not-found');
+  });
+
+  it('refuses an unresolvable repo rather than guessing one', async () => {
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC, description: 'why' }, repoId: null,
+    }));
+    assert.equal(out.ok, false);
+    assert.match(out.error, /repo identity unresolvable/);
+  });
+
+  it('requires a description, exactly as lock-with-test does', async () => {
+    for (const description of [null, '   ']) {
+      const out = await repointRegressionSpecCmd(makeRepointCtx({
+        flags: { finding: FINDING, test: REAL_SPEC, description },
+      }));
+      assert.equal(out.ok, false, `description ${JSON.stringify(description)} must be refused`);
+    }
+  });
+
+  it('--delete removes the lock, and says the finding is an open obligation again', async () => {
+    const calls = {};
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING }, boolFlags: { delete: true },
+      found: { ok: true, cloud: true, rows: [{ id: 'spec-9', specPath: GONE_SPEC }] },
+      del: { ok: true, cloud: true, specId: 'spec-9', specPath: GONE_SPEC },
+      calls,
+    }));
+    assert.equal(out.ok, true);
+    assert.equal(out.deleted, true);
+    assert.equal(out.repointed, false);
+    assert.deepEqual(calls.delete, ['repo-1', 'spec-9']);
+    assert.match(out.note, /unlocked_fixes/);
+  });
+
+  it('--delete alongside --test is refused — two different outcomes for the finding', async () => {
+    const calls = {};
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC }, boolFlags: { delete: true }, calls,
+    }));
+    assert.equal(out.ok, false);
+    assert.equal(calls.delete, undefined);
+    assert.equal(calls.repoint, undefined);
+  });
+
+  it('a write that matched no row is a FAILURE, never a success', async () => {
+    // Postgres reports success for an UPDATE that affected nothing.
+    const out = await repointRegressionSpecCmd(makeRepointCtx({
+      flags: { finding: FINDING, test: REAL_SPEC, description: 'why' },
+      found: { ok: true, cloud: true, rows: [{ id: 'spec-1', specPath: GONE_SPEC }] },
+      repoint: { ok: false, cloud: true, reason: 'write-failed', message: 'the UPDATE matched nothing' },
+    }));
+    assert.equal(out.ok, false);
+    assert.equal(out.reason, 'write-failed');
+  });
+
+  it('cloud-off degrades without claiming anything happened', async () => {
+    const out = await repointRegressionSpecCmd(makeRepointCtx({ cloud: false, flags: { finding: FINDING } }));
+    assert.equal(out.repointed, false);
+    assert.equal(out.deleted, false);
   });
 });

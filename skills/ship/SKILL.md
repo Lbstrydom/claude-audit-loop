@@ -263,8 +263,22 @@ work that cannot be done.
 >
 > `count: null` means the question went unasked (cloud off, unresolved repo, a read that
 > threw) — distinct from `0`, and not a clean result. When `count > 0`, print the sampled
-> rows and either restore the test or clear the lock, so the finding rejoins the backlog
-> it left.
+> rows and act on each: restore the test, re-point the lock at whatever replaced it, or
+> remove the lock so the finding rejoins the backlog it left.
+>
+> ```bash
+> node scripts/cross-skill.mjs repoint-regression-spec --finding FINDING_UUID --test tests/dangling-regression-lock.test.mjs --description "why the old artefact went away"
+> ```
+>
+> `--delete` instead of `--test` where no test discharges the finding at all — that is
+> the honest outcome, not a lesser one: the finding returns to `unlocked_fixes` and gets
+> raised again. Re-pointing it at a loosely-related file would move the dangling count
+> without making the claim true. The command refuses a missing target path, an
+> unresolvable repo, and an ambiguous `(repo, finding)` — a finding may legitimately
+> carry several citations, and picking one would repair it silently while leaving the
+> rest. Added 2026-09-07 for upstream `429683ac`, which measured this queue reporting a
+> condition nothing could clear: `lock-with-test` refuses an already-locked finding, and
+> `record-regression-spec` inserts a SECOND row rather than moving the first.
 `unlocked_fixes` is a generic "HIGH fix, zero `regression_specs` rows in 14
 days" check — it has no UI-relevance filter, so it fires identically for a
 DOM-facing fix and a pure backend/CLI one. `/ux-lock` can only ever cover

@@ -541,6 +541,126 @@ async function lockWithTestWorksheet(ctx) {
   return undefined;
 }
 
+
+/**
+ * `repoint-regression-spec` — move a lock to a different test, or remove it.
+ *
+ * **The gap this closes.** `list-unlocked-fixes` reports `danglingLocks` (added
+ * for upstream b2c9a63f) — locks citing a file that is no longer there — and
+ * nothing could act on the report. `lock-with-test` refuses an already-locked
+ * finding, correctly; `record-regression-spec` cannot re-point a `unit-test`
+ * row either, because its arbiter includes `spec_path`, so a call naming a new
+ * path inserts a SECOND row and leaves the stale citation standing. Reported by
+ * a consumer 2026-09-07 (upstream 429683ac) with two measured dangling rows —
+ * one whose test was deleted in the same PR that recorded the lock, one
+ * recorded sixteen days after its test was deleted, i.e. false when written.
+ *
+ * **`--delete` is not a convenience.** Where no test discharges the finding,
+ * removing the row is the honest outcome: the finding returns to
+ * `unlocked_fixes` and gets raised again. Re-pointing it at a loosely-related
+ * file would make the dangling count go down while the claim stays false —
+ * exactly the "closing 119 obligations by matching primary_file" move
+ * `lock-with-test`'s own docstring refuses.
+ *
+ * **The refusals mirror `lock-with-test`'s, because they guard the same claim.**
+ * The new path goes through `classifyTestPath` — the one realpath+containment
+ * oracle — so a re-point cannot land somewhere `lock-with-test` would have
+ * refused. Identity is resolved FIRST and the repo id comes from the identity,
+ * never from a row.
+ *
+ * **An ambiguous (repo, finding) is named and refused, never guessed.** That
+ * pair is not unique by construction: the unit-test arbiter is
+ * (repo_id, spec_path, source_finding_id), so a finding can legitimately carry
+ * two rows. Picking the newest would silently repair one citation and leave the
+ * other — which is how the second dangling row in the report came to exist.
+ */
+export async function repointRegressionSpecCmd(ctx) {
+  if (!ctx.cloud.enabled) return { ...ctx.degrade(), repointed: false, deleted: false };
+
+  const findingId = ctx.flag('finding');
+  const wantsDelete = ctx.hasFlag('delete');
+  const specPath = ctx.flag('test');
+  const description = ctx.flag('description');
+
+  if (!findingId) {
+    return { ok: false, error: 'repoint-regression-spec needs --finding. Example: '
+      + 'node scripts/cross-skill.mjs repoint-regression-spec --finding a4969127-d5d0-47bb-8b2e-0acb0ed71546 '
+      + '--test tests/foo.test.mjs --description "the old spec was deleted when the constant became generated". '
+      + 'Use --delete instead of --test when no test discharges the finding.' };
+  }
+  if (wantsDelete && (specPath || description)) {
+    // Two intents in one call: which one wins is not something to infer.
+    return { ok: false, error: 'refusing: --delete takes neither --test nor --description. '
+      + 'Removing a lock and re-pointing one are different outcomes for the finding — '
+      + 'a deleted lock returns it to unlocked_fixes, a re-pointed one does not.' };
+  }
+  if (!wantsDelete && (!specPath || !description || !description.trim())) {
+    return { ok: false, error: 'repoint-regression-spec needs --test and --description (or --delete). '
+      + 'The description is mandatory: an unexplained re-point is an unverifiable claim, '
+      + 'the same reason lock-with-test requires one.' };
+  }
+
+  // Resolve identity BEFORE reading any row, and take repo_id from the identity
+  // — the cross-tenant fence lock-with-test grew after it adopted a foreign
+  // row's repo_id.
+  const scope = await ctx.resolveScope();
+  const repoId = scope.kind === 'scoped' ? scope.repoId : null;
+  if (!repoId) {
+    return { ok: false, error: 'refusing: repo identity unresolvable — a regression spec belongs to a repo, and guessing one is how another repo\'s findings got recorded.' };
+  }
+
+  if (!wantsDelete) {
+    const { realpathSync } = await import('node:fs');
+    const { classifyTestPath } = await import('../../path-validation.mjs');
+    const verdict = classifyTestPath({ repoRoot: realpathSync(process.cwd()), testPath: specPath });
+    if (!verdict.ok) {
+      // Same vocabulary as lock-with-test: a re-point that lands on a missing
+      // file has replaced one dangling citation with another.
+      const why = {
+        'path-escapes-repo': `"${specPath}" resolves outside the repo`,
+        'not-a-file': `"${specPath}" is not a regular file`,
+        'test-file-not-found': `test file "${specPath}" does not exist — re-pointing at a missing file just moves the dangling lock`,
+        'path-unresolvable': `"${specPath}" could not be resolved (broken symlink or permission error)`,
+        'sensitive-path': `"${specPath}" is a sensitive path`,
+        'empty-path': 'a test path is required',
+      }[verdict.reason] ?? verdict.reason;
+      return { ok: false, error: `refusing: ${why}`, reason: verdict.reason };
+    }
+  }
+
+  const found = await ctx.deps.getRegressionSpecsForFinding(repoId, findingId);
+  if (!found.ok) {
+    // A read that did not happen must not be reported as "no lock" — that would
+    // read as "nothing to fix" over a store outage.
+    return { ok: false, error: `refusing: could not read this finding's locks (${found.reason}): ${found.message}`, reason: found.reason };
+  }
+  if (found.rows.length === 0) {
+    return { ok: false, error: `refusing: no regression spec in THIS repo for finding "${findingId}". `
+      + 'If the finding is unlocked, lock-with-test is the verb; if it belongs to another repo, it is not yours to re-point.',
+    reason: 'no-such-lock' };
+  }
+  if (found.rows.length > 1) {
+    return { ok: false,
+      error: `refusing: finding "${findingId}" carries ${found.rows.length} regression specs in this repo, so "the" lock is ambiguous. `
+        + 'Candidates: ' + found.rows.map((r) => `${r.id} -> ${r.specPath}`).join('; ')
+        + '. Act on them one at a time (this is legal: the unit-test arbiter is (repo, path, finding), so one finding may carry several citations).',
+      reason: 'ambiguous-lock',
+      candidates: found.rows };
+  }
+
+  const target = found.rows[0];
+  if (wantsDelete) {
+    const res = await ctx.deps.deleteRegressionSpec(repoId, target.id);
+    if (!res.ok) return { ok: false, error: `delete failed (${res.reason}): ${res.message}`, reason: res.reason };
+    return { ok: true, cloud: true, deleted: true, repointed: false, specId: res.specId, previousPath: res.specPath, findingId,
+      note: 'the finding returns to unlocked_fixes — it is an open obligation again, which is the point' };
+  }
+
+  const res = await ctx.deps.repointRegressionSpec(repoId, { specId: target.id, specPath, description });
+  if (!res.ok) return { ok: false, error: `re-point failed (${res.reason}): ${res.message}`, reason: res.reason };
+  return { ok: true, cloud: true, repointed: true, deleted: false, specId: res.specId, previousPath: target.specPath, specPath: res.specPath, findingId };
+}
+
 /**
  * `record-regression-spec` — /ux-lock writes a new Playwright spec.
  *

@@ -758,6 +758,21 @@ export const REGISTRY = Object.freeze([
     load: () => import('./commands/ship.mjs').then((m) => m.lockWithTestCmd),
   },
   {
+    name: 'repoint-regression-spec',
+    flags: ['finding', 'test', 'description', 'repo', 'repo-id', { name: 'delete', kind: 'boolean' }],
+    positionals: 'none', payload: 'none',
+    // ambient-ok, not global-optin: this is a per-repo repair with no worksheet
+    // and no all-repos mode, and the handler refuses outright when identity is
+    // unresolvable — a regression spec belongs to a repo.
+    scope: 'ambient-ok', kind: 'write', cloud: 'degrade-noop',
+    degradeShape: { repointed: false, deleted: false },
+    // Same shape as its sibling `lock-with-test`: every refusal returns
+    // {ok:false, error:'refusing: ...'} naming what the operator must do next,
+    // and a refusal IS a failure, so it exits non-zero with the payload intact.
+    reportsFailure: { all: true, reason: 'every refusal path returns {ok:false, error} naming the next action — an ambiguous lock even lists its candidates. A throw would discard that.' },
+    load: () => import('./commands/ship.mjs').then((m) => m.repointRegressionSpecCmd),
+  },
+  {
     name: 'quality',
     flags: ['title', 'scope-tags', { name: 'scope-tag', kind: 'repeatable' }, 'cost', 'name',
       'files', { name: 'file', kind: 'repeatable' }, 'symbols', { name: 'symbol', kind: 'repeatable' },

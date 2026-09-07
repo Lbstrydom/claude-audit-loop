@@ -533,6 +533,14 @@
     {
       "line": "> never appears. `.claude/tmp/` resolves per-tree, so a hand-written path means",
       "reason": "The 2026-08-14 incident callout: a note written in a deleted worktree is lost silently. Describes a past failure, claims no enforcement. Reworded 2026-09-07 because both steps now resolve the path in code rather than quoting a recipe."
+    },
+    {
+      "line": "> without making the claim true. The command refuses a missing target path, an",
+      "reason": "Describes what `repoint-regression-spec` REFUSES (a missing target path, an unresolvable repo, an ambiguous lock). Those are enforcement claims about that CLI, unit-tested in tests/dangling-regression-lock.test.mjs — not a claim /ship enforces about itself. Added 2026-09-07 for upstream 429683ac."
+    },
+    {
+      "line": "> condition nothing could clear: `lock-with-test` refuses an already-locked finding, and",
+      "reason": "States why the new verb was needed: `lock-with-test` refuses an already-locked finding (its own documented behaviour, correct for its purpose) and `record-regression-spec` inserts a second row. Both are facts about OTHER commands' behaviour, reported so the reader knows which verb to reach for; /ship enforces neither."
     }
   ]
 }
