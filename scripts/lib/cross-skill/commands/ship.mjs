@@ -700,9 +700,15 @@ export async function recordRegressionSpecCmd(ctx) {
   // took `sourceKind` straight from the payload under no constraint, so
   // `record-regression-spec --json '{"sourceKind":"unit-test",…}'` minted a row
   // indistinguishable in the store from a validated one — the validating verb's whole
-  // guarantee was bypassable through its sibling. Row e473285b cited
-  // `tests/unit/contracts/noV1RegistryInValidators.test.js` SIXTEEN DAYS after that file
-  // was deleted: false on arrival, not invalidated later by a refactor.
+  // guarantee was bypassable through its sibling. Measured in the consumer's store
+  // 2026-09-07: the lock on finding e473285b (spec row 806ce553, created 2026-08-29
+  // 19:11Z) cited `tests/unit/contracts/noV1RegistryInValidators.test.js`, which had been
+  // deleted 16 days earlier on 2026-08-13 by 2e25afda — false on arrival, not invalidated
+  // later by a refactor. The attribution is checkable rather than assumed: `lock-with-test`
+  // already carried `classifyTestPath` at that date (rev 0088db7c), so it cannot have
+  // written a lock citing an already-deleted file, and `ux-lock-run.mjs` cannot write a
+  // unit-test row at all — it passes no `sourceFindingId`, which the store requires for
+  // that kind. This verb was the only remaining route.
   //
   // That measurement retired this comment's previous claim, which said a write-time probe
   // "catches none of the real population" on upstream b2c9a63f's 3 of 3 dangling citations

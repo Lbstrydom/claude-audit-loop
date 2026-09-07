@@ -17,19 +17,29 @@
  * on unmerged branches).
  *
  * **But not the ONLY instrument — upstream `429683ac` (2026-09-07) falsified the stronger
- * reading of that number.** Two further dangling rows from the same consumer, both
- * `source_kind: 'unit-test'`: `d23094b2` cited a test deleted in the same PR that recorded
- * the lock (true-when-written, consistent with the above), but `e473285b` was recorded
- * SIXTEEN DAYS after the file it cites was deleted — FALSE ON ARRIVAL. The known
- * population is 1 of 5 write-time-catchable, not 0 of 3.
+ * reading of that number.** Two further dangling locks from the same consumer, both
+ * `source_kind: 'unit-test'`, verified in that store on 2026-09-07 (the ids are FINDING
+ * ids; the spec rows are named beside them):
+ *   - finding `d23094b2` (row `d4d3b2d7`) cited `builderTemplateFallbackParity.test.js`,
+ *     deleted in the same PR that recorded the lock — true-when-written, consistent with
+ *     the b2c9a63f population above.
+ *   - finding `e473285b` (row `806ce553`, created 2026-08-29 19:11Z) cited
+ *     `noV1RegistryInValidators.test.js`, deleted 16 days EARLIER on 2026-08-13 by
+ *     `2e25afda` — FALSE ON ARRIVAL, and catchable by a write-time probe.
+ * The known population is 1 of 5 write-time-catchable, not 0 of 3. Both locks were
+ * re-pointed by the reporter on 2026-09-07 07:30Z using `repoint-regression-spec`
+ * (d8cbddca), so their `spec_path` resolves today while `created_at` still dates the
+ * original claim — which is exactly the distinction the read side cannot draw.
  *
- * **The mechanism is the finding.** `lock-with-test` validates via `classifyTestPath`, so
- * it cannot have produced `e473285b`. `record-regression-spec` took `sourceKind` from the
- * caller's payload under no constraint, so it could mint an identical-looking `unit-test`
- * row with no validation — the validating verb's guarantee was fully bypassable through
- * its sibling, and the two rows are indistinguishable in the store. The write half below
- * pins the fix: claiming `unit-test` now means clearing `unit-test`'s path contract, while
- * genuinely deferred-write kinds stay permissive.
+ * **The mechanism is the finding, and the attribution is checkable rather than assumed.**
+ * `lock-with-test` already carried `classifyTestPath` on 2026-08-29 (rev `0088db7c`), so it
+ * cannot have written a lock citing an already-deleted file; `ux-lock-run.mjs` cannot write
+ * a `unit-test` row at all, passing no `sourceFindingId` where the store requires one. That
+ * left `record-regression-spec`, which took `sourceKind` from the caller's payload under no
+ * constraint and so could mint an identical-looking `unit-test` row with no validation — the
+ * validating verb's guarantee fully bypassable through its sibling, the two rows
+ * indistinguishable in the store. The write half below pins the fix: claiming `unit-test`
+ * now means clearing `unit-test`'s path contract, while deferred-write kinds stay permissive.
  *
  * @module tests/dangling-regression-lock
  */
