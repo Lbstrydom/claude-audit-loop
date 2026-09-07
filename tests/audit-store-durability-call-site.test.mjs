@@ -93,9 +93,15 @@ const STORE_MODULES = (function listStoreModules(rel = STORE_DIR) {
  * temptation was to add only `repoint`, which would have censused exactly the
  * writer being added while leaving six measured-and-known exports invisible;
  * that is gaming the oracle, not widening it. All six are classified below, and
- * one of them (`updateRunMeta`) turned out to be a genuinely fire-and-forget
- * swallowing write — named as declared debt rather than hidden, exactly as
- * `deleteRefreshRuns` already is.
+ * one of them (`updateRunMeta`) turned out to have a genuinely fire-and-forget
+ * swallowing call site in audit-loop.mjs — first named as declared debt rather
+ * than hidden (exactly as `deleteRefreshRuns` still is), then RESOLVED on
+ * 2026-09-07 by deleting that call site outright: it existed only to stamp
+ * `r2_skip_reason`, a field with zero readers whose question
+ * `round_converged_after` already answers for three real consumers, and which
+ * had never once been written successfully in 1,791 audit_runs rows across
+ * both stores. Widening the census is what made it visible; the honest
+ * outcome was removal, not hardening.
  */
 const WRITER_NAME = /^(record|sync|upsert|save|persist|write|delete|retire|mark|insert|create|update|remove|set|repoint)[A-Z]/;
 
@@ -157,7 +163,7 @@ const NOT_A_DURABLE_WRITE = {
   updatePlanStatus: 'Operator CLI write (cross-skill.mjs update-plan-status). Awaited through ctx.deps by its command handler, which returns the store result to the envelope — a failed write reaches the operator as a non-zero exit under the emit/exit coupling.',
   updateEvalRunTerminal: 'model-eval harness CLI; terminal-state write on an experiment run, awaited by its executor, and a lost row invalidates that experiment rather than corrupting an audit. Same class as the arm-eval harness entries above.',
   updatePassStatsPostDeliberation: 'finalize-outcomes CLI (lib/finalize-outcomes.mjs), not the orchestrator cloud block. Awaited, and the ledger on disk is the durable copy of the deliberation it summarises — a spill would be a second queue over the same evidence.',
-  updateRunMeta: 'finalize-outcomes CLI, awaited there. NOTE, as declared debt rather than hidden by this exemption: audit-loop.mjs:373 ALSO calls it fire-and-forget with `.catch(() => null)` to stamp r2SkipReason, so on that one path a failed write is silently lost. It is metadata on an already-recorded run rather than the run evidence itself, and audit-loop.mjs is outside decision 6\'s boundary (the orchestrator cloud block in legacy-production-audit.mjs) — same shape and same treatment as deleteRefreshRuns above.',
+  updateRunMeta: 'finalize-outcomes CLI, awaited there — as it now is at every remaining call site (outcome-sync.mjs, audit-shadow.mjs, and the final-review stamp in this module). The declared debt this entry used to carry is GONE (2026-09-07): audit-loop.mjs also called it fire-and-forget with `.catch(() => null)` to stamp `r2SkipReason`, and that call site was DELETED rather than hardened — the field had zero readers, duplicated a question `round_converged_after` already answers for three real consumers, and had never once landed (0 of 1,791 audit_runs rows across both stores, measured 2026-09-07). No unawaited caller remains, so no failure on this writer is silently lost.',
 
   // (b) Experiment harnesses (arm-eval, campaign). Operator-initiated from
   // their own CLIs, each returns a discriminated result its caller checks, and

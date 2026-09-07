@@ -365,14 +365,14 @@ async function main() {
 
       if (stableCount >= 1 || round >= args.maxRounds) {
         console.log(`\n${G}Converged${X} after ${round} round(s). H:${counts.high} M:${counts.medium}`);
-        // Record R2 skip reason when we stop after round 1 (converged without running R2)
-        if (round === 1 && results._cloudRunId) {
-          const { updateRunMeta } = await import('./learning-store.mjs').catch(() => ({ updateRunMeta: null }));
-          if (updateRunMeta) {
-            const reason = round >= args.maxRounds ? 'max_rounds_1' : 'converged';
-            updateRunMeta(results._cloudRunId, { r2SkipReason: reason }).catch(() => null);
-          }
-        }
+        // No `r2SkipReason` stamp here (removed 2026-09-07). Why the run stopped
+        // is already recorded — durably and per-round — by
+        // `durableWrite('audit.convergenceState')` in lib/audit/run-persistence.mjs,
+        // whose `round_converged_after` / `rigor_pressure_round` / `rounds` are read
+        // by the dashboard run viewer, the `AI-Gate` trailer verifier and the
+        // `convergence_predict` outcome detector. That stamp asked the same question
+        // with strictly less information, had zero readers, and had never once landed
+        // (0 of 1,791 audit_runs rows across both stores, measured 2026-09-07).
         break;
       }
     }

@@ -339,7 +339,6 @@ export async function recordRunComplete(runId, stats) {
   if (stats.diffFilesChanged != null) update.diff_files_changed = stats.diffFilesChanged;
   if (stats.sessionCacheHit != null) update.session_cache_hit = stats.sessionCacheHit;
   if (stats.mapReducePasses != null) update.map_reduce_passes = pgArray(stats.mapReducePasses); // genuine text[]
-  if (stats.r2SkipReason != null) update.r2_skip_reason = stats.r2SkipReason;
   if (stats.cacheInputTokens != null) update.cache_input_tokens = stats.cacheInputTokens;
   if (stats.cacheCachedTokens != null) update.cache_cached_tokens = stats.cacheCachedTokens;
   if (stats.cacheHitRate != null) update.cache_hit_rate = stats.cacheHitRate;
@@ -428,7 +427,6 @@ export async function recordRunComplete(runId, stats) {
 export async function updateRunMeta(runId, meta) {
   if (!runId) return;
   const update = {};
-  if (meta.r2SkipReason != null)   update.r2_skip_reason   = meta.r2SkipReason;
   if (meta.geminiVerdict != null)  update.gemini_verdict   = meta.geminiVerdict;
   if (meta.labeled != null)        update.labeled          = meta.labeled;
   if (meta.acceptedCount != null)  update.accepted_count   = meta.acceptedCount;
