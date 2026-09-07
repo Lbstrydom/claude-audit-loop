@@ -6,6 +6,7 @@
  */
 
 import { safeInt } from './file-io.mjs';
+import { finalReviewModelSpec, finalReviewTimeoutMs } from './final-review-config.mjs';
 import { resolveModel, isSentinel } from './model-resolver.mjs';
 import { loadSharedEnv } from './load-shared-env.mjs';
 import { PREVIEW_GATE_MODES } from './preview-gate-vocabulary.mjs';
@@ -132,10 +133,9 @@ export const openaiConfig = Object.freeze({
 // ── Gemini / Final Review Config ────────────────────────────────────────────
 
 export const geminiConfig = Object.freeze({
-  // `latest-flash` since 2026-09-07 (was `latest-pro`): 65% cheaper, quality
-  // equivalence NOT established, defensible only because this gate is ADVISORY in
-  // code. Revert here. Why + revisit triggers: docs/research/experiment-6-adjudicator-swap-and-the-unreachable-rule.md
-  model: resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-flash'),
+  // Model + timeout defaults live in final-review-config.mjs (ONE reader, one
+  // default). Tier switch 2026-09-07: docs/research/experiment-6-adjudicator-swap-and-the-unreachable-rule.md
+  model: resolveModel(finalReviewModelSpec()),
   // 270s. Raised from 180s on 2026-08-10 after a CONSOLIDATED gate — one Gemini
   // review over the union diff of three clusters (31 files, ~8,300 insertions) —
   // timed out at 180s, then completed twice at 142s and 130s once the bound was
@@ -158,7 +158,7 @@ export const geminiConfig = Object.freeze({
   //
   // Prior step: 120s → 180s on 2026-07-31, after three consecutive timeouts
   // under load against 78–101s runs. Same reasoning, one size class down.
-  timeoutMs: safeInt(process.env.GEMINI_REVIEW_TIMEOUT_MS, 270000),
+  timeoutMs: finalReviewTimeoutMs(),
   maxOutputTokens: safeInt(process.env.GEMINI_REVIEW_MAX_TOKENS, 32000),
 });
 

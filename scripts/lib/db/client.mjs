@@ -29,6 +29,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { loadSharedEnv } from '../load-shared-env.mjs';
+import { readEnvWithAlias, _resetAliasWarnings } from '../env-alias.mjs';
 
 // ── pg type-parser OIDs (timestamps + dates → string, not Date) ────────────
 // These are the canonical Postgres OIDs the `pg` driver receives for the
@@ -518,21 +519,11 @@ let _initPromise = null;
  *
  * @returns {string | null} DSN or null when cloud mode is disabled.
  */
-// Back-compat alias warnings — emitted at most once per (alias) per process.
-const _aliasWarned = new Set();
-function warnAliasOnce(alias, canonical) {
-  if (_aliasWarned.has(alias)) return;
-  _aliasWarned.add(alias);
-  process.stderr.write(
-    `  [db] ${alias} is a deprecated alias for ${canonical} — using it. ` +
-    `Rename to ${canonical} to silence this notice.\n`,
-  );
-}
-
-/** For tests — reset the alias-warning latch. */
-export function _resetAliasWarnings() {
-  _aliasWarned.clear();
-}
+// Back-compat alias warnings now live in `lib/env-alias.mjs`. The final-review
+// role grew the same need, and a second copy of "canonical wins, alias warns
+// once" is the duplicate-classifier shape this repo keeps paying for. Re-exported
+// so existing importers and tests/db-alias.test.mjs keep their contract.
+export { _resetAliasWarnings };
 
 export function resolveDbUrl() {
   // Guarantee the shared-env precondition at the single DSN reader: load the
@@ -547,11 +538,10 @@ export function resolveDbUrl() {
   // `${cwd}/.env` — and treating them as equal is what let 43 cwd-blind call
   // sites read as covered until 2026-08-15. See `lib/load-env.mjs`.
   loadSharedEnv({ includeCwd: false });
-  const canonical = (process.env.AUDIT_DB_URL || '').trim();
-  const alias = (process.env.AUDIT_POSTGRES_URL || '').trim();
-  // Canonical wins when both set; warn whenever the alias contributes.
-  if (alias && !canonical) warnAliasOnce('AUDIT_POSTGRES_URL', 'AUDIT_DB_URL');
-  const url = canonical || alias;
+  // Canonical wins when both set; the alias warns only when it CONTRIBUTED.
+  const url = readEnvWithAlias({
+    canonical: 'AUDIT_DB_URL', alias: 'AUDIT_POSTGRES_URL', subsystem: 'db',
+  });
   if (url) return url;
 
   // §1.5 M4: AUDIT_STORE=postgres is a validation signal, not a silent no-op.
@@ -615,10 +605,9 @@ function assertPublicSchema() {
  * @param {object} pgTypes - the live `pg.types` module (for default parsers)
  */
 export function buildPoolConfig(url, pgTypes) {
-  if (!process.env.AUDIT_DB_SSL_MODE && process.env.AUDIT_POSTGRES_SSL_MODE) {
-    warnAliasOnce('AUDIT_POSTGRES_SSL_MODE', 'AUDIT_DB_SSL_MODE');
-  }
-  const sslMode = (process.env.AUDIT_DB_SSL_MODE || process.env.AUDIT_POSTGRES_SSL_MODE || 'require').trim();
+  const sslMode = readEnvWithAlias({
+    canonical: 'AUDIT_DB_SSL_MODE', alias: 'AUDIT_POSTGRES_SSL_MODE', subsystem: 'db',
+  }) || 'require';
   // Validate the SSL mode explicitly — an unknown value silently fell through to
   // strict `require`, masking a typo as a confusing TLS failure at connect time.
   if (!VALID_SSL_MODES.has(sslMode)) {

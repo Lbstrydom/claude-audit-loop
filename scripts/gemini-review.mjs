@@ -38,6 +38,7 @@ import { affectedFilesOf, primaryFileOf, matchFindings } from './lib/finding-mat
 import { normalizeGeminiUsage } from './lib/gemini-usage.mjs';
 import { readProjectContext, initAuditBrief, generateRepoProfile } from './lib/context.mjs';
 import { applyEnvSetting } from './lib/env-setting.mjs';
+import { finalReviewModelSpec } from './lib/final-review-config.mjs';
 import { geminiConfig, claudeConfig, azureConfig, shadowReviewConfig, finalReviewConfig, auditShadowConfig, findingMatchConfig, FINDING_MATCH_SCHEMA_VERSION } from './lib/config.mjs';
 import { describeAzureRoute, describeTransportFailure } from './lib/azure-route-report.mjs';
 import { recordFinalReviewFindings } from './learning-store.mjs';
@@ -2241,7 +2242,10 @@ async function refreshCatalogAndWarn() {
   // use the latest" path — operators no longer have to update STATIC_POOL
   // manually when a provider ships a new model.
   try {
-    const liveGemini = resolveModel(process.env.GEMINI_REVIEW_MODEL || 'latest-pro', { silent: true });
+    // The SAME spec config.mjs resolved at startup, not a second copy of the
+    // default -- see finalReviewModelSpec. This line read `|| 'latest-pro'`
+    // until 2026-09-07 and silently reverted the flash switch here.
+    const liveGemini = resolveModel(finalReviewModelSpec(), { silent: true });
     if (liveGemini !== MODEL) {
       process.stderr.write(`  [model-resolver] upgraded Gemini reviewer ${MODEL} → ${liveGemini}\n`);
       MODEL = liveGemini;

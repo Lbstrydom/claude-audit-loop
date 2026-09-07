@@ -662,7 +662,7 @@ The rows below are the ones whose semantics constrain how you write code:
 | `AUDIT_DB_URL` | — | Postgres DSN for the store. Unset → **local-only mode**, not an error (#16 graceful degradation). Supabase: **Session pooler (5432)**, never the Transaction pooler. |
 | `LEARNING_DISABLE` | — | `1` kills **all** adaptive-learning behaviour + telemetry in one variable. |
 | `LEARNING_REPO_NAME` | — | Must be the **`owner/repo` slug** (matches `audit_repos.name`) — a bare repo name silently misses the lookup, which is how weekly-review sat broken for weeks in every consumer. `install.mjs`/`setup.mjs` derive it; don't hand-type it. |
-| `GEMINI_REVIEW_TIMEOUT_MS` | `270000` | **COUPLED** to `FINAL_REVIEW_HARD_DEADLINE_MS`: the watchdog floor is `2×timeout + 60000`, so 270s is the most the default admits — raise both together. |
+| `FINAL_REVIEW_TIMEOUT_MS` | `270000` | **COUPLED** to `FINAL_REVIEW_HARD_DEADLINE_MS`: the watchdog floor is `2x timeout + 60000`, so 270s is the most the default admits -- raise both together. `GEMINI_REVIEW_TIMEOUT_MS` is a deprecated alias; the pair is read by `finalReviewTimeoutMs()`, alongside `finalReviewModelSpec()` which owns the ONE default for `FINAL_REVIEW_MODEL`. |
 | `AUDIT_AUTHOR_TIER_HINT` | — | **Observation-only** — it records an author-model tier and must never route. |
 | ~~`SUPABASE_AUDIT_*`~~ | — | **Sunset in M4.** The runtime DSN's password IS the secret — there is no separate write-role key. |
 
