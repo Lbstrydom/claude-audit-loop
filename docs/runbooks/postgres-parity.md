@@ -516,3 +516,55 @@ not shipped. **`npm run arch:refresh:full` is needed as a separate follow-up**
 (a full repo re-index, non-trivial embedding/summarisation cost) before
 `get-neighbourhood`/`compute-target-domains`/the architecture map are
 trustworthy again.
+
+---
+
+## Incident: a schema error read as an empty result (2026-09-05)
+
+Three read paths selected `refresh_runs.commit_sha` — a column the table has never
+had. It has `walk_start_commit`; `walk_end_commit` was dropped in
+`20260721150000`. Each call threw SQLSTATE **42703**, and each `catch { return
+null }` turned that into the *same value a legitimately-empty read returns*:
+
+- `getActiveSnapshot` answered "no snapshot" for every healthy repo.
+- `getFreshImportersOrNull`'s freshness cache **never hit once in its entire
+  history** — an always-fallback wearing a working cache's clothes.
+
+Worse, the `getRefreshRun` allowlist *named eight phantom columns*, which inverted
+the gate: instead of a clear "unknown column" throw, it waved the caller through
+into the silent 42703.
+
+**The fixes, all three pinned.** `isSchemaFaultSqlstate` / `describeSchemaFault`
+([db/errors.mjs](../../scripts/lib/db/errors.mjs)) make a read-path catch **degrade
+loudly**, naming the SQLSTATE and the remedy; the allowlist is checked against the
+committed schema fixture so it cannot rot.
+
+**The question to ask of any catch around a query**: *can a broken query and an
+absent row leave here as the same value?*
+
+**Why five audit rounds and two Gemini gates missed it.** Every unit test exercised
+the pure decision, never the query — the pure tests passed throughout the entire
+period the cache was dead. So **split the decision out AND put one assertion on a
+real Postgres**.
+
+---
+
+## The durable-write registry — how the writer set is derived
+
+`npm test` derives the writer set from **every module under
+`scripts/lib/store/**`** over the verb set
+`record|sync|upsert|save|persist|write|delete|retire|mark`. A new write-shaped
+export must therefore be registered or exempted **with a reason**.
+
+That derivation is the point. Before 2026-08-12 the check named two modules
+explicitly, so a writer in a third was *unrepresentable* to it — not merely
+unlisted. Iterating the filesystem is the only side that can see a module no list
+mentions.
+
+**Spill-eligibility requires a declared `rowKey` backed by a real DB constraint.**
+A logical key is not an `ON CONFLICT` target; a PARTIAL unique index answers
+`42P10`.
+
+[audit-store-writers.mjs](../../scripts/lib/audit-store-writers.mjs) is the
+registry's ONLY bootstrap, so both the orchestrator and `cross-skill.mjs
+write-spill` must import it.

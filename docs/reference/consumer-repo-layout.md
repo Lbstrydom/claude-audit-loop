@@ -102,6 +102,62 @@ No gate; the shape is pinned by `tests/cross-skill-store-calls.test.mjs`
 
 ---
 
+## Consumers are not all on ONE store
+
+A consumer files into whatever store ITS `AUDIT_DB_URL` names — not this repo's.
+So a single-store read is blind to a consumer *and renders that blindness as good
+news*: `/ship` printed `0 open` against a consumer holding **8** open reports,
+four of them HIGH. **An unasked question must never render as an empty result.**
+
+`npm run upstream:queues` (and `npm run stores:drift`) fan out over every
+registered consumer, resolving each one's store the way that consumer's own
+tooling does — its `.env`, then the shared `~/.audit-loop.env` — and deduping by
+`storeFingerprint` so repos sharing a store are asked once. Read the
+`unqueried` / `no store` lines: a store nobody could reach and a consumer whose
+DSN would not resolve are reported explicitly rather than counted as zero, and
+when NO store answers the card says `NOTHING WAS CHECKED`.
+
+**A store is named to operators by fingerprint + the consumers using it, never a
+hostname.** This repo is public and one consumer's store is a corporate internal
+host. `storeDescriptor` is the one oracle for that rendering, and it rides beside
+a symbol count in the drift report and the map header.
+
+**An EMPTY DSN env var is the AIR-GAP signal**, not a misconfiguration —
+`airGapDbUrl`, relied on by 20 suites, some of which `DROP SCHEMA`. Never "fix" it
+by falling through to `~/.audit-loop.env`; say so loudly instead.
+
+**Triage against the store that owns the row.** `upstream ack|fix|wont-fix` writes
+to the ambient `AUDIT_DB_URL`, which is only one of them — run the transition with
+that consumer's DSN in the environment, and use the FULL uuid (a prefix resolves,
+but the committed disposition ledger records what you typed and
+`upstream:coverage:gate` rejects a non-uuid key).
+
+---
+
+## Declared divergence — overrides, and the pin guard
+
+The three-way base is below; these are the rules around it.
+
+**`.sync-overrides.json` is committed, and every entry needs a `reason`.** A
+malformed file **ABORTS** the sync rather than failing open — an override file
+nobody can parse must not silently become "no overrides". `scripts/.claude-skills/**`
+may never be claimed: a defect there is an upstream report, and holding it would
+freeze the bug locally for one consumer while leaving it live everywhere else.
+
+Once upstream's version of a held path changes, the sync reports `upstreamMoved`
+on every run. Review those rather than letting an override go quietly stale — an
+override whose justification has been fixed upstream is exactly the state a
+`/ship` should retire (measured 2026-09-07: storyline's `.claude/settings.json`
+hold, whose stated reason named a shell-expansion defect that upstream had since
+removed).
+
+**Adding a co-owned config? A merge may never move a launcher from a pinned path
+to an unpinned fetch.** `sync-pin-guard.mjs` is the guard, and it is paired with
+an independent post-condition rather than trusted alone — a guard that is also its
+own verifier cannot report its own absence.
+
+---
+
 ## "Is this file mine to fix?" must be answerable OFFLINE
 
 Three ownership signals, each with a hole:

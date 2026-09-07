@@ -1,5 +1,71 @@
 # Project Status Log
 
+## 2026-09-07 — AGENTS.md condensation: the prose is enforcement surface, not just docs
+
+### Changes
+
+`npm run context:check` had been advising a condensation pass for a while; the
+persona-gate fix earlier today took AGENTS.md to **84 characters** of headroom, which
+is the state the advisory exists to prevent ("the next invariant will not fit, and
+shaving words to squeeze under the cap is how a file stays permanently full").
+
+Four blocks were **relocated** into the doc each already pointed at — not shaved:
+
+| Moved | To |
+|---|---|
+| store fan-out mechanics; the `.sync-overrides.json` rules + `sync-pin-guard` | `docs/reference/consumer-repo-layout.md` |
+| the column-0 inert-key trap; the `copilot-instructions.md` absence | `docs/reference/skill-surface-ownership.md` |
+| the 42703 schema-fault incident; the durable-write registry derivation | `docs/runbooks/postgres-parity.md` |
+| pre-push testing-bullet detail (already resident there) | `docs/runbooks/prepush-sandbox.md` |
+
+91,916 -> 88,699 chars; headroom **84 -> 3,301**.
+
+### The finding
+
+**Some AGENTS.md sentences are verbatim citation targets for a CLI gate contract, so
+they are enforcement surface and cannot be reworded — only relocated with their
+contract.** Three of `scripts/gate-contracts/*.json`'s `stated` fields quote AGENTS.md
+prose exactly (`mcp-parity-rejects-missing-dash-y`,
+`skills-check-detects-over-budget-description`,
+`skills-check-detects-indented-frontmatter-key`); rewording orphaned all three and
+`check-gate-contracts` failed the push.
+
+Every gate contract in the repo cites `AGENTS.md` and nothing else, so there is no
+precedent for re-pointing one at a `docs/` file — inventing that convention mid-pass
+would have been the over-engineering cliff. The three sentences were restored verbatim
+instead (+37 chars).
+
+One then STILL failed: the 80-column wrap had split
+`` `description` is required, **max 1024 chars** `` across two lines, and the matcher is
+substring-verbatim, so a line break breaks it. Re-wrapped onto one line.
+
+### Files Affected
+- `AGENTS.md` — four blocks condensed to stubs
+- `docs/reference/consumer-repo-layout.md`, `docs/reference/skill-surface-ownership.md`,
+  `docs/runbooks/postgres-parity.md` — the relocated depth
+- `status.md`
+
+### Decisions Made
+- **Relocated, never shaved** — the gate's own instruction. Every removed term was
+  grepped for in `docs/` BEFORE deleting it from AGENTS.md; all present.
+- **Stopped with the advisory still firing, deliberately.** It triggers within 10% of
+  the cap, so silencing it needs ~9,200 chars of headroom — another ~5,900. Getting
+  there means relocating whole sections (`Testing`, or `Consumer-repo layout`
+  wholesale), and every further edit to a file that exists to hold invariants is a
+  chance to drop one. That is a call to make deliberately, not to quiet a warning.
+- **Did not re-point the three gate contracts at `docs/`.** The claims they cite are
+  load-bearing enough to stay resident; moving the citation would also have been an
+  unverified assumption about what `statedIn` accepts.
+
+### Verification
+- `npm test`: **15563 tests, 15523 pass, 0 fail, 40 skipped**, 169s (measured at
+  base 95cb72d0, after two concurrent sessions' commits landed; skips unchanged).
+- `check-gate-contracts` exit 0; `tests/gate-honesty.test.mjs` 40/40.
+- `docs:refs:gate`, `docs:synced-links:gate`, `check-context-drift --strict` all clean.
+- Red-then-green was free here: the three broken citations WERE the red, produced by
+  the change itself and reported by the gate before any push landed.
+
+
 ## 2026-09-07 — the ledger's store stamp was asked of the row, and rows cannot answer
 
 ### Changes

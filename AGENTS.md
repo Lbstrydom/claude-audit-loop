@@ -226,45 +226,32 @@ skills/<name>/                   ← authoritative; edit ONLY here
 .claude/skills/<name>/            ← generated copy — run `npm run skills:regenerate`
 ```
 
-> **Skill surfaces — three invariants.** Discovery-root history, the Copilot-compat
-> audit, the retired-tooling table and the migration recipe live in
+> **Skill surfaces — three invariants.** Discovery-root history, the retired-tooling
+> table, the migration recipe and the full frontmatter contract live in
 > [`docs/reference/skill-surface-ownership.md`](docs/reference/skill-surface-ownership.md).
 >
-> **(1) Never ship the same skill name in two discovered roots.** Copilot discovers
-> `.github/skills/`, `.claude/skills/` and `.agents/skills/` plus personal dirs, and
-> precedence between them is **undocumented**. The committed `.claude/skills/**` is
-> the single Copilot-native surface; `.github/skills/` and the
-> `.github/prompts/*.prompt.md` shims are **RETIRED** — never re-introduce a
-> generator, and check both retired roots when a consumer's Copilot behaves oddly
-> (sync deliberately never deletes them).
+> **(1) Never ship the same skill name in two discovered roots** — Copilot's
+> precedence between `.github/skills/`, `.claude/skills/` and `.agents/skills/` is
+> **undocumented**. The committed `.claude/skills/**` is the single Copilot-native
+> surface; `.github/skills/` and the `.github/prompts/*.prompt.md` shims are
+> **RETIRED** — never re-introduce a generator, and check both retired roots when a
+> consumer's Copilot behaves oddly (the sync deliberately never deletes them).
 >
 > **(2) Skills install REPO-SCOPED, never machine-global.** A SKILL.md is only valid
-> alongside the runner layout it cites (`scripts/X.mjs` here,
-> `scripts/.claude-skills/X.mjs` in a consumer), so **no correct content exists** for
-> the layout-agnostic `~/.claude/skills/`. It and `.agents/skills/` are retired
-> (`resolveSkillTargets` throws) and `.githooks/post-merge` is **deleted** — don't
-> restore it. Installing is one command:
-> `npx github:Lbstrydom/claude-engineering-skills <dir>`, or
-> `npm run sync -- --target-path <dir>`. Proposing a new surface? Answer first:
-> *which layout does its content belong to, and what stops it colliding with
-> `.claude/skills/`?*
+> alongside the runner layout it cites, so **no correct content exists** for the
+> layout-agnostic `~/.claude/skills/`; it and `.agents/skills/` are retired
+> (`resolveSkillTargets` throws) and `.githooks/post-merge` is **deleted**.
+> Installing is `npx github:Lbstrydom/claude-engineering-skills <dir>`. Proposing a
+> new surface? Answer first: *which layout does its content belong to, and what
+> stops it colliding with `.claude/skills/`?*
 >
-> **(3) Frontmatter is a contract** (enforced by `skills:check`): `name` must equal the
-> directory name and match `^[a-z0-9-]{1,64}$` (violation = **silent skip**);
-> `description` is required, **max 1024 chars** (keep trigger phrases there, move
-> Usage syntax into the body); no two skills may advertise the same **literal**
-> trigger phrase; and every optional known key (`disable-model-invocation`,
-> `allowed-tools`, `license`, `model`, `argument-hint`, `user-invocable`) must sit
-> at **column 0** — indented under `description: |` it is description TEXT, parsed,
-> valid and **inert** (a consumer's `/audit` declared it must not be self-invoked
-> while staying model-invocable, measured 2026-09-03; nothing errors, it just stops
-> applying). `check-skill-frontmatter.mjs` cross-checks a lexical scan against a
-> real YAML parse; the same lib refuses the sync and runs consumer-side as
-> `sync-isolation-verify` gate 9. Semantic overlap has no oracle — declare the discriminator in BOTH
-> descriptions (*topic* → `/explain --history`, *claim* → `/investigate`). Copilot also
-> reads `CLAUDE.md` + `AGENTS.md`; this repo ships **no** `.github/copilot-instructions.md`
-> — a third surface to keep in sync, owning nothing. Absence enforced. VS Code reads
-> `.vscode/mcp.json`, **NOT** `.mcp.json` — keep the two mirrored when adding servers.
+> **(3) Frontmatter is a contract** (enforced by `skills:check`), and its sharpest
+> trap is silence: a bad `name` is a **silent skip**;
+> `description` is required, **max 1024 chars**; every optional key sits at **column 0** —
+> indented under `description: |` it is description TEXT, parsed, valid and
+> **inert**. Semantic overlap has no oracle: declare the discriminator in BOTH
+> descriptions (*topic* → `/explain --history`, *claim* → `/investigate`). VS Code
+> reads `.vscode/mcp.json`, **NOT** `.mcp.json` — keep the two mirrored when adding servers.
 
 Every reference file has `summary:` YAML frontmatter that must byte-match the
 parent SKILL.md's reference-index row. `npm run skills:check` enforces this — see
@@ -321,17 +308,14 @@ consumer instead of the named one. Verified 2026-07-20.)
 > for repo-specific push gates (never the managed hook):
 > [consumer-adoption.md](docs/runbooks/consumer-adoption.md).
 >
-> **Consumers are not all on ONE store.** A consumer files into whatever store ITS
-> `AUDIT_DB_URL` names — not this repo's — so a single-store read is blind to a
-> consumer and renders that blindness as good news (`/ship` printed `0 open`
-> against 8). Fan out with `npm run upstream:queues`, deduped by
-> `storeFingerprint`. **An unasked question must never render as an empty result**,
-> and a store is named to operators by **fingerprint + the consumers using it**,
-> never a hostname — this repo is public and one consumer's store is corporate.
-> `storeDescriptor` is that one oracle, and it now rides beside a symbol count in
-> the drift report and map header. **An EMPTY DSN env var is the AIR-GAP signal**
-> (`airGapDbUrl`, 20 suites, some `DROP SCHEMA`) — never "fix" it to fall through
-> to `~/.audit-loop.env`; say so loudly.
+> **Consumers are not all on ONE store**, so **an unasked question must never
+> render as an empty result** — a single-store read is blind to a consumer and
+> renders that blindness as good news (`/ship` printed `0 open` against 8). Fan
+> out with `npm run upstream:queues` / `stores:drift`; name a store by
+> `storeDescriptor` (fingerprint + consumers, never a hostname — this repo is
+> public and one consumer's store is corporate). **An EMPTY DSN env var is the
+> AIR-GAP signal** (`airGapDbUrl`, 20 suites, some `DROP SCHEMA`) — never "fix"
+> it to fall through to `~/.audit-loop.env`. [Detail](docs/reference/consumer-repo-layout.md)
 >
 > **File the report, don't paste it.** Consumer: `cross-skill.mjs upstream report
 > --affected-path <synced path>`; here: `npm run upstream:issues` →
@@ -357,23 +341,15 @@ consumer instead of the named one. Verified 2026-07-20.)
 > end in `measured:false`, never a refusal and never a zero. Each shape, its
 > measurement and its predicate: [consumer-repo-layout.md](docs/reference/consumer-repo-layout.md).
 
-> **"Is this file mine to fix?" must be answerable OFFLINE**, and no single
-> signal answers it: git-ignore state misses the `.claude/**` trees consumers
-> COMMIT, a `SKILL.md` cannot carry a content banner, and the sync manifest is
-> gitignored on both sides. The one predicate is
-> `createUpstreamOwnershipOracle`, unioning git-ignore state with the
-> **committed** `scripts/.sync-owned.json`; compare **case-insensitively**.
-> `debt:review` partitions on it — upstream-owned entries are LISTED but never
-> leverage-ranked, because `debt-resolve.mjs` *deletes* the record of a
-> still-open defect. Measurements and the three holes:
-> [consumer-repo-layout.md](docs/reference/consumer-repo-layout.md).
->
-> **`skills:hydrate` cannot run in CI, by construction — and now says so.** A
-> plain clone is neither a main checkout nor a linked worktree, so hydrate used
-> to exit 0 having copied nothing. It now FAILS there, naming the remedy
-> (`npx github:Lbstrydom/claude-engineering-skills .`), and accepts
-> `--from <path>` / `SKILLS_SOURCE` for a runner-local checkout.
-> [Detail](docs/reference/consumer-repo-layout.md).
+> **"Is this file mine to fix?" must be answerable OFFLINE**, and no single signal
+> answers it — git-ignore state, the content banner and the sync manifest each
+> have a hole. The one predicate is `createUpstreamOwnershipOracle`, unioning
+> git-ignore state with the **committed** `scripts/.sync-owned.json`; compare
+> **case-insensitively**. `debt:review` partitions on it, LISTING upstream-owned
+> entries but never leverage-ranking them (`debt-resolve.mjs` *deletes* the record
+> of a still-open defect). **`skills:hydrate` cannot run in CI by construction**
+> and now FAILS there instead of exiting 0 having copied nothing. Both, with the
+> holes and the measurements: [consumer-repo-layout.md](docs/reference/consumer-repo-layout.md)
 
 > **Upstream bug, but you're blocked?** Patching upstream-owned *source* stays
 > forbidden; a **runtime/env/DB** unblock is OK if you report it, label it
@@ -383,19 +359,16 @@ consumer instead of the named one. Verified 2026-07-20.)
 
 > **Consumer divergence is DECLARED, never inferred — and the sync must never
 > revert it silently.** **(1)** The **manifest hash** (never HEAD) is the
-> three-way BASE — `disk === base` ⇒ overwrite freely; `disk !== base` is
-> consumer content: **tracked ⇒ REFUSE + fail** (`--overwrite-diverged`
-> consents), untracked ⇒ overwrite loudly. **(2)** Standing divergence is
-> declared in the committed `.sync-overrides.json` — `reason` required,
-> malformed ⇒ ABORT (never fail-open), and `scripts/.claude-skills/**` may never
-> be claimed (that is an upstream report). **(3)** Every sync writes the
-> committed, **append-only** `.sync-receipt.json` — a deliberate
-> generated-artifact-policy exception, because its dirtiness is the only evidence
-> a sync ran. Adding a co-owned config? A merge may never move a launcher from a
-> pinned path to an unpinned fetch — `sync-pin-guard.mjs`, guard **plus** an
-> independent post-condition.
-> [Why each shape](docs/reference/consumer-repo-layout.md) ·
-> [Plan](docs/plans/consumer-sync-durability.md).
+> three-way BASE — `disk !== base` is consumer content: tracked ⇒ REFUSE + fail
+> (`--overwrite-diverged` consents), untracked ⇒ overwrite loudly. **(2)** Standing
+> divergence lives in the committed `.sync-overrides.json` (`reason` required,
+> malformed ⇒ ABORT, `scripts/.claude-skills/**` never claimable — that is an
+> upstream report), and an `upstreamMoved` report means review it, not ignore it:
+> an override whose justification was fixed upstream is one a `/ship` should
+> retire. **(3)** Every sync writes the committed, **append-only**
+> `.sync-receipt.json` — a deliberate generated-artifact-policy exception, its
+> dirtiness being the only evidence a sync ran.
+> [Why each shape](docs/reference/consumer-repo-layout.md) · [Plan](docs/plans/consumer-sync-durability.md).
 
 ### Sync mechanics — pointer
 
@@ -508,14 +481,12 @@ stash` — that yanks the other session's files mid-edit. Detail + escape hatche
 
 #### A spend-bearing run PINS its revision — it never shares the working tree
 
-Same tree, higher stakes: the store refuses a snapshot whose arms disagree, so
-two died on 2026-08-17 (~$13) — one to a rebase, one to a **concurrent session's
+Same tree, higher stakes: the store refuses a snapshot whose arms disagree, so two
+died on 2026-08-17 (~$13) — one to a rebase, one to a **concurrent session's
 commit**. Run ANY revision-stamped, spend-bearing job (arm-eval, solo-control,
-model-eval, replays) via `npm run fixture:create`: detached at an explicit sha,
-`node_modules` linked, **every arm's credential verified before spend**. Two
-traps it does not remove: gitignored inputs are ABSENT (transcripts by absolute
-path), and **trust the store, not the fixture's local bake-off log**, which reads
-near-zero and looks like lost progress.
+model-eval, replays) via `npm run fixture:create`. Two traps it does not remove:
+gitignored inputs are ABSENT, and **trust the store, not the fixture's local
+bake-off log**, which reads near-zero and looks like lost progress.
 [Runbook](docs/runbooks/pinned-revision-fixture.md)
 
 - **A DB suite no runner names has never run.** Without a disposable DSN it skips
@@ -526,36 +497,30 @@ near-zero and looks like lost progress.
   `npm run db:enrolment:gate` iterates the FILESYSTEM — the only side that can see
   a file no list mentions. **Adding a DB-gated suite is two edits, never one.**
 - **Sandbox-honesty rule.** A fresh worktree has no gitignored inputs, so a check
-  that *skips* on a missing input passes having read nothing (known skips are
-  forced hard: `AUDIT_PUSH_RANGE_REQUIRED`, `ARCH_COVERAGE_REQUIRE_ENVELOPE`).
-  **Adding a check? Ask whether it can go green in a clean checkout having
-  checked nothing — if so it needs a strictness flag, not a tolerated skip.** A
-  sandbox setup failure is a push failure, never a pass.
+  that *skips* on a missing input passes having read nothing. **Adding a check? Ask
+  whether it can go green in a clean checkout having checked nothing — if so it
+  needs a strictness flag, not a tolerated skip.** A sandbox setup failure is a
+  push failure, never a pass.
 - **`npm test` refuses a green it did not earn.** Node can report a suite as
-  `not ok` and still exit 0 — `dd83e1f8` shipped `# fail 0` with three suites that
-  never ran. `adjudicateRun` ([run-tests.mjs](scripts/run-tests.mjs)) fails the run
-  on any non-todo `test:fail` alongside exit 0, keyed on the **consequence** rather
-  than the cause, and fails **closed** when its own report is missing.
-  [prepush-sandbox.md](docs/runbooks/prepush-sandbox.md) §2.3.
+  `not ok` and still exit 0. `adjudicateRun` ([run-tests.mjs](scripts/run-tests.mjs))
+  keys on the **consequence** rather than the cause, and fails **closed** when its
+  own report is missing. [prepush-sandbox.md](docs/runbooks/prepush-sandbox.md) §2.3.
 - **One range, one resolver** — [`push-range.mjs`](scripts/lib/push-range.mjs).
   Gates must not re-infer a base from working-tree state (`@{u}`, dirty→`HEAD~1`):
-  that scoped multi-commit pushes to their tip and collapsed to `HEAD~1` always
-  in a detached tree. An unresolvable explicit base fails hard, never demotes to
+  that scoped multi-commit pushes to their tip and collapsed to `HEAD~1` always in
+  a detached tree. An unresolvable explicit base fails hard, never demotes to
   inference.
 - **Hashing working-tree bytes ≠ hashing committed source.** A generator hashing
-  files for a *committed* artifact must canonicalise CRLF→LF, with
-  `canonicalizeEol` from [`lib/file-io.mjs`](scripts/lib/file-io.mjs) — the one
-  byte-level fold. The tell: **git says clean and your tool says changed; git is
-  right.** Do NOT canonicalise where the exact bytes ARE the contract
-  (transfer-corruption checks). That, and the worktree-`node_modules` rule (never
-  hard-code `<repoRoot>/node_modules`, never hand-link one in):
-  [prepush-sandbox.md](docs/runbooks/prepush-sandbox.md) §2.1–2.2.
+  files for a *committed* artifact must canonicalise CRLF→LF with `canonicalizeEol`
+  ([`lib/file-io.mjs`](scripts/lib/file-io.mjs)), the one byte-level fold. The
+  tell: **git says clean and your tool says changed; git is right.** Do NOT
+  canonicalise where the exact bytes ARE the contract. That, and the
+  worktree-`node_modules` rule: [prepush-sandbox.md](docs/runbooks/prepush-sandbox.md) §2.1–2.2.
 - **An mtime freshness oracle is usually wrong in the HEALTHY case, not merely
   lossy** — the writer's own ordering decides it, and `lock newer than
-  node_modules/` was the normal post-install state. Before writing one, ask **who
-  writes these two paths, in what order**; then use the tool's own content record
-  instead — npm keeps `node_modules/.package-lock.json`. Compare CONTENT, never
-  key counts (455 declared vs 410 installed here; every absentee `optional`).
+  node_modules/` was the normal post-install state. Ask **who writes these two
+  paths, in what order**; then use the tool's own content record instead (npm keeps
+  `node_modules/.package-lock.json`). Compare CONTENT, never key counts.
   [prepush-sandbox.md](docs/runbooks/prepush-sandbox.md) §4.
 
 #### Testing doctrine — pointer
@@ -733,21 +698,15 @@ connection string. **Load-bearing invariants** (the rest is in the docs below):
   qualification or non-core reference outside the recorded baseline.
 - **Every audit-store write in `legacy-production-audit.mjs`'s cloud block goes
   through `durableWrite`** ([durable-write.mjs](scripts/lib/durable-write.mjs)),
-  registered in [audit-store-writers.mjs](scripts/lib/audit-store-writers.mjs) —
-  which is the registry's ONLY bootstrap, so both the orchestrator and
-  `cross-skill.mjs write-spill` must import it. Four outcomes, and they are not
-  interchangeable: `written` · `spilled` (queued, replayed by a later drain) ·
-  `lost` (evidence kept, never replayed) · `skipped` (the store declined — cloud
-  off is a supported mode, not a failure). `lost` **or** `spilled` makes a run
-  `incomplete`. Spill-eligibility requires a declared `rowKey` backed by a real
-  DB constraint — a logical key is not an `ON CONFLICT` target (a PARTIAL unique
-  index answers `42P10`). `npm test` derives the writer set from **every module
-  under `scripts/lib/store/**`** over the verb set
-  `record|sync|upsert|save|persist|write|delete|retire|mark`, so a new
-  write-shaped export must be registered or exempted **with a reason** — before
-  2026-08-12 it named two modules and a writer in a third was *unrepresentable*,
-  not merely unlisted.
-  Plan: [audit-store-write-durability.md](docs/plans/audit-store-write-durability.md).
+  registered in [audit-store-writers.mjs](scripts/lib/audit-store-writers.mjs).
+  Four outcomes, and they are not interchangeable: `written` · `spilled` (queued,
+  replayed by a later drain) · `lost` (evidence kept, never replayed) · `skipped`
+  (the store declined — cloud off is a supported mode, not a failure). `lost`
+  **or** `spilled` makes a run `incomplete`. A new write-shaped export under
+  `scripts/lib/store/**` must be registered or exempted **with a reason** —
+  `npm test` derives the set from the filesystem, the only side that can see a
+  module no list mentions. Derivation, spill-eligibility and the single bootstrap:
+  [postgres-parity.md](docs/runbooks/postgres-parity.md) · [plan](docs/plans/audit-store-write-durability.md).
 - **`emit({ok:false})` sets a non-zero exit code** ([cli-io.mjs](scripts/lib/cli-io.mjs)).
   Without the coupling a CLI reports a failure in its envelope and exits 0, which
   every caller checking `$?` reads as success. Opt out only with
@@ -756,24 +715,15 @@ connection string. **Load-bearing invariants** (the rest is in the docs below):
   on an unrecorded reduction.
   Design: [cross-skill-command-registry.md](docs/plans/cross-skill-command-registry.md) §2b F4.
 - **A SCHEMA ERROR IS NOT AN EMPTY RESULT — and a bare `catch { return null }`
-  renders it as one.** Three read paths selected `refresh_runs.commit_sha`, a
-  column the table has never had (it has `walk_start_commit`; `walk_end_commit`
-  was dropped in `20260721150000`). Each threw SQLSTATE 42703 on every call and
-  each catch turned that into the same value a legitimately-empty read returns:
-  `getActiveSnapshot` answered "no snapshot" for every healthy repo, and
-  `getFreshImportersOrNull`'s freshness cache **never hit once in its entire
-  history** — an always-fallback wearing a working cache's clothes. Worse, the
-  `getRefreshRun` allowlist *named eight phantom columns*, inverting the gate:
-  instead of a clear "unknown column" throw it waved the caller through into the
-  silent 42703. Fixes, all three now pinned: `isSchemaFaultSqlstate` /
+  renders it as one.** Ask of any catch around a query: *can a broken query and an
+  absent row leave here as the same value?* `isSchemaFaultSqlstate` /
   `describeSchemaFault` ([db/errors.mjs](scripts/lib/db/errors.mjs)) make a
-  read-path catch **degrade loudly**, naming the SQLSTATE and the remedy;
-  the allowlist is checked against the committed schema fixture so it cannot rot.
-  **Ask of any catch around a query: can a broken query and an absent row leave
-  here as the same value?** Five audit rounds and two Gemini gates missed this —
-  every unit test exercised the pure decision, never the query, so **split the
-  decision out AND put one assertion on a real Postgres**: the pure tests passed
-  throughout the entire period the cache was dead.
+  read-path catch **degrade loudly**, naming the SQLSTATE and the remedy. Testing
+  the pure decision is not enough — **split the decision out AND put one assertion
+  on a real Postgres**; the pure tests passed throughout the entire period a
+  freshness cache was dead. The 2026-09-05 incident (42703 on a column that never
+  existed, a `getRefreshRun` allowlist naming eight phantom columns, a cache that
+  never hit once in its history): [postgres-parity.md](docs/runbooks/postgres-parity.md).
 - **"Disposable" is an ALLOWLIST of loopback hosts, and it fails CLOSED.**
   `isDisposableDbHost` / `assertDisposableDbUrl` (`scripts/lib/db/client.mjs`)
   guard the suites that `DROP SCHEMA public CASCADE` and the schema fixture.

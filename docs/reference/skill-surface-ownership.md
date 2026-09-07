@@ -266,6 +266,15 @@ the class the gate-honesty suite exists to catch.
 enforces the budget **and** the duplicate-trigger-phrase rule (one live clash:
 `"verify the plan"` in both audit-plan and ux-lock).
 
+**Every optional known key must sit at COLUMN 0.** `disable-model-invocation`,
+`allowed-tools`, `license`, `model`, `argument-hint`, `user-invocable` — indented
+under `description: |` a key is description TEXT: parsed, valid, and **inert**.
+Nothing errors, it simply stops applying. Measured 2026-09-03 in a consumer, whose
+`/audit` declared it must not be self-invoked while remaining fully
+model-invocable. `check-skill-frontmatter.mjs` cross-checks a lexical scan against
+a real YAML parse for exactly this; the same lib refuses the sync and runs
+consumer-side as `sync-isolation-verify` gate 9.
+
 **Exact-match only, deliberately**: fuzzy matching was measured at 47 cross-skill
 noise pairs (Jaccard ≥ 0.5, mostly one shared word) and rejected. Semantic overlap
 has no oracle — declare the discriminator in BOTH descriptions instead (*topic* →
@@ -274,7 +283,9 @@ has no oracle — declare the discriminator in BOTH descriptions instead (*topic
 ### Adjacent editor-config surfaces
 
 - Copilot also reads `CLAUDE.md` + `AGENTS.md` + `.github/copilot-instructions.md`
-  (all default-on) — mind duplication cost when editing.
+  (all default-on) — mind duplication cost when editing. **This repo deliberately
+  ships no `.github/copilot-instructions.md`**: it would be a third surface to keep
+  in sync, owning nothing. Its absence is enforced.
 - **`.github/prompts/*.prompt.md` was RETIRED 2026-07-21**: since VS Code 1.109
   skills surface as `/name` slash commands in the SAME namespace as prompt files,
   same-basename shims collided with their own skills (and half pointed at
