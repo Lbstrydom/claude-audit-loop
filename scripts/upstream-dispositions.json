@@ -597,6 +597,17 @@
     },
     {
       "schemaVersion": 1,
+      "issueId": "ef229b6d-96ed-4792-98b7-e90276da00cd",
+      "storeFingerprint": "c7177057dcafa55d",
+      "state": "fixed",
+      "disposition": {
+        "kind": "exempt",
+        "value": "documentation-only callout, no code test or doctor probe applies"
+      },
+      "recordedAt": "2026-09-08T10:46:03.581Z"
+    },
+    {
+      "schemaVersion": 1,
       "issueId": "f8d2730f-e746-4c38-bb7c-730dfda59591",
       "storeFingerprint": "d5a9d07b91225a93",
       "state": "fixed",
