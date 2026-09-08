@@ -1,11 +1,9 @@
 # Project Status Log
 
 ### Consumer Verification (previous ship)
-- **Commit**: `29c2d2cfe2c7227242e199a9f56748cdec75f3ee` on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`). Sync: `Targets: 3/3 reached  Created: 0  Updated: 6  Unchanged: 2377  Errors: 0`.
-- **Result**: `verified` — the first ship to discharge the row the previous three left `unverified`.
-- **Retrieval**: `sync-isolation-verify.mjs` in each consumer's MAIN checkout (storyline, wine-cellar-app) — exit 0, gates 1..9 all green in both. Held divergences (storyline's four `<!-- repo-electron-target -->` adapter blocks; wine's `docs/reference/consistency-contract.md`) are the declared ones, unchanged.
-- **Subject check**: `persona-outcomes summary` run bare (no `--repo`, nothing exported) in storyline — resolved `slug: "louis-strydom_wartsila/storyline"` ambiently, hit the exact 2026-08-25 session the upstream report cited: `openP0 0 · openP1 1 · pendingVerificationP0 2 · pendingVerificationP1 1` (previously 2 open P0 / 2 open P1 under the old always-open rule). The 3 findings already labeled `fixed` now read pending-verification rather than open — real behavior change, not the bugs being gone (still need a fresh persona run to confirm).
-- **What shipped**: `skills/ship/SKILL.md` Step 0.5a rewrite, `skills/plan/SKILL.md` persona pre-step, `skills/persona-test/references/interop.md`, `scripts/lib/cross-skill/{scope,registry}.mjs` + `commands/persona.mjs` + `scripts/lib/store/persona-outcomes.mjs`. Consumers can drop the `PERSONA_TEST_REPO_NAME` env workaround — ambient `git remote` now resolves it.
+- **Commit**: 29c2d2cfe2c7227242e199a9f56748cdec75f3ee on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`)
+- **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
+- **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
 
 ## 2026-09-08 — Pre-push hook now threads git's own stdin push range through
 
