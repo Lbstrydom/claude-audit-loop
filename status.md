@@ -1,5 +1,33 @@
 # Project Status Log
 
+### Consumer Verification (previous ship)
+- **Commit**: 29c2d2cfe2c7227242e199a9f56748cdec75f3ee on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`)
+- **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
+- **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
+
+## 2026-09-08 — brainstorm's flat 60s timeout was aborting deep-depth calls mid-generation, not on failure
+
+### Changes
+- `--depth deep` (or any explicit `--max-tokens` ceiling above ~3300 tokens) now scales `--timeout-ms`'s default instead of a flat 60000ms for every ceiling. `resolveTimeoutMs()` (`depth-config.mjs`) floors at the historical default and adds ~20ms per ceiling token; an explicit `--timeout-ms` still wins verbatim.
+- Root cause: `brainstorm-round.mjs` passed one flat CLI-level timeout to all three provider adapters (openai/gemini/azure-claude) regardless of the requested depth. A `--depth deep` (4600-token ceiling) azure-claude call was aborted at exactly the 60000ms wall-clock ceiling — a still-in-flight non-streaming generation killed, not a dead service — while an OpenAI leg in the same round, asked for the same ceiling, returned in time.
+- Checked, not affected: `gemini-review.mjs`'s azure-claude final-reviewer path uses a separate, already-generous `FINAL_REVIEW_TIMEOUT_MS` + hard-deadline system, unrelated to this default.
+
+### Files Affected
+- `scripts/lib/brainstorm/depth-config.mjs` — new `resolveTimeoutMs()` + `TIMEOUT_FLOOR_MS`/`TIMEOUT_MS_PER_TOKEN`
+- `scripts/brainstorm-round.mjs` — tracks `explicitTimeoutMs` (mirrors the existing `explicitMaxTokens` pattern), threads the resolved timeout through round-1 and debate dispatch
+- `tests/brainstorm-depth-budget.test.mjs` — regression coverage pinned to the field report's numbers (deep = 4600 tokens → 92000ms)
+
+### Decisions Made
+- Scaled the timeout by ceiling tokens globally rather than special-casing azure-claude — the observed provider-speed asymmetry (OpenAI returned in time, azure-claude didn't) is real but unquantified from this environment (no DB access here to the session ledger to fit a p95); scaling on the mechanically uncontroversial fact "a bigger non-streaming ask takes longer" fixes the reported symptom for every provider without guessing a provider-specific constant.
+- Did not switch to streaming + idle-timeout — more structurally correct by this repo's own precedent (`docs/plans/extract-idle-timeout.md`), but doing it for one adapter breaks the three-adapters-one-shape invariant, and doing it for all three is a bigger change than one field report justifies.
+
+### Next Steps
+- If this recurs, query the session ledger for azure-claude `state:'timeout'` rows at `depth=deep` to fit a real per-token rate instead of the 20ms/token floor.
+
+Backlog 2026-09-08T05:19Z: Q1 38c/16p (+219 aged) · Q2 113c/102p (50 perm) · Q3 2212 · debt 234 cloud/106 local (0 spilled) · upstream 0
+
+---
+
 ## 2026-09-07 — AGENTS.md condensation: the prose is enforcement surface, not just docs
 
 ### Changes
