@@ -21,9 +21,12 @@ import assert from 'node:assert/strict';
 
 import {
   resolveDepth,
+  resolveTimeoutMs,
+  DEPTH_TOKENS,
   DEPTH_WORD_TARGETS,
   DEPTH_VISIBLE_TOKENS,
   REASONING_HEADROOM_TOKENS,
+  TIMEOUT_FLOOR_MS,
 } from '../scripts/lib/brainstorm/depth-config.mjs';
 import { buildBrainstormSystemPrompt, BRAINSTORM_SYSTEM_PROMPT } from '../scripts/lib/brainstorm/prompt.mjs';
 
@@ -104,5 +107,35 @@ test('DEPTH_VISIBLE_TOKENS and the word targets do not contradict each other', (
     const upperWords = Number(String(DEPTH_WORD_TARGETS[tier]).match(/\d+/g).pop());
     assert.ok(DEPTH_VISIBLE_TOKENS[tier] >= Math.ceil(upperWords * 1.33),
       `${tier}: the visible-token figure must be able to hold its own word target`);
+  }
+});
+
+// Regression suite for the 2026-09-08 field report: a flat 60000ms timeout
+// aborted a --depth deep (4600-ceiling-token) azure-claude call at exactly
+// the wall-clock ceiling, while an OpenAI leg in the same round — asked for
+// the same ceiling — returned in time. The fix scales the timeout with the
+// ceiling actually requested, since a non-streaming call cannot return
+// before the whole completion is generated.
+test('resolveTimeoutMs: an explicit value always wins verbatim', () => {
+  assert.equal(resolveTimeoutMs({ explicit: true, timeoutMs: 15000, maxTokens: DEPTH_TOKENS.deep }), 15000);
+  // Even below the floor — the operator asked for a specific number.
+  assert.equal(resolveTimeoutMs({ explicit: true, timeoutMs: 1000, maxTokens: DEPTH_TOKENS.deep }), 1000);
+});
+
+test('resolveTimeoutMs: shallow ceiling stays at the historical floor', () => {
+  assert.equal(resolveTimeoutMs({ explicit: false, timeoutMs: 60000, maxTokens: DEPTH_TOKENS.shallow }), TIMEOUT_FLOOR_MS);
+});
+
+test('resolveTimeoutMs: a deep-depth ceiling scales above the floor', () => {
+  const timeoutMs = resolveTimeoutMs({ explicit: false, timeoutMs: 60000, maxTokens: DEPTH_TOKENS.deep });
+  assert.ok(timeoutMs > TIMEOUT_FLOOR_MS,
+    `deep's 4600-token ceiling (${DEPTH_TOKENS.deep}) must raise the timeout above the flat default — `
+    + 'this is the exact shape of the field report (aborted at the wall-clock ceiling, not a natural failure)');
+});
+
+test('resolveTimeoutMs: never returns below the floor for an unpinned call', () => {
+  for (const tier of TIERS) {
+    const timeoutMs = resolveTimeoutMs({ explicit: false, timeoutMs: 60000, maxTokens: DEPTH_TOKENS[tier] });
+    assert.ok(timeoutMs >= TIMEOUT_FLOOR_MS, `${tier}: auto-scaled timeout must never regress below the historical default`);
   }
 });

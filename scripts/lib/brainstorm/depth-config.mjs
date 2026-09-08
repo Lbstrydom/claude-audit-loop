@@ -81,6 +81,52 @@ export const DEPTH_REASONING_EFFORT = Object.freeze({
 });
 
 /**
+ * Wall-clock floor for a provider call, unchanged from the CLI's historical
+ * flat default — shallow/standard asks (≤3300 ceiling tokens) fit inside it
+ * on every provider observed so far.
+ */
+export const TIMEOUT_FLOOR_MS = 60000;
+
+/**
+ * Extra wall-clock allowance per ceiling token, for asks above the floor.
+ *
+ * **Why this exists** (consumer report, 2026-09-08): the CLI's timeout was a
+ * flat 60000ms regardless of the requested ceiling. A `--depth deep` call
+ * (4600 ceiling tokens) legitimately needs more wall-clock than a `standard`
+ * one (3300) on a non-streaming API — the caller gets nothing back until the
+ * WHOLE completion is generated, so a bigger ask is a longer wait by
+ * construction, not a sign anything is wrong. One azure-claude leg was
+ * aborted at exactly the 60000ms ceiling (not a natural failure) while an
+ * OpenAI leg in the SAME round, asked for the same ceiling, returned in time
+ * — read as "this provider is categorically slower" that would be a guess
+ * this repo has no throughput data to back; read as "a 4600-token
+ * non-streaming ask deserves more than 60s regardless of provider" it is not.
+ *
+ * 20ms/token (~50 tok/s) is a conservative floor for a slow non-streaming
+ * hop, NOT a measured p95 — no adapter here records real generation
+ * throughput yet. It only ever raises the timeout above `TIMEOUT_FLOOR_MS`,
+ * never below it, so a call that already met the historical default is
+ * unaffected. Revisit with a fitted number once an adapter records latency
+ * vs. output-token counts.
+ */
+export const TIMEOUT_MS_PER_TOKEN = 20;
+
+/**
+ * Resolve the per-provider call timeout. An explicit `--timeout-ms` always
+ * wins verbatim (the operator asked for a specific number and gets it,
+ * including a value below the floor); otherwise the timeout scales with the
+ * ceiling this run actually asked for, floored at the CLI's historical
+ * default so shallow/standard asks are unaffected.
+ *
+ * @param {{explicit?: boolean, timeoutMs?: number, maxTokens: number}} args
+ * @returns {number}
+ */
+export function resolveTimeoutMs({ explicit = false, timeoutMs, maxTokens } = {}) {
+  if (explicit) return timeoutMs;
+  return Math.max(TIMEOUT_FLOOR_MS, Math.round(maxTokens * TIMEOUT_MS_PER_TOKEN));
+}
+
+/**
  * Architecture-intent keyword regex. The trigger words cover
  * architecture / schema / migration / refactor / design questions.
  *

@@ -22,7 +22,7 @@ import { callAzureClaude } from './lib/brainstorm/azure-claude-adapter.mjs';
 import { resolveProviderAvailability, defaultProviders } from './lib/brainstorm/provider-availability.mjs';
 import { azureConfig } from './lib/config.mjs';
 import { preflightEstimateUsd } from './lib/brainstorm/pricing.mjs';
-import { resolveOutputBudget, DEPTH_TOKENS } from './lib/brainstorm/depth-config.mjs';
+import { resolveOutputBudget, resolveTimeoutMs, DEPTH_TOKENS } from './lib/brainstorm/depth-config.mjs';
 import { assembleResumeContext } from './lib/brainstorm/resume-context.mjs';
 import { loadArchSection, shouldAttachArch } from './lib/brainstorm/arch-context.mjs';
 import { buildBrainstormSystemPrompt, DEFAULT_WORD_TARGET } from './lib/brainstorm/prompt.mjs';
@@ -81,7 +81,11 @@ FLAGS — brainstorm-round mode
   --no-policy            Suppress the auto-attached policy pack
                          Default: auto-attach when the topic shows architecture intent
   --out <path>           Write JSON output to file (default: stdout)
-  --timeout-ms <n>       Per-provider timeout (default: 60000)
+  --timeout-ms <n>       Per-provider timeout. Default 60000, auto-raised for
+                         a --depth/--max-tokens ceiling above ~3300 tokens (a
+                         non-streaming call can't return before the whole
+                         completion is generated); pass this flag to pin an
+                         exact value instead
   --sid <sid>            Override session id (default: auto-generated)
   --help                 Show this message
 
@@ -148,6 +152,7 @@ function parseBrainstormArgs(argv) {
     sid: null,               // explicit override (else auto-generated)
     out: null,
     timeoutMs: 60000,
+    explicitTimeoutMs: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -190,7 +195,7 @@ function parseBrainstormArgs(argv) {
       case '--no-policy': args.noPolicy = true; break;
       case '--sid': args.sid = requireValue(); break;
       case '--out': args.out = requireValue(); break;
-      case '--timeout-ms': args.timeoutMs = Number(requireValue()); break;
+      case '--timeout-ms': args.timeoutMs = Number(requireValue()); args.explicitTimeoutMs = true; break;
       case '--help':
       case '-h': args.help = true; break;
       default:
@@ -391,6 +396,13 @@ async function runBrainstormMode(args) {
   const reasoningEffort = depEffort ?? null;
   const wordTarget = depWordTarget ?? DEFAULT_WORD_TARGET;
 
+  // Timeout scales with the ceiling this run actually asked for (see
+  // depth-config.mjs) unless the operator pinned an exact value.
+  const timeoutMs = resolveTimeoutMs({ explicit: args.explicitTimeoutMs, timeoutMs: args.timeoutMs, maxTokens });
+  if (timeoutMs !== args.timeoutMs) {
+    process.stderr.write(`  [brainstorm] scaled timeout → ${timeoutMs}ms for a ${maxTokens}-token ceiling (pass --timeout-ms to pin an exact value)\n`);
+  }
+
   if (dep.autoPromoted) {
     process.stderr.write(`  [brainstorm] auto-promoted depth → ${dep.depth} (${dep.tierMaxTokens} tokens)\n`);
   }
@@ -529,7 +541,7 @@ async function runBrainstormMode(args) {
     provider: p,
     topic: composedTopic,
     systemPreface: composedSystemPreface,
-    args: { ...args, maxTokens, reasoningEffort, wordTarget },
+    args: { ...args, maxTokens, timeoutMs, reasoningEffort, wordTarget },
     resolvedModels,
   }));
   const settled = await Promise.all(tasks);
@@ -543,7 +555,7 @@ async function runBrainstormMode(args) {
     const outcome = await runDebateRound({
       providers: args.models,
       round1: settled,
-      args: { ...args, maxTokens, reasoningEffort, wordTarget },
+      args: { ...args, maxTokens, timeoutMs, reasoningEffort, wordTarget },
       resolvedModels,
       assembledContext,
       withContextText: assembledContext.withContextEffective,
