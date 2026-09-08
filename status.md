@@ -5,6 +5,74 @@
 - **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
 - **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
 
+## 2026-09-08 — the 3 dangling regression locks: deleting the citation would resurrect them as undischargeable
+
+### Changes
+
+Investigated the 3 dangling regression-lock rows `list-unlocked-fixes` reports
+(unchanged since first measured 2026-09-06). All three cite a test file under
+`tests/promote-regression-spec-scope.test.mjs`,
+`tests/plans-ship-consistency-candidates.test.mjs`,
+`tests/persona-consistency-promote.test.mjs` — all deleted **together**, in a
+single commit: `e833b2aa` "refactor(persona): retire the consistency candidate
+promotion path" (2026-08-11), which is
+[[project_consistency_candidate_promotion_retired]]. That commit removed the
+959-line promoter, the CLI verbs the findings are about
+(`cmdPromoteRegressionSpec`, `cmdResolveConsistencyCandidates`), and all three
+backing store functions — confirmed gone from disk (`grep` for every symbol
+named in the findings' own `detail_snapshot` returns nothing).
+
+This is not the ordinary dangling-lock shape (a test deleted while its subject
+stays live, needing `repoint-regression-spec` to point at a new one). The
+SUBJECT itself — the entire promotion feature — was deliberately retired.
+There is no code left to write a regression test against.
+
+**Checked before deciding, not assumed**: read the live `unlocked_fixes_all`
+view definition (`pg_get_viewdef`, per this repo's own "migrations are
+cumulative" rule — never hand-stitch migration files). Its predicate is
+`NOT EXISTS (a regression_specs row for this finding)`. All three findings are
+`severity=HIGH`, `adjudication_outcome=accepted`, `remediation_state=fixed` —
+every other condition already satisfied. The dangling regression_specs row is
+the ONLY thing currently excluding them from the visible code backlog.
+
+**Running `repoint-regression-spec --delete` on any of the three — the tool's
+own documented remedy for a dangling lock — would therefore resurrect all
+three into `unlocked_fixes_all` immediately.** Given their age (created
+2026-07-27 / 2026-08-09, both post-`practiceStart`), they would land in
+`agedOutByMode.code`, not the visible page — a HIGH-severity obligation that
+can **never be discharged**, because the code it would ask someone to test no
+longer exists. That is a permanent phantom entry inflating the primary backlog
+metric (`byMode.code`), which is strictly worse than the current state: 3
+quiet, findable dangling rows versus 3 undischargeable ghosts nobody can ever
+close.
+
+### Decision
+
+**Left the 3 dangling rows as-is, deliberately — this is a non-action, on the
+record rather than silent.** The dangling citation is the least-bad closing
+signal this data model currently has for "the finding was real, was fixed by
+way of the whole feature being deleted." Do NOT delete or repoint them.
+
+**The real gap, scoped out rather than patched tonight**: `remediation_state`
+(`pending/planned/fixed/verified/regressed`) and `adjudication_outcome`
+(`accepted/dismissed`) have no value meaning "moot — subject retired in a
+later refactor." Adding one is a schema migration touching a state machine
+used pervasively across the store, findings pipeline, and every `/ship`
+backlog reader — real work deserving its own review, not a bolt-on here.
+
+**The visible cost of leaving it**: `list-unlocked-fixes`'s `danglingLocks`
+nudge (`count: 3`) will keep firing on every `/ship` run, forever, until either
+the schema gap above is closed or someone re-derives this same reasoning and
+decides otherwise. That recurring nag is the price of not inventing a fake
+disposition; noted here so a future session finds this reasoning instead of
+re-investigating from zero, or worse, "fixing" it by deleting the citation and
+quietly inflating the aged-out count by 3 undischargeable HIGH rows.
+
+### Files Affected
+- `status.md` (this entry only — no code or schema changes)
+
+
+
 ## 2026-09-08 — brainstorm's flat 60s timeout was aborting deep-depth calls mid-generation, not on failure
 
 ### Changes
