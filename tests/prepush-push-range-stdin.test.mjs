@@ -69,6 +69,24 @@ function withWorkspace(fn) {
 const NON_CONFORMING_STATUS = '- **Status**: Bogus-Value-Not-A-Vocabulary-Token\n';
 
 /**
+ * When this suite runs INSIDE the sandboxed pre-push check
+ * (`scripts/prepush-check.mjs`), the OUTER push already has a known base, so
+ * the sandbox sets `AUDIT_PUSH_RANGE_REQUIRED=1` for the whole `npm run check`
+ * child process (its own sandbox-honesty guard — see prepush-check.mjs's
+ * `env` construction). That var is process-tree-wide and this test's `node`/
+ * `bash` subprocesses inherit it via `...process.env`, which turns
+ * `resolvePushRange`'s "no explicit base -> fall back to inference" path into
+ * a hard refusal for the INNER fixture repo too — unrelated to the outer
+ * push, but indistinguishable to `push-range.mjs` since it only sees the env
+ * var. Every case here that depends on the FALLBACK inference actually
+ * running (the RED controls, and the deletion case, which never supplies an
+ * explicit base) must scrub it back out, or it fails only under `/ship`,
+ * never locally — exactly the class of env-leak incident documented for
+ * `GIT_WORK_TREE` in prepush-check.mjs.
+ */
+const SANDBOX_REQUIRE_SCRUB = { AUDIT_PUSH_RANGE_REQUIRED: '' };
+
+/**
  * Build the exact topology the incident describes:
  *
  *   A0 ── (local's stale `origin/main` tracking ref points here) ──┐
@@ -199,7 +217,7 @@ describe('check-plan-status.mjs --drift on a real stale checkout', () => {
       const r = spawnSync('node', [CHECK_PLAN_STATUS, '--drift', '--format', 'json'], {
         cwd: local,
         encoding: 'utf-8',
-        env: { ...process.env, AUDIT_PUSH_RANGE_BASE: '', AUDIT_PUSH_RANGE_HEAD: '' },
+        env: { ...process.env, AUDIT_PUSH_RANGE_BASE: '', AUDIT_PUSH_RANGE_HEAD: '', ...SANDBOX_REQUIRE_SCRUB },
       });
       const out = JSON.parse(r.stdout);
       assert.equal(out.ok, false, 'red control invalid: stale inference must fail before the fix is applied');
@@ -242,7 +260,7 @@ describe('the full generated hook, fed git\'s real stdin protocol, on the same s
         cwd: local,
         encoding: 'utf-8',
         input: '', // stdin closed immediately, exactly like the pre-fix body's behaviour
-        env: { ...process.env, CLAUDE_AUDIT_LOOP_DIR: REPO_ROOT },
+        env: { ...process.env, CLAUDE_AUDIT_LOOP_DIR: REPO_ROOT, ...SANDBOX_REQUIRE_SCRUB },
       });
       assert.equal(r.status, 1, `expected the stale inference to block the push; stderr:\n${r.stderr}`);
       assert.match(r.stderr, /non-conforming Status/);
@@ -285,7 +303,7 @@ describe('the full generated hook, fed git\'s real stdin protocol, on the same s
         cwd: local,
         encoding: 'utf-8',
         input: stdin,
-        env: { ...process.env, CLAUDE_AUDIT_LOOP_DIR: REPO_ROOT },
+        env: { ...process.env, CLAUDE_AUDIT_LOOP_DIR: REPO_ROOT, ...SANDBOX_REQUIRE_SCRUB },
       });
       // Nothing was pushed, so there is no local_sha to build a corrected
       // range from — PUSH_BASE/_HEAD stay empty by design (see the HOOK_BODY
