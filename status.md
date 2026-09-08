@@ -5,6 +5,38 @@
 - **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
 - **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
 
+## 2026-09-08 — shipping the stdin-range fix itself hit two more instances of the class it fixes
+
+### Changes
+Three failed push attempts before this one, each caught by the sandboxed pre-push
+check itself, not locally — worth logging since each is a real instance of "an
+env/history assumption that only breaks under the exact condition being fixed":
+
+1. The new regression test's fixture subprocesses inherited `AUDIT_PUSH_RANGE_REQUIRED=1`
+   — a var `prepush-check.mjs` sets on the OUTER sandboxed run whenever the real push has
+   a known base — which turned the RED controls' intended inference fallback into a hard
+   refusal for the test's own INNER fixture repo. Fixed by scrubbing that var at the three
+   affected `spawnSync` call sites.
+2. A concurrent session's ship landed on `origin/main` mid-push (the brainstorm-timeout
+   fix below); rebasing onto it produced a real conflict — both sessions had
+   independently drained the SAME pending consumer-verification note into `status.md`'s
+   preamble. Resolving it by rewording introduced a THIRD bug: `status:integrity:gate`'s
+   own append-only rule treats everything above the first `## ` heading as conserved
+   verbatim, and a follow-up commit that rewords rather than restores byte-identically
+   reads as "content above the first entry heading was removed or rewritten" relative to
+   its own immediate parent — caught by `tests/check-status-log-integrity.test.mjs`'s
+   `HEAD~1` sanity check, not by the range-wide gate (which only ever compares the TRUE
+   push base to the tip, so it had already gone green).
+
+### Decisions Made
+This entry exists partly to document the incidents and partly to BE the fix for (2): once
+this commit lands, the sandboxed unit test's `HEAD~1` is the already-corrected preamble
+commit, and a pure addition here trivially conserves against it. Rewriting the earlier
+commits (rebase/amend) would have resolved it more cleanly, but this session's standing
+instruction is new commits only, never amend — so the append-only discipline this repo
+enforces on `status.md` is honoured by adding a new entry rather than rewriting history to
+avoid one.
+
 ## 2026-09-08 — Pre-push hook now threads git's own stdin push range through
 
 ### Changes
