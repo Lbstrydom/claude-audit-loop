@@ -67,6 +67,24 @@ const HOOK_MARKER     = '# managed-by: claude-engineering-skills install-prepush
 // Re-install to pick it up. NOTE for operators: on a repo whose local hook runs
 // a test suite, pushes get slower by exactly that suite — which is the gate
 // working. Bypass per-push with PREPUSH_LOCAL_DISABLE=1 or `git push --no-verify`.
+// v7 (2026-09-08): a push whose ONLY changed files are the sync bookkeeping
+// pair (.sync-receipt.json, scripts/.sync-owned.json — both written by this
+// repo's own \`npm run sync\`, never hand-edited) still ran the full code audit
+// against whatever plan the Status-aware selector fell back to picking, since
+// selectAuditPlan's documented fallback ("a single active plan is still
+// unambiguous — no guess required") fires even when nothing in the push
+// touches that plan. openai-audit.mjs's A1 integrity guard then correctly
+// refused to certify a verdict over code it never read (0 of the plan's files
+// were in the --scope diff), but that refusal is an uncaught \`throw\` — it
+// prints a Node stack trace that reads as a crash, and it still spent a
+// preflight cost estimate first. Measured live in ai-organiser: a
+// bookkeeping-only push after this hook's own v6 fix landed. Now, with a known
+// push range (v6's AUDIT_PUSH_RANGE_BASE/_HEAD), a push whose changed-file set
+// is a non-empty subset of exactly that pair skips the audit invocation
+// entirely — the plan-status gate, maintenance sweep and surfaces-manifest
+// check are UNCHANGED, since those are cheap and still worth running. An
+// unknown push range (PUSH_BASE empty) leaves this a no-op, same as before —
+// never silently skip an audit when the range isn't known.
 // v6 (2026-09-08): the generated hook never read git's own pre-push stdin
 // protocol (<local_ref> <local_sha> <remote_ref> <remote_sha>), so every
 // AUDIT_PUSH_RANGE-aware gate (today just check-plan-status.mjs's --drift and
@@ -82,7 +100,7 @@ const HOOK_MARKER     = '# managed-by: claude-engineering-skills install-prepush
 // AUDIT_PUSH_RANGE_BASE/_HEAD from the real range git handed it — the same
 // fix this repo's own dogfooded .githooks/pre-push already applies. Re-install
 // to pick it up.
-const HOOK_VERSION    = 6;
+const HOOK_VERSION    = 7;
 const HOOK_VERSION_MARKER = `# hook-version: ${HOOK_VERSION}`;
 // Accept the legacy marker too so existing installs (pre-rename) can be
 // upgraded in place by `npm run hooks:install` without manual cleanup.
@@ -348,6 +366,32 @@ fi
 
 PLAN_FILE=$(node "$STATUS_CLI" --select "$PLANS_DIR" 2>/dev/null || true)
 [ -z "$PLAN_FILE" ] && finish
+
+# ── Sync-bookkeeping-only short-circuit (v7) ────────────────────────────────
+# A push that only touches this repo's own sync bookkeeping (.sync-receipt.json,
+# scripts/.sync-owned.json — both machine-written, never hand-edited) has
+# nothing to do with whatever plan got selected above. Auditing it anyway hits
+# openai-audit.mjs's A1 integrity guard (0 of the plan's files are in
+# \`--scope diff\`), which correctly REFUSES rather than certifying a verdict
+# over code it never read — but that refusal is an uncaught \`throw\`, prints a
+# Node stack trace that reads as a crash, and still spends a preflight cost
+# estimate first. Measured live in ai-organiser (2026-09-08).
+#
+# Only fires with a KNOWN push range (v6's PUSH_BASE/PUSH_HEAD) — an unknown
+# range must never be read as "nothing changed", so this is a no-op then, same
+# as every push before v7. \`git diff\` failing for any reason also degrades
+# to a no-op (empty output leaves the outer \`-n\` check false), never to
+# "skip the audit" — the audit still runs whenever this can't be sure.
+if [ -n "$PUSH_BASE" ] && [ -n "$PUSH_HEAD" ]; then
+  PUSH_CHANGED_FILES="$(git diff --name-only "$PUSH_BASE".."$PUSH_HEAD" 2>/dev/null)"
+  if [ -n "$PUSH_CHANGED_FILES" ]; then
+    NON_BOOKKEEPING_FILES="$(printf '%s\\n' "$PUSH_CHANGED_FILES" | grep -v -E '^(\\.sync-receipt\\.json|scripts/\\.sync-owned\\.json)$' || true)"
+    if [ -z "$NON_BOOKKEEPING_FILES" ]; then
+      echo "[prepush-hook] push touches only sync bookkeeping ($(printf '%s' "$PUSH_CHANGED_FILES" | tr '\\n' ' ')) — skipping code audit" >&2
+      finish
+    fi
+  fi
+fi
 
 echo "[prepush-hook] auditing $PLAN_FILE via $AUDIT_LOOP_DIR (--scope diff)..." >&2
 # AUDIT_ALLOW_FOREIGN_CWD=1: this runs the SOURCE repo's openai-audit.mjs against
