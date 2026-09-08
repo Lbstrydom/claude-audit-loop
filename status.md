@@ -1,9 +1,79 @@
 # Project Status Log
 
 ### Consumer Verification (previous ship)
-- **Commit**: 29c2d2cfe2c7227242e199a9f56748cdec75f3ee on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`)
-- **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
-- **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
+- **Commit**: `29c2d2cfe2c7227242e199a9f56748cdec75f3ee` on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`). Sync: `Targets: 3/3 reached  Created: 0  Updated: 6  Unchanged: 2377  Errors: 0`.
+- **Result**: `verified` — the first ship to discharge the row the previous three left `unverified`.
+- **Retrieval**: `sync-isolation-verify.mjs` in each consumer's MAIN checkout (storyline, wine-cellar-app) — exit 0, gates 1..9 all green in both. Held divergences (storyline's four `<!-- repo-electron-target -->` adapter blocks; wine's `docs/reference/consistency-contract.md`) are the declared ones, unchanged.
+- **Subject check**: `persona-outcomes summary` run bare (no `--repo`, nothing exported) in storyline — resolved `slug: "louis-strydom_wartsila/storyline"` ambiently, hit the exact 2026-08-25 session the upstream report cited: `openP0 0 · openP1 1 · pendingVerificationP0 2 · pendingVerificationP1 1` (previously 2 open P0 / 2 open P1 under the old always-open rule). The 3 findings already labeled `fixed` now read pending-verification rather than open — real behavior change, not the bugs being gone (still need a fresh persona run to confirm).
+- **What shipped**: `skills/ship/SKILL.md` Step 0.5a rewrite, `skills/plan/SKILL.md` persona pre-step, `skills/persona-test/references/interop.md`, `scripts/lib/cross-skill/{scope,registry}.mjs` + `commands/persona.mjs` + `scripts/lib/store/persona-outcomes.mjs`. Consumers can drop the `PERSONA_TEST_REPO_NAME` env workaround — ambient `git remote` now resolves it.
+
+## 2026-09-08 — Pre-push hook now threads git's own stdin push range through
+
+### Changes
+
+The generated consumer pre-push hook (`scripts/install-prepush-hook.mjs`, HOOK_BODY)
+never read git's pre-push stdin protocol (`<local_ref> <local_sha> <remote_ref>
+<remote_sha>`), so `check-plan-status.mjs --drift`/`--select` (via
+`scripts/lib/push-range.mjs`) always inferred a base from the CURRENT CHECKOUT's own
+HEAD/@{upstream} instead of the range git actually negotiated with the remote.
+
+Measured live in storyline (2026-09-07): a shared checkout's local `main` sat 17
+commits behind `origin/main`. `--drift`'s inferred base was that stale HEAD, so it
+diffed the stale-to-current range and attributed 10 other sessions' pre-existing
+non-conforming plan Status lines to a push that touched no plan file at all —
+blocking three consecutive pushes, including one that carried no commits at all (a
+branch deletion).
+
+**Fix**: HOOK_BODY (now hook-version 6) reads stdin once, immediately after the
+`AUDIT_PREPUSH_DISABLE` kill switch, and exports `AUDIT_PUSH_RANGE_BASE`/`_HEAD`
+from the real `<remote_sha>`/`<local_sha>` — the same env-var contract
+`push-range.mjs` already defined and this repo's own dogfooded
+`.githooks/pre-push` already used. A single `read`, deliberately not a `while`
+loop: nothing downstream (the plan-status gate, the audit, the maintenance sweep)
+re-runs per ref, so looping would only run those same commands more times for a
+multi-ref push, not check more refs. A branch-deletion push (all-zero local sha)
+is left falling back to existing inference, unchanged — documented as a known,
+scoped-out gap, not silently claimed as fixed.
+
+Caught by the sandboxed pre-push check itself, not locally: the first push attempt
+failed `npm test` because the new test's subprocess env inherited
+`AUDIT_PUSH_RANGE_REQUIRED=1` — a var `prepush-check.mjs` sets for the OUTER
+sandboxed run — which turned the RED controls' intended inference fallback into a
+hard refusal for the test's own INNER fixture repo. Fixed by explicitly scrubbing
+that var in the three subprocess env blocks that rely on fallback inference;
+verified red-then-green under `AUDIT_PUSH_RANGE_REQUIRED=1` before re-pushing.
+
+### Files Affected
+
+- `scripts/install-prepush-hook.mjs` — HOOK_BODY v5 → v6: stdin-read + env export block.
+- `tests/prepush-push-range-stdin.test.mjs` (new) — builds a real stale-checkout git
+  topology (local tracking ref forced 2 commits stale past two "other session"
+  commits that each add a non-conforming plan) and proves, RED/GREEN: (1)
+  `check-plan-status.mjs --drift` misattributes the other sessions' plans under old
+  inference, correctly excludes them under the real range; (2) the full generated
+  hook, fed the real stdin line, passes; fed no stdin (what every pre-v6 hook
+  effectively did), it blocks — reproducing the exact false positive. 11 cases, all
+  passing (in both a plain shell and under the sandbox's `AUDIT_PUSH_RANGE_REQUIRED=1`).
+
+### Decisions Made
+
+- Single `read`, not `while read` — the ordering/re-run invariants the maintenance
+  and `finish()` trailer blocks already carry are easy to violate by looping, and
+  nothing downstream needs per-ref granularity.
+- Left the branch-deletion case unfixed rather than adding an early-exit ahead of
+  the maintenance block, which has its own tested "must run before any early exit"
+  ordering invariant (`maintenance-hook-snippet.test.mjs`) — reordering it was out
+  of scope for this fix.
+
+### Next Steps
+
+- `npm run hooks:install` run against all 3 consumers (wine-cellar-app,
+  ai-organiser, storyline) — all updated to v6.
+- A branch-deletion push on a stale checkout is still misattributed (known gap,
+  see Decisions above) — fixing it would need reordering the maintenance-block
+  invariant; not attempted here.
+
+Backlog 2026-09-08T05:19Z: Q1 38c/16p (+219 aged) · Q2 113c/102p (50 perm) · Q3 2212 · debt unmeasured · upstream 0
 
 ## 2026-09-08 — the 3 dangling regression locks: deleting the citation would resurrect them as undischargeable
 

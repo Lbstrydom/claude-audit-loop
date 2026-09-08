@@ -67,7 +67,22 @@ const HOOK_MARKER     = '# managed-by: claude-engineering-skills install-prepush
 // Re-install to pick it up. NOTE for operators: on a repo whose local hook runs
 // a test suite, pushes get slower by exactly that suite — which is the gate
 // working. Bypass per-push with PREPUSH_LOCAL_DISABLE=1 or `git push --no-verify`.
-const HOOK_VERSION    = 5;
+// v6 (2026-09-08): the generated hook never read git's own pre-push stdin
+// protocol (<local_ref> <local_sha> <remote_ref> <remote_sha>), so every
+// AUDIT_PUSH_RANGE-aware gate (today just check-plan-status.mjs's --drift and
+// --select, via scripts/lib/push-range.mjs) fell back to inferring a base from
+// THIS CHECKOUT's own HEAD/@{upstream} — wrong whenever a shared checkout's
+// local branch sits behind the remote it is pushing to. Measured live in a
+// consumer (2026-09-07): local main was 17 commits behind origin/main, so
+// --drift's inferred base was that stale HEAD, and it attributed 10 OTHER
+// sessions' pre-existing non-conforming plan Status lines to a push that
+// touched no plan file at all — blocking three consecutive pushes, including
+// one that carried no commits at all (a branch deletion). The hook now reads
+// stdin once, immediately after the AUDIT_PREPUSH_DISABLE check, and exports
+// AUDIT_PUSH_RANGE_BASE/_HEAD from the real range git handed it — the same
+// fix this repo's own dogfooded .githooks/pre-push already applies. Re-install
+// to pick it up.
+const HOOK_VERSION    = 6;
 const HOOK_VERSION_MARKER = `# hook-version: ${HOOK_VERSION}`;
 // Accept the legacy marker too so existing installs (pre-rename) can be
 // upgraded in place by `npm run hooks:install` without manual cleanup.
@@ -95,6 +110,61 @@ ${HOOK_VERSION_MARKER}
 # would take that away. The consumer half has its own switch
 # (PREPUSH_LOCAL_DISABLE=1), and \`git push --no-verify\` still skips everything.
 [ "$AUDIT_PREPUSH_DISABLE" = "1" ] && exit 0
+
+# ── Push range (read stdin ONCE, v6) ─────────────────────────────────────────
+# git feeds \`<local_ref> <local_sha> <remote_ref> <remote_sha>\` on THIS hook's
+# stdin — the exact range the remote is about to receive. Read it here, first,
+# before anything below could otherwise consume stdin, and export it as
+# AUDIT_PUSH_RANGE_BASE/_HEAD (scripts/lib/push-range.mjs's contract) so the
+# plan-status gate below diffs the REAL push range instead of guessing from
+# this checkout's own HEAD/@{upstream}.
+#
+# WHY THIS MATTERS (measured live in a consumer, 2026-09-07): a shared checkout
+# whose local \`main\` sat 17 commits behind origin/main made the plan-status
+# gate infer a STALE base. \`--drift\` diffed the stale-to-current range and
+# attributed 10 OTHER sessions' pre-existing non-conforming plan Status lines
+# to a push that touched no plan file at all — reported as "a plan changed in
+# this push has a non-conforming Status", which was false. It blocked three
+# consecutive pushes, including one that carried NO commits at all (a branch
+# deletion). This repo's own dogfooded .githooks/pre-push already reads this
+# same stdin protocol; this brings the generated consumer hook up to the same
+# standard.
+#
+# ONE \`read\`, not a \`while\` loop over every ref: nothing below this point in
+# the hook re-runs per ref — the plan-status gate, the code-audit and the
+# maintenance sweep each execute exactly once per hook invocation regardless of
+# how many refs are pushed — so looping here would not check more refs, only
+# run those SAME downstream commands more than once for a multi-ref push,
+# which is a different change and not this fix's job. The first ref is
+# representative for the single-branch pushes this hook is built around,
+# matching the "first pushed ref wins" simplification already documented in
+# the dogfooded hook this mirrors.
+ZERO_SHA="0000000000000000000000000000000000000000"
+PUSH_BASE=""
+PUSH_HEAD=""
+if [ ! -t 0 ]; then
+  read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA
+  if [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$ZERO_SHA" ]; then
+    if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$ZERO_SHA" ]; then
+      PUSH_BASE="$REMOTE_SHA"
+      PUSH_HEAD="$LOCAL_SHA"
+    else
+      # New branch on the remote: the range is everything since it diverged
+      # from the default branch — NOT HEAD~1, which would scope a
+      # multi-commit branch to only its tip.
+      CANDIDATE_BASE="$(git merge-base origin/main "$LOCAL_SHA" 2>/dev/null)"
+      if [ -n "$CANDIDATE_BASE" ]; then
+        PUSH_BASE="$CANDIDATE_BASE"
+        PUSH_HEAD="$LOCAL_SHA"
+      fi
+    fi
+  fi
+  # LOCAL_SHA = all-zero is a branch deletion — nothing was pushed, so
+  # PUSH_BASE/_HEAD stay empty and downstream gates fall back to their own
+  # inference, unchanged from before this fix.
+fi
+export AUDIT_PUSH_RANGE_BASE="$PUSH_BASE"
+export AUDIT_PUSH_RANGE_HEAD="$PUSH_HEAD"
 
 # ── Consumer extension point, reached from EVERY exit path (v5) ─────────────
 # UNMANAGED — the consumer owns .githooks/pre-push.local. This installer rewrites
