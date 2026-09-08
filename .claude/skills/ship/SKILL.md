@@ -1309,6 +1309,21 @@ run sync)`.
 If push fails (behind remote, etc.), inform the user and suggest the
 fix. Do NOT force push.
 
+> **Continuing work in the same worktree after a squash merge: rebase, never
+> merge.** If a follow-up branch shares history with a `/ship`-created branch
+> whose PR was **squash-merged**, `git merge origin/<base>` reports a **false
+> conflict** on that file even when the content is byte-identical — a squash
+> merge creates a new commit on `<base>` with no parent relationship to the
+> original, so the 3-way merge treats an identical insertion as two
+> independent ones. `gh pr create` then shows `mergeable: CONFLICTING`. Use
+> `git rebase origin/<base>` instead: patch-id matching recognises the
+> commit's patch is already present, skips it, and replays only the genuinely
+> new commits; `git push --force-with-lease` then produces a clean PR
+> (`mergeable: MERGEABLE`). **A PR stuck at `mergeable: CONFLICTING` can also
+> correlate with zero CI runs firing at all** (not merely a cancelled run) —
+> "no checks reported" is not on its own proof the CI trigger is broken;
+> check mergeability first.
+
 ---
 
 ## Step 6.5 — Security Memory Refresh + Capture Hint (after successful push)

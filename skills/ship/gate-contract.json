@@ -442,6 +442,10 @@
       "reason": "Descriptive design-rationale prose (the \"why\" behind a fix or contract), not a claim that this skill's own execution enforces anything. Enforcement-verb words appear because the prose explains a defect or a rule in English, the same class as the pre-existing ignoredCandidates entries in this file."
     },
     {
+      "line": "> **Continuing work in the same worktree after a squash merge: rebase, never",
+      "reason": "Step 6.3's squash-merge continuation callout (added 2026-09-08 from storyline upstream report ef229b6d-96ed-4792-98b7-e90276da00cd), warning the AGENT to `git rebase origin/<base>` rather than `git merge origin/<base>` when a follow-up branch shares history with a squash-merged `/ship` PR, and that a `mergeable: CONFLICTING` PR can correlate with zero CI runs firing. This is git-workflow guidance the agent applies while choosing which command to run before pushing — there is no `/ship` CLI exit code to assert, because ship-commit.mjs never sees which git command the agent chose beforehand. Same shape as the pre-existing 'Never `cd` to the main checkout to run these' and 'Never `npm run sync -- --target-path <worktree>`' Phase-0a entries above: a prohibition/preference addressed to the agent, not a claim of mechanical enforcement."
+    },
+    {
       "line": "Never blocks the ship.",
       "reason": "States that Step 0.5d's dashboard rebuild is advisory-only — descriptive of that step's own instruction, same class as the pre-existing \"never blocks\" statements already exempted elsewhere in this contract."
     },
