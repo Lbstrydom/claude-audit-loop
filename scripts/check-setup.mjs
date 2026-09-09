@@ -309,12 +309,24 @@ async function checkPersonaTest(env, report, repoPath = REPO_PATH) {
   // Supabase project or supabase-js client anymore; the legacy
   // PERSONA_TEST_SUPABASE_URL / _ANON_KEY vars are read by NO runtime code.
   // Probe the persona tables through the same pg seam the audit tables use.
-  const repoName = path.basename(repoPath);
   if (env.PERSONA_TEST_REPO_NAME) {
     report.pass('PERSONA_TEST_REPO_NAME', env.PERSONA_TEST_REPO_NAME);
   } else {
-    report.warn('PERSONA_TEST_REPO_NAME not set', 'audit-loop cross-references will not work',
-      `Add PERSONA_TEST_REPO_NAME=${repoName} to .env`);
+    // Cross-skill/scope.mjs's resolveRequestedRepoScope matches this value
+    // against `audit_repos.name`, which is an owner/repo slug — the same
+    // convention AGENTS.md documents for LEARNING_REPO_NAME. A bare
+    // `path.basename(repoPath)` (this suggestion's value until 2026-09-09)
+    // never matches that row: it PASSES this check once set, so the fix
+    // read as applied while every cross-reference silently stayed unresolved.
+    const { slug, reason } = resolveGitHubSlug(repoPath);
+    if (slug) {
+      report.warn('PERSONA_TEST_REPO_NAME not set', 'audit-loop cross-references will not work',
+        `Add PERSONA_TEST_REPO_NAME=${slug} to .env`);
+    } else {
+      report.warn('PERSONA_TEST_REPO_NAME not set', 'audit-loop cross-references will not work',
+        `Could not derive an owner/repo slug (${reason}) — set PERSONA_TEST_REPO_NAME ` +
+        'by hand to the value matching this repo\'s audit_repos.name row');
+    }
   }
 
   // DSN is injected by injectResolvedDbEnv() in main(). Absent → cloud is off;
