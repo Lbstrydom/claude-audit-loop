@@ -289,6 +289,17 @@
     },
     {
       "schemaVersion": 1,
+      "issueId": "72ba2b2d-7632-4a18-a8ac-ad6a3ed99ac2",
+      "storeFingerprint": "c7177057dcafa55d",
+      "state": "fixed",
+      "disposition": {
+        "kind": "exempt",
+        "value": "skill-prose prompting fix (browser-tool-detection.md Step 0 + ux-lock scope-and-limitations.md) — no CLI/exit-code seam exists for whether the agent checks a target repo for a CDP mechanism before concluding blocked; same document-only class as this repo's existing gate-honesty entries"
+      },
+      "recordedAt": "2026-09-09T06:52:31.690Z"
+    },
+    {
+      "schemaVersion": 1,
       "issueId": "7af14dd6-820d-4176-9144-5e38a9484c34",
       "storeFingerprint": "c7177057dcafa55d",
       "state": "fixed",
@@ -605,6 +616,17 @@
         "value": "documentation-only callout, no code test or doctor probe applies"
       },
       "recordedAt": "2026-09-08T10:46:03.581Z"
+    },
+    {
+      "schemaVersion": 1,
+      "issueId": "f075b36b-b5fb-4d8c-b393-be89c1854fb7",
+      "storeFingerprint": "c7177057dcafa55d",
+      "state": "fixed",
+      "disposition": {
+        "kind": "test",
+        "value": "tests/audit-transcript-build.test.mjs"
+      },
+      "recordedAt": "2026-09-09T06:52:12.319Z"
     },
     {
       "schemaVersion": 1,
