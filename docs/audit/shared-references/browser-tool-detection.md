@@ -119,6 +119,41 @@ no such tool, the row is simply unavailable.
 
 ## 3. Selection — ONE ordered rule
 
+**Step 0 — is the target even URL-servable?** A native/desktop app (Electron,
+Tauri, NW.js, or any other Chromium-embedding shell) has no `http(s)://`
+surface for the ladder below to navigate — but "no URL" is not the same claim
+as "no driver is possible here," and jumping straight from the first to the
+second is the gap this step closes. Before concluding `blocked`, or that
+persona-testing/regression-locking simply doesn't apply to this target, check
+the TARGET REPO for an existing repo-specific driving mechanism. Many desktop
+apps already expose one for their own e2e/debug workflow — a real session hit
+exactly this (2026-09): the repo had a working CDP-driving mechanism the
+whole time, unused, because nothing prompted the agent to look for it.
+
+Check, in order of how likely each is to already exist:
+
+- `package.json` scripts named anything like `e2e`, `test:e2e`, `debug`,
+  `electron:debug`, `inspect` — a debug/test script often already launches the
+  app with remote debugging enabled.
+- The Electron main-process source for
+  `app.commandLine.appendSwitch('remote-debugging-port', …)` or an
+  `--inspect` / `--remote-debugging-port=<port>` launch flag — either exposes
+  a Chrome DevTools Protocol endpoint a browser tool can attach to.
+- An existing Playwright config or test helper calling `_electron.launch()`
+  or `chromium.connectOverCDP(...)` — a repo with ANY prior Electron e2e
+  coverage has usually solved this exact problem once already.
+- README / CONTRIBUTING for a documented "debug this app" / "attach devtools"
+  workflow.
+
+If a mechanism is found — or is quick to add, e.g. launching with
+`--remote-debugging-port=9222` and connecting via
+`chromium.connectOverCDP('http://localhost:9222')` — that connection becomes
+this session's driver. It is **not** a new fixed roster entry: treat it as an
+**`expected`** row scoped to this one repo, and exercise the caller's minimum
+capability set against it per §2's verification ladder before relying on it,
+exactly as you would `copilot-browser`. Only when no mechanism exists and none
+can reasonably be added does the target fall through to `blocked` (§5).
+
 Probe in this order and select the **first driver that satisfies the caller's
 minimum set**:
 

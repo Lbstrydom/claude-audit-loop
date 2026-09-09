@@ -16,10 +16,15 @@
  * finding (--no-scope-filter opts out deliberately):
  *   node scripts/build-audit-transcript.mjs --sid $SID --changed "$CHANGED"
  *
- * Explicit form (consolidated /cycle gate, non-standard artifact locations):
+ * Explicit form (consolidated /cycle gate, non-standard artifact locations).
+ * `--ledger`, like `--result`, is repeatable: /cycle's clustered execution
+ * runs one `/audit-code` per cluster, each writing its OWN ledger, so the
+ * consolidated transcript merges every cluster's entries rather than only
+ * the last one passed:
  *   node scripts/build-audit-transcript.mjs \
  *     --result .audit/$SID-r1-result.json --result .audit/$SID-r2-result.json \
- *     --ledger .audit/$SID-ledger.json --mode code \
+ *     --ledger .audit/$CLUSTER1-ledger.json --ledger .audit/$CLUSTER2-ledger.json \
+ *     --mode code \
  *     --changed src/a.mjs,src/b.mjs \
  *     --out .audit/$SID-transcript.json
  *
@@ -141,22 +146,36 @@ function main() {
   }
 
   // ── Ledger (optional — adds the deliberation trail) ──────────────────────
-  let ledgerPath = valueOf(argv, '--ledger');
-  if (!ledgerPath && sid) {
+  // Repeatable, mirroring --result: a single-session audit has one ledger,
+  // but /cycle's consolidated gate (Step 3C.2) accumulates one ledger PER
+  // CLUSTER — each cluster's own `/audit-code` invocation writes its own
+  // `.audit/$CLUSTER_SID-ledger.json`. Accepting only one silently dropped
+  // every other cluster's resolutions from `claude_resolutions`, so Gemini's
+  // consolidated review never saw most of the deliberation trail it was
+  // supposed to.
+  let ledgerPaths = collectRepeated(argv, '--ledger');
+  const ledgerWasExplicit = ledgerPaths.length > 0;
+  if (!ledgerWasExplicit && sid) {
     const guess = path.join(dir, `${sid}-ledger.json`);
-    if (fs.existsSync(guess)) ledgerPath = guess;
+    if (fs.existsSync(guess)) ledgerPaths = [guess];
   }
   let ledger = null;
-  if (ledgerPath) {
-    try {
-      ledger = JSON.parse(fs.readFileSync(path.resolve(ledgerPath), 'utf-8'));
-    } catch (err) {
-      // An explicitly-named ledger that cannot be read is an error; a guessed
-      // one that vanished mid-run is not worth failing the gate over.
-      const msg = `build-audit-transcript: could not read ledger ${ledgerPath}: ${err.message}`;
-      if (valueOf(argv, '--ledger')) { console.error(msg); process.exit(1); }
-      process.stderr.write(`  [transcript] WARN: ${msg} — continuing without the resolutions trail\n`);
+  if (ledgerPaths.length > 0) {
+    const mergedEntries = [];
+    for (const ledgerPath of ledgerPaths) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.resolve(ledgerPath), 'utf-8'));
+        const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.entries) ? parsed.entries : [];
+        mergedEntries.push(...entries);
+      } catch (err) {
+        // An explicitly-named ledger that cannot be read is an error; a guessed
+        // one that vanished mid-run is not worth failing the gate over.
+        const msg = `build-audit-transcript: could not read ledger ${ledgerPath}: ${err.message}`;
+        if (ledgerWasExplicit) { console.error(msg); process.exit(1); }
+        process.stderr.write(`  [transcript] WARN: ${msg} — continuing without the resolutions trail\n`);
+      }
     }
+    ledger = { entries: mergedEntries };
   }
 
   const changedRaw = valueOf(argv, '--changed');

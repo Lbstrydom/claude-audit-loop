@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "bundleVersion": "980747ab6f2223c6",
+  "bundleVersion": "69fda053fcebe5a8",
   "repoUrl": "https://github.com/Lbstrydom/claude-engineering-skills",
   "rawUrlBase": "https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main",
   "skills": {
@@ -75,8 +75,8 @@
         },
         {
           "relPath": "references/gemini-gate.md",
-          "sha": "e89c50f38719",
-          "size": 12998
+          "sha": "b00c8360e0fd",
+          "size": 13279
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -118,8 +118,8 @@
         },
         {
           "relPath": "references/gemini-gate.md",
-          "sha": "e89c50f38719",
-          "size": 12998
+          "sha": "b00c8360e0fd",
+          "size": 13279
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -174,8 +174,8 @@
         },
         {
           "relPath": "references/browser-tool-detection.md",
-          "sha": "1d8682efb4d8",
-          "size": 15360
+          "sha": "3f2ffb06cd7c",
+          "size": 17516
         },
         {
           "relPath": "references/dom-scanner.md",
@@ -191,14 +191,14 @@
     },
     "cycle": {
       "path": "skills/cycle/SKILL.md",
-      "sha": "5090a9df1390",
-      "size": 36968,
+      "sha": "0c4bb89c8602",
+      "size": 38288,
       "summary": "End-to-end feature cycle orchestrator. Runs the full skill chain in",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "5090a9df1390",
-          "size": 36968
+          "sha": "0c4bb89c8602",
+          "size": 38288
         }
       ]
     },
@@ -314,8 +314,8 @@
         },
         {
           "relPath": "references/browser-tool-detection.md",
-          "sha": "1d8682efb4d8",
-          "size": 15360
+          "sha": "3f2ffb06cd7c",
+          "size": 17516
         },
         {
           "relPath": "references/consistency-mode.md",
@@ -479,8 +479,8 @@
         },
         {
           "relPath": "references/scope-and-limitations.md",
-          "sha": "e22193d0d656",
-          "size": 5319
+          "sha": "2fd73c2aa052",
+          "size": 7049
         },
         {
           "relPath": "references/verification-discipline.md",

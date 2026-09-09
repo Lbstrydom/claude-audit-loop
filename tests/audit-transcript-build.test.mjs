@@ -170,6 +170,31 @@ describe('build-audit-transcript CLI', () => {
     assert.deepEqual(t.rounds.map(r => r.round), [1, 2]);
   });
 
+  it('merges multiple --ledger files rather than keeping only the last one', () => {
+    // /cycle's Step 3C.2 runs one /audit-code per cluster, each writing its
+    // own ledger. The consolidated transcript's claude_resolutions trail
+    // must reflect every cluster's resolutions, not just the last one passed.
+    const dir = tmpdir();
+    const r1 = writeResult(dir, 'cycle-consolidated', 1);
+    const ledgerA = path.join(dir, 'cluster-a-ledger.json');
+    const ledgerB = path.join(dir, 'cluster-b-ledger.json');
+    fs.writeFileSync(ledgerA, JSON.stringify({
+      entries: [{ topicId: 'a1', severity: 'HIGH', adjudicationOutcome: 'dismissed', resolvedRound: 1, rulingRationale: 'cluster A evidence' }],
+    }));
+    fs.writeFileSync(ledgerB, JSON.stringify({
+      entries: [{ topicId: 'b1', severity: 'MEDIUM', adjudicationOutcome: 'accepted', remediationState: 'fixed', resolvedRound: 1 }],
+    }));
+    const out = JSON.parse(run([
+      '--result', r1, '--mode', 'code', '--changed', 'src/a.mjs',
+      '--ledger', ledgerA, '--ledger', ledgerB,
+      '--out', path.join(dir, 't.json'), '--json',
+    ]));
+    assert.equal(out.resolutions, 2, 'both ledgers\' resolutions must be present, not just the last one');
+    const t = JSON.parse(fs.readFileSync(path.join(dir, 't.json'), 'utf-8'));
+    assert.match(t.claude_resolutions.join('\n'), /a1/);
+    assert.match(t.claude_resolutions.join('\n'), /b1/);
+  });
+
   it('exits non-zero when the session has no round results', () => {
     const dir = tmpdir();
     assert.throws(

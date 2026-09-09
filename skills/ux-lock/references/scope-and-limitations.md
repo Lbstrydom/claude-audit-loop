@@ -37,19 +37,45 @@ Web apps served via URL:
 Playwright navigates to `baseURL`, drives the DOM, asserts on elements.
 Both LOCK and VERIFY modes require a URL the browser can reach.
 
-## Limited for — Obsidian plugins (Electron apps)
+## Limited for — Electron / native desktop apps (Obsidian plugins included)
 
-Playwright can't attach to Obsidian's Electron process. For Obsidian
-plugins, use these approaches instead:
+Playwright does not navigate to an Electron app the way it does a URL — there
+is no `http(s)://` to `page.goto`. That is a different claim from "Playwright
+can't drive it": Playwright's own `_electron` module launches and controls an
+Electron process directly, and `chromium.connectOverCDP(...)` attaches to an
+already-running one if it exposes a remote-debugging port. **Check the target
+repo for an existing mechanism BEFORE assuming none exists or reaching for the
+heavier fallbacks below** — a real session concluded persona-testing/locking
+"didn't apply" to an Electron app that had a working CDP-driving mechanism the
+whole time, because nothing prompted the check. Look for:
+
+- `package.json` scripts like `e2e`, `test:e2e`, `debug`, `electron:debug` —
+  often already launch the app with remote debugging enabled.
+- The main-process source for `app.commandLine.appendSwitch(
+  'remote-debugging-port', …)` or an `--inspect` / `--remote-debugging-port=<port>`
+  launch flag.
+- An existing Playwright config/helper using `_electron.launch()` or
+  `connectOverCDP(...)` — a repo with any prior Electron e2e coverage has
+  usually solved this once already.
+- README / CONTRIBUTING for a documented debug/devtools workflow.
+
+If found (or quick to add), the LOCK spec drives the app directly instead of
+`page.goto(baseURL)` — `ux-lock-run.mjs --spec <path>` does not require `--url`
+when the spec sets up its own Electron context; it's only used to seed
+`E2E_BASE_URL` for specs that navigate. If no mechanism exists and none is
+worth adding for this fix, fall back to:
 
 1. **Unit test the plugin's logic with vitest** — not e2e. Extract
    view-model and business logic so it's testable without Electron.
 2. **Mock HTML harness** — render the plugin's UI components in a
    standalone HTML page and run Playwright against that.
-3. **Persona-test against dev tools** — use `/persona-test` with
-   Playwright MCP driving Obsidian's dev tools window if exposed.
-4. **Full Electron e2e** — `_electron.launch()` works but is heavy.
-   Reserve for critical user flows only.
+3. **Persona-test against dev tools** — use `/persona-test` with a browser
+   driver attached to the app's dev-tools window, if exposed. `/persona-test`
+   applies the same repo-mechanism check before its own driver ladder
+   (its `browser-tool-detection.md` §3 Step 0) — don't re-derive it here.
+4. **Full Electron e2e via `_electron.launch()`** — heavier to author.
+   Reserve for critical user flows only when the repo has no lighter
+   mechanism already wired.
 
 When refactoring Obsidian plugin code, ship LOCK specs for the **pure
 logic** (parser, normaliser, diff algorithms) via vitest instead.

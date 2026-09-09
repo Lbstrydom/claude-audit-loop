@@ -393,11 +393,33 @@ step", parameter placement) or **rising praise + ~1 nit/round** → **STOP**, th
 classic `/audit-code` path (Step 4) already verified the code against the real
 implementation, so record + close rather than re-running the union gate. Exit on
 `APPROVE`, the capped stop, or explicit handback. Never replaced by GPT
-rebuttal. Invocation: build the
+rebuttal.
+
+**Between consolidated rounds, apply `gemini-gate.md`'s Step 7.1 deliberation
+protocol exactly — this closed loop is the SAME one, not a second one.** For
+each `CONCERNS`/`REJECT` finding decide ACCEPT / PARTIAL / CHALLENGE (a
+CHALLENGE must cite evidence); fix the accepted findings; then **rebuild the
+transcript before re-running Gemini**, passing `--summary` describing what
+round 1 decided per finding — fixed, or challenged-and-why. Skipping this
+rebuild is what makes round 2 blind to round 1's deliberation: a `--out
+…-v2.json` built from only the (unchanged) per-cluster round results, with no
+`--summary`, gives Gemini nothing that distinguishes "never addressed" from
+"addressed with cited evidence you already saw," and it re-raises the
+identical finding round 2. `--summary` is the existing mechanism Step 7.1
+already uses for this — carry it forward here rather than inventing a second
+one.
+
+Invocation: build the
 transcript the way `/audit-code` does (`changed_files`=union file set,
 accumulated per-cluster findings as the `rounds[]` trail), then
 `node scripts/gemini-review.mjs review <target> <transcript.json> --out …` —
-reuse `/audit-code`'s transcript path, no new gate machinery. **Concrete transcript
+reuse `/audit-code`'s transcript path, no new gate machinery. **Pass one
+`--ledger <path>` per cluster** — `build-audit-transcript.mjs`'s `--ledger`
+flag is repeatable (mirroring `--result`), and clustered execution produces
+one ledger PER CLUSTER (each cluster's own `/audit-code` invocation writes its
+own `.audit/$CLUSTER_SID-ledger.json`); passing only one silently drops every
+other cluster's resolutions from the `claude_resolutions` trail the reviewer
+sees. **Concrete transcript
 shape + the no-`GEMINI_API_KEY` degradation ladder (Opus fallback → independent
 adversarial agent over the union diff → only-then skip) are in
 `audit-code/references/gemini-gate.md`** — when no provider key is present, run the

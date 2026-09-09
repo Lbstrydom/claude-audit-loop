@@ -75,8 +75,12 @@ contract.
 Other flags: `--mode plan|code` (required when the sid doesn't carry the
 prefix — it never guesses), `--result <path>` (repeatable; for the consolidated
 `/cycle` gate or non-standard locations — **mutually exclusive with `--sid`**,
-so a transcript can never mix two sessions' rounds), `--ledger`, `--dir`
-(default `.audit`), `--summary`, `--out`, `--json`.
+so a transcript can never mix two sessions' rounds), `--ledger <path>`
+(**also repeatable** — /cycle's clustered execution runs one `/audit-code` per
+cluster, each writing its OWN ledger; pass one `--ledger` per cluster ledger
+and their entries merge into one `claude_resolutions` trail, rather than only
+the last one passed silently winning), `--dir` (default `.audit`), `--summary`,
+`--out`, `--json`.
 
 > **`.audit/`, never `/tmp/`.** The transcript is the only replayable input for
 > evaluating a cheaper or newer final reviewer, and `/tmp` is OS-cleaned — on
