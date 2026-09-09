@@ -154,6 +154,58 @@ capability set against it per §2's verification ladder before relying on it,
 exactly as you would `copilot-browser`. Only when no mechanism exists and none
 can reasonably be added does the target fall through to `blocked` (§5).
 
+**Once you're driving through a bespoke adapter, check its own capability
+list before calling any gesture unsupported.** A repo-specific verb/command
+dispatcher (e.g. an `ux-verb.mjs`-style file exposing `click`/`type`/
+`screenshot`/…) grows new verbs across sessions as later work adds a
+capability to solve one specific interaction gap — nothing propagates that
+growth to you. Before reporting a gesture as "not drivable by this adapter,"
+run its help/usage output if it has one, or grep its own source for the
+verb/dispatch table, rather than concluding a gap exists from memory alone. A
+real session assumed no drag/region-select primitive existed and reported it
+as a product gap, only to find — after manually reading the adapter's
+source — that a `drag` verb had already been added in an earlier session for
+exactly that purpose.
+
+**Keeping a bespoke driver process alive across many tool calls — don't
+hand-roll `detached`+`unref` on Windows.** Some adapters are a long-lived
+companion process the agent must keep running across dozens of separate tool
+invocations (e.g. a `ux-driver run` process that owns a real Electron app for
+the whole session). The classic Node pattern for this from inside a one-shot
+shell call —
+
+```js
+const child = spawn(cmd, args, { detached: true, stdio: [...] });
+child.unref();
+```
+
+— is unreliable on Windows: measured behaviour is a silent death partway
+through a session (one case: ~10 minutes and dozens of calls in, mid a
+long-running API call), taking the owned app down with it — no error, no
+exit code, no crash log anywhere. `detached: true` + `unref()` does not give
+Windows the double-fork independence it implies on Unix; the likely
+mechanism is a Windows job object reaping the "detached" child once the
+launching shell invocation's own process tree tears down. Launch the driver
+command directly under the calling harness's own background-process tracking
+instead — e.g. Claude Code's Bash tool `run_in_background: true` — rather
+than hand-rolling detach+unref from inside a script; that has been confirmed
+to survive a full session with no issue.
+
+**A native-app target with no non-interactive credential path will likely
+need a one-time human approval to enter a real secret — expect that, don't
+retry around it.** Some desktop/native apps have no env-var injection point
+at all: the only way in is a password-shaped field in the app's own UI (e.g.
+a "Connection" panel). If the target repo's own automated tier already
+establishes a sanctioned pattern for this (read the secret from `.env`
+in-process, fill the field via the driver, click save, never let the value
+touch a CLI argument or a log line), following that exact pattern is in
+scope even though it fills a real secret into a UI field. But the calling
+harness's own safety classifier has no way to know a given repo's sanctioned
+precedent, so expect the first attempt to be blocked pending one explicit
+human approval — that is expected friction, not a signal something is wrong.
+Ask once and continue rather than burning a retry loop or reporting the
+block itself as a blocker.
+
 Probe in this order and select the **first driver that satisfies the caller's
 minimum set**:
 

@@ -1098,6 +1098,53 @@ plan's scope.)*
 
 ---
 
+## Step 5.8 — Pre-push staleness check (shared-repo overlap)
+
+Skip when the current branch is the repo's default branch (this bundle's own
+main-only convention — nothing to compare against) or when Step 5 found no
+plan path in `$ARGUMENTS` (no plan means no declared file scope to diff
+against).
+
+A long `/cycle --autonomous` run — many audit rounds, multiple clusters — can
+take long enough for a **different** PR to merge to the default branch first,
+touching files this run also touched. What that produces downstream is
+confusing rather than obvious: `gh pr create` reports `mergeable:
+CONFLICTING`, and GitHub can additionally skip dispatching a `pull_request`
+CI run for it entirely — reading exactly like a CI-infrastructure flake (a
+self-hosted runner not picking up the job) and costing real diagnostic time
+before anyone checks mergeability and finds a plain merge conflict
+underneath. Catch it here instead:
+
+```bash
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)
+git fetch origin "$DEFAULT_BRANCH"
+BASE=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+git diff --name-only "$BASE" "origin/$DEFAULT_BRANCH"   # touched upstream since this branch's base
+```
+
+Intersect that list with the plan's declared scope — §7's File-Level Plan,
+plus §7b/§11 `Files:` bullets when present (reuse the paths Step 5 already
+read from the plan). An empty intersection: proceed silently, nothing to
+report.
+
+A non-empty intersection is worth a pause, not an automatic stop — name the
+overlapping files and the upstream commit(s) that touched them, and let the
+operator pick: rebase now (the squash-merge note below already prefers
+`rebase` over `merge` on a `/ship`-created branch, for the same reason) or
+push and resolve on GitHub. Either way, don't decide it silently — a
+confusing CI investigation later costs more than one question now.
+
+If a rebase or merge resolves real overlap, re-run the full test suite
+before continuing to Step 6 — a clean 3-way merge with zero conflict markers
+is not proof of correctness. git's own auto-merge can fold two independent
+additions of the same import line and the same component mount into one
+file with no conflict markers at all, producing a real duplicate-render bug
+that only a type-check or test failure catches. This applies to any merge
+touching files a `/cycle` run modified, not only the ones flagged with
+visible conflicts.
+
+---
+
 ## Step 6 — Stage, Commit, Push
 
 ### 6.0 Sync manifest — no action (source repo)
