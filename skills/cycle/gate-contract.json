@@ -161,6 +161,22 @@
     {
       "line": ">    result from an inlined skill reaches the Step 8 summary. It must not be",
       "reason": "Same no-dispatch block: states the blocked-propagation invariant. Descriptive guidance, not code-level enforcement."
+    },
+    {
+      "line": "**Between consolidated rounds, apply `gemini-gate.md`'s Step 7.1 deliberation",
+      "reason": "Verb match is 'gate' inside the filename `gemini-gate.md`, not an enforcement claim. The sentence points the agent at Step 7.1's ALREADY-documented deliberation protocol (that file's own gemini-gate/final-gate document-only dispositions cover the mechanism itself); this line adds no new gate."
+    },
+    {
+      "line": "CHALLENGE must cite evidence); fix the accepted findings; then **rebuild the",
+      "reason": "Restates gemini-gate.md's Step 7.1 CHALLENGE rule (already document-only there) as applying to the consolidated round too. Agent judgement during deliberation — no CLI exit code, same disposition class as consolidated-gemini-gate-mandatory above."
+    },
+    {
+      "line": "`--summary`, gives Gemini nothing that distinguishes \"never addressed\" from",
+      "reason": "'never' is inside a quoted contrast phrase describing what the PROMPT would omit if the agent skips the --summary rebuild, not an enforcement rule the skill imposes. Explanatory prose, not a gate."
+    },
+    {
+      "line": "reuse `/audit-code`'s transcript path, no new gate machinery. **Pass one",
+      "reason": "'gate' appears in 'no NEW gate machinery' — an explicit disclaimer that nothing new is being mechanically enforced here (reusing the existing build-audit-transcript.mjs/gemini-review.mjs path). Not an enforcement claim."
     }
   ]
 }
