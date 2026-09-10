@@ -108,6 +108,9 @@ const CORE_ENTRY = [
   // Citation re-resolver (see the entry's rationale in sync-to-repos.mjs, which
   // is authoritative for this list).
   'scripts/check-doc-citations.mjs',
+  // Consumer sync-ownership triage CLI (see the entry's rationale in
+  // sync-to-repos.mjs, which is authoritative for this list).
+  'scripts/sync-status.mjs',
   // Local weekly-maintenance replica of the (now 7) GH Actions / opt-in
   // checks — opt-in, default-OFF, invoked opportunistically from the
   // pre-push hook. maintenance-checks.mjs spawns the other four as

@@ -102,6 +102,10 @@ const CLI_SMOKE_SET = [
   // OUT while it was source-only, precisely to avoid the gate-4-fails-everywhere
   // failure that note describes.
   'check-doc-citations.mjs',
+  // Sync-ownership triage CLI. Membership legitimate for the same reason as
+  // check-doc-citations.mjs just above: it is declared in sync-to-repos.mjs
+  // CORE_ENTRY, so this set asserting consumer presence does not fail gate 4.
+  'sync-status.mjs',
   // NOTE: `verify-anchor-contract.mjs` is deliberately NOT here. Its plan
   // (evidence-anchor-path-contract §9a) originally demanded membership by
   // reflex and was CORRECTED: this set asserts CONSUMER PRESENCE, so an entry

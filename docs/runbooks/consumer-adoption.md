@@ -686,6 +686,27 @@ refactor them — and `debt-resolve.mjs` would delete the record of a
 still-open defect. **Report those instead**:
 `node scripts/.claude-skills/cross-skill.mjs upstream report --affected-path <path>`.
 
+### Telling sync output apart from your own uncommitted work
+
+**Symptom.** `git status` after a sync shows a pile of modified
+`.claude/skills/**` files plus `.sync-receipt.json`, and nothing says whether
+that's the sync or something you were mid-edit on. Left untriaged this reads
+exactly like your own unfinished work (observed for real: a batch of it sat
+uncommitted in `storyline` until someone opened
+`scripts/.sync-manifest.json` — gitignored, easy to forget exists — and
+diffed each file by hand).
+
+**Fix.** `node scripts/.claude-skills/sync-status.mjs` reads your dirty `git
+status` and classifies every path as sync-owned (using the `.sync-owned.json`
+sidecar above + git-ignore state — the same oracle `debt:review` trusts) vs
+your own. It prints a ready-to-run `git add … && git commit -m "…"` for the
+sync-owned group and never stages or commits anything itself — the sync
+deliberately never commits into your tree either (see the receipt's own
+rationale: it's your tree, your hooks, your staged work, none of which a sync
+should touch). `--format json` for scripting; `sync-to-repos.mjs` itself
+prints the same "safe to commit" line at the end of every run against a
+target it can reach directly.
+
 ---
 
 ## Linked git worktrees — the tooling tree is not there

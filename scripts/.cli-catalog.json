@@ -632,6 +632,10 @@
       "description": "Pull canonical then sync into one consumer (--target); shows its tracked changes. No commit/push.",
       "category": "sync"
     },
+    "sync:status": {
+      "description": "Classify a consumer repo's dirty `git status` paths as sync-owned (safe to commit as-is) vs its own edits, using the committed scripts/.sync-owned.json sidecar.",
+      "category": "sync"
+    },
     "sync:version-check": {
       "description": "Compare consumer-repo audit-tool versions against the source manifest.",
       "category": "sync"

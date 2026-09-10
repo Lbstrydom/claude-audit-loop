@@ -48,6 +48,7 @@ import {
   RECEIPT_PATH, RECEIPT_VERSION, buildReceiptEntry, receiptShouldWrite,
   readSyncReceipt, latestReceiptEntry, appendReceiptEntry, detectSourceRollback,
 } from './lib/sync-receipt.mjs';
+import { describeSafeToCommit } from './lib/sync-status.mjs';
 import { createGitAncestry, planRollbackResponse } from './lib/sync-rollback-guard.mjs';
 import { untrackNewlyIgnored } from './lib/sync-untrack.mjs';
 import { computeEolPins, renderEolPinLines, canonicaliseOutboundEol } from './lib/sync-eol-pins.mjs';
@@ -439,6 +440,8 @@ const CORE_ENTRY = [
   // consumer layout had, which is the helper-path-drift class filed as
   // wine-cellar-app 2026-07-19 §4 and caught by /ship Step 6.8's first real run.
   'scripts/check-doc-citations.mjs',
+  // Consumer git-status ownership triage; rationale in the file's own header.
+  'scripts/sync-status.mjs',
   // Local weekly-maintenance replica of the 5 GH Actions cron workflows
   // (docs/runbooks/local-maintenance-checks.md) — opt-in, default-OFF, invoked
   // opportunistically from the pre-push hook. Spawns each replicated check
@@ -2463,6 +2466,12 @@ async function main() {
     if (divergenceRefusals.length > 0) parts.push(`${R}${divergenceRefusals.length} diverged${X}`);
     if (repoErrors > 0) parts.push(`${R}${repoErrors} errors${X}`);
     console.log(`  ${parts.join('  ')}`);
+
+    if (!DRY_RUN) {
+      const line = describeSafeToCommit({ created: receiptCreated, updated: receiptUpdated,
+        sidecarWritten: manifestWritten, statusCliRel: sourceRelToDestRel('scripts/sync-status.mjs') }, { G, D, X });
+      if (line) console.log(line);
+    }
 
     // Surface genuinely-unresolved imports — a path-like specifier the graph
     // walker could not resolve is a real missing dependency that would crash
