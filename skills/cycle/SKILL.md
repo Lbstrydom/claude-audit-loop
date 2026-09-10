@@ -61,7 +61,7 @@ golden-path workflow without thinking about it.
 > can invoke `/audit-code` as a command; VS Code Copilot reads the same
 > `.claude/skills/` tree but has no documented mechanism for one skill to
 > invoke another. Where a step below says "invoke `/x`", such a host instead
-> **opens `skills/x/SKILL.md` and follows it in place**, then returns here and
+> **opens `.claude/skills/x/SKILL.md` and follows it in place**, then returns here and
 > continues with the next step.
 >
 > **Pass the delegated skill its arguments explicitly** — the plan path, the
@@ -303,8 +303,7 @@ For each remaining cluster in declared order:
 #    filters to on-disk paths for the allowlist, runs the admission pre-flight,
 #    writes the patch. EXITS NON-ZERO on an out-of-scope edit, an unadmittable
 #    path, or a comma-unsafe path — when it does, STOP and show its stderr.
-node scripts/cycle-cluster-scope.mjs --base "$CLUSTER_START" \
-  --scope-file "$SCOPE_FILE" --out-dir .audit --cluster "$ID" --json > "$SCOPE_JSON"
+node scripts/cycle-cluster-scope.mjs --base "$CLUSTER_START" --scope-file "$SCOPE_FILE" --out-dir .audit --cluster "$ID" --json > "$SCOPE_JSON"
 
 # 2. Audit using ONLY values that call produced. Read them with node, not jq —
 #    node is guaranteed here; jq is not, and is absent from check-deps.mjs.
@@ -312,8 +311,7 @@ FILES=$(node -p "require('./$SCOPE_JSON').filesCsv")
 PATCH=$(node -p "require('./$SCOPE_JSON').diffPath")
 INFRA=$(node -p "require('./$SCOPE_JSON').allowInfraScopeRequired ? '--allow-infra-scope' : ''")
 
-node scripts/openai-audit.mjs code "$PLAN" --scope diff \
-  --files "$FILES" --changed "$FILES" --diff "$PATCH" $INFRA
+node scripts/openai-audit.mjs code "$PLAN" --scope diff --files "$FILES" --changed "$FILES" --diff "$PATCH" $INFRA
 #   --files   : THE scoping flag — an allowlist; makes --scope a no-op
 #   --changed : R2+ reopen/impact detection only — does NOT scope
 #   --diff    : annotation context only — does NOT scope; must be a real file

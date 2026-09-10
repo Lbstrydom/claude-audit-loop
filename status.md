@@ -1,9 +1,78 @@
 # Project Status Log
 
 ### Consumer Verification (previous ship)
+- **Commit**: 1250f8cc78f0cb0f84d88fd5bfd31bb06987bb61 on `main` (pushed 2026-09-08, range `0d72d185..1250f8cc`)
+- **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in wine-cellar-app's MAIN checkout — exit 0, gates 1..9 green (1 pre-declared held divergence, unrelated: docs/reference/consistency-contract.md). Subject check: grepped `resolveTimeoutMs`/`TIMEOUT_FLOOR_MS` in wine-cellar-app's synced `scripts/.claude-skills/lib/brainstorm/depth-config.mjs` — present. The push's own sync summary additionally confirmed `brainstorm-round.mjs` + `depth-config.mjs` updated in all 3/3 targets (storyline, wine-cellar-app, and the third registered consumer).
+- **Result**: verified — the brainstorm --timeout-ms scaling fix (docs/plans: none; ad-hoc fix, AI-Gate not-run) reached the consumer bundle intact.
+
+### Consumer Verification (previous ship)
 - **Commit**: 29c2d2cfe2c7227242e199a9f56748cdec75f3ee on `main` (pushed 2026-09-07, range `cb3d3906..29c2d2cf`)
 - **Retrieval**: `node scripts/.claude-skills/lib/sync-isolation-verify.mjs` run in storyline's and wine-cellar-app's MAIN checkouts (exit 0, gates 1..9 green both); subject check `cross-skill.mjs persona-outcomes summary` run bare in storyline (no `--repo`)
 - **Result**: verified — the exact 2026-08-25 storyline session and its 2 P0/2 P1 the upstream report cited as unreachable now read `openP0: 0 / openP1: 1`, `pendingVerificationP0: 2` (claimed-fixed, untested — not "gone"); `openP1: 1` is genuinely open and unlabeled
+
+## 2026-09-10 — Copilot/Windows cross-host shell portability pass
+
+### Changes
+Verified (not just triaged) 3 of 4 upstream reports filed by a VS Code Copilot
+session against this bundle (store: `louis-strydom_wartsila/audit-loop`,
+surfaced correctly by `npm run upstream:queues` in Step 0.5h — an earlier check
+against the wrong single store had made these look unfiled). #1
+(no-dispatch fallback opening a source-only `skills/x/SKILL.md` path never
+reachable by a synced consumer) and #4 (README pointing Windows users only at
+the Claude-Code-only `npx.cmd` MCP override, never the separate Copilot
+`cmd /c` fallback) were fixed directly. #2 (Bash-only executable contracts)
+was reproduced independently via a local `pwsh.exe` AST-parse check — **112
+bash fences in `skills/**`, 47 failing PowerShell parsing** — and fixed
+mechanically across all of them. #3 (skill sizes over the 3K-token budget) was
+confirmed as already-tracked debt (`docs/plans/backlog-and-drift-reduction.md`),
+now further stale (ship/SKILL.md 75,349 → 89,856 bytes) — not touched here.
+
+- **README.md** — added a Windows/Copilot pointer to the `cmd /c` MCP fallback
+  in `docs/audit/shared-references/browser-tool-detection.md`, alongside the
+  existing Claude-Code-only `npx.cmd` note.
+- **`skills/cycle/SKILL.md`, `skills/audit-plan/SKILL.md`** — the no-dispatch
+  fallback now opens `.claude/skills/x/SKILL.md` (the tree a synced consumer
+  actually has), not `skills/x/SKILL.md` (source-repo-only).
+- **18 skill files, ~47 command blocks** — dropped `<angle-bracket>`
+  placeholders (PowerShell reserves `<`; AGENTS.md already mandated this, the
+  files weren't held to it) in favour of named `$VAR` assignments or, where
+  `check-docs-refs.mjs` would misread a realistic example path as a broken
+  reference, a `*`-glob placeholder (recognized by that gate, parses fine in
+  PowerShell). Collapsed backslash-continued single commands to one line;
+  split the one genuine `&&` two-command chain; replaced a heredoc + stdin `<`
+  redirect with the file's own established "Write tool, then `cat file |
+  --stdin`" pattern; rewrote a bash `${VAR:+...}` expansion and a `[ -n
+  "$(...)" ] && ... || ...` test-ternary as explicit prose + plain assignment.
+  Left the one genuinely-POSIX step (`xargs`/`/dev/null` untracked-file diffing
+  in audit-code) explicitly flagged POSIX-only rather than faking a fix.
+- **`tests/skill-staging-instructions.test.mjs`** — its vacuous-pass guard was
+  pinned to the literal `<plan-file>` text this pass removed; updated to check
+  the new `"$PLAN_FILE"` form. The property it guards (Round 1 must pass the
+  resolved `$SCOPE`, never a hardcoded literal) is unchanged.
+
+### Files Affected
+- `README.md`, `docs/audit/shared-references/{gemini-gate,ledger-format}.md` — canonical shared-reference fixes
+- `skills/{audit-code,audit-plan,click-test,cycle,explain,persona-test,plan,ship,skills,ux-lock}/**` + their `.claude/skills/**` generated copies + `skills.manifest.json`
+- `tests/skill-staging-instructions.test.mjs` — updated vacuous-pass guard
+
+### Decisions Made
+- Reused the file's own established `$SID`/`$AUDIT_MODE` variable idiom for
+  new placeholders rather than inventing a new convention.
+- Did not attempt a portable rewrite of the one POSIX-only `xargs`/`/dev/null`
+  step — no CLI flag exists to replace it and building one is a code change,
+  out of scope for a docs-portability pass.
+- Left upstream reports #2/#3/#4 substance-verified but NOT yet formally
+  closed in the disposition ledger (`upstream ack/fix`) — a follow-up, not
+  blocking this ship.
+
+### Next Steps
+- Triage + close the 4 upstream reports (`node scripts/cross-skill.mjs
+  upstream fix --id <uuid> --commit <this sha>` for #1/#2/#4; #3 is
+  pre-existing debt, `wont-fix` with a pointer to the backlog plan).
+
+**Backlog**: Backlog 2026-09-10T08:03Z: Q1 51c/16p (+219 aged) · Q2 112c/113p (50 perm) · Q3 2230 · debt unmeasured · upstream 0
+
+---
 
 ## 2026-09-08 — shipping the stdin-range fix itself hit two more instances of the class it fixes
 

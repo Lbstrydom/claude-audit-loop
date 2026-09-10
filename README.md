@@ -327,7 +327,7 @@ re-fetches at run time a package your lockfile already pins. Measured
 nothing, `pnpm dlx playwright --version` downloaded 2 packages. Reserve
 `dlx`/`bunx` for running something you have deliberately *not* installed.
 
-Windows users — see [CLAUDE.md](CLAUDE.md#claude-code-only-notes) for the `npx.cmd` MCP override needed by Claude Code's process spawner.
+Windows users — see [CLAUDE.md](CLAUDE.md#claude-code-only-notes) for the `npx.cmd` MCP override needed by Claude Code's process spawner. **VS Code Copilot on Windows** needs a different override — a bare-`npx` stdio MCP server fails to spawn (`ENOENT`) before VS Code 1.111; see [the Windows spawn-failure section](docs/audit/shared-references/browser-tool-detection.md#prerequisites-and-the-windows-spawn-failure) for the `.vscode/mcp.json` `cmd /c` fallback (the CLAUDE.md override above is Claude-Code-only and does not apply to Copilot).
 
 ## Supported Platforms
 

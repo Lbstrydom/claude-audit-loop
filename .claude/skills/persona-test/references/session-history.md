@@ -15,16 +15,13 @@ RLS hardening these tables require service-role; cross-skill holds it.
 Fetch the last three sessions for this URL:
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-url \
-  --url "<url>" --limit 3
+node scripts/cross-skill.mjs get-persona-sessions-by-url --url "https://your-app.example.com" --limit 3
 ```
 
 Or, when `repo_name` is set, prefer the repo-wide view:
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-repo \
-  --repo "<repo>" --limit 5 \
-  --select persona,focus,verdict,p0_count,p1_count,findings,debrief_md,created_at
+node scripts/cross-skill.mjs get-persona-sessions-by-repo --repo "owner/repo" --limit 5 --select persona,focus,verdict,p0_count,p1_count,findings,debrief_md,created_at
 ```
 
 ## Output

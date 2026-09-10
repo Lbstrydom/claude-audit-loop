@@ -245,11 +245,10 @@ in the run contract for the Phase 6 report.
 Before any browser work, call:
 
 ```bash
-node scripts/lib/device-presets.mjs prep-matrix \
-  [--device <preset>] [--devices "<list>"] [--viewport <WxH>]
+node scripts/lib/device-presets.mjs prep-matrix
 ```
 
-(Pass the same flag your `$ARGUMENTS` contained — none if neither flag
+Optional flags — add at most one, matching what your `$ARGUMENTS` contained (none if neither flag was passed): `--device PRESET`, `--devices "LIST"`, `--viewport WxH`.
 
 <!-- host-contract: input-acquisition; grammar=path+flags; empty=default -->
 _This site: `path+flags` — neither device flag present means a single `desktop` pass — do not synthesise a matrix._

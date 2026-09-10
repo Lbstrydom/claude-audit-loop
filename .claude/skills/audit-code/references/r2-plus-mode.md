@@ -44,10 +44,15 @@ so orchestrators can see which tools ran.
 # Generate diff from fixes (use the dirty-aware BASE from SKILL Step 5 — HEAD when the tree
 # is dirty, HEAD~1 when clean — not a hardcoded HEAD~1).
 git diff "$BASE" -- . > .audit/$SID-diff.patch
-# Include UNTRACKED new files (git diff omits them) so a brand-new file still gets [CHANGED] markers.
-git ls-files --others --exclude-standard -z \
-  | xargs -0 -r -I{} git diff --no-index --no-color -- /dev/null "{}" >> .audit/$SID-diff.patch 2>/dev/null || true
+```
 
+**Include UNTRACKED new files** (`git diff` omits them) so a brand-new file still gets `[CHANGED]` markers. **POSIX shell only** (Git Bash on Windows) — `xargs` and `/dev/null` have no native PowerShell equivalent:
+
+```bash
+git ls-files --others --exclude-standard -z | xargs -0 -r -I{} git diff --no-index --no-color -- /dev/null "{}" >> .audit/$SID-diff.patch 2>/dev/null || true
+```
+
+```bash
 # Build changed + files lists from Step 4 fix list
 CHANGED="scripts/shared.mjs,scripts/openai-audit.mjs"
 FILES="$CHANGED,scripts/gemini-review.mjs"  # changed + dependents
@@ -56,15 +61,8 @@ FILES="$CHANGED,scripts/gemini-review.mjs"  # changed + dependents
 PASSES="sustainability"  # always include
 # Add backend if any backend file changed, frontend if frontend changed, etc.
 
-node scripts/openai-audit.mjs code <plan-file> \
-  --round 2 \
-  --ledger .audit/$SID-ledger.json \
-  --diff .audit/$SID-diff.patch \
-  --changed $CHANGED \
-  --files $FILES \
-  --passes $PASSES \
-  --out .audit/$SID-r2-result.json \
-  2>.audit/$SID-r2-stderr.log
+PLAN_FILE=docs/plans/*.md   # the plan path /audit-code was invoked with
+node scripts/openai-audit.mjs code "$PLAN_FILE" --round 2 --ledger .audit/$SID-ledger.json --diff .audit/$SID-diff.patch --changed $CHANGED --files $FILES --passes $PASSES --out .audit/$SID-r2-result.json 2>.audit/$SID-r2-stderr.log
 ```
 
 > **Session artifacts go in `.audit/`, not `/tmp/` (A3).** A `/tmp/...` path in

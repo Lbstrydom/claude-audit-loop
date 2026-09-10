@@ -76,8 +76,10 @@ Skip the file-shaped Steps 1–5 and run the cross-source aggregator instead.
 ### Invocation
 
 ```bash
-node scripts/explain-history.mjs --topic "<topic>" [--since "<git-since>"] [--paths "<csv>"] [--limit <n>]
+node scripts/explain-history.mjs --topic "rate limiting"
 ```
+
+Optional flags: `--since "GIT-SINCE-DATE"`, `--paths "CSV-OF-PATHS"`, `--limit N`.
 
 The aggregator searches four independent sources:
 
@@ -229,20 +231,23 @@ If Supabase is offline → skip all three subcommands and note
 ## Step 2 — Gather Git History
 
 ```bash
+FILE=scripts/lib/*.mjs   # the file you're explaining
+LINE=42                        # the line, if one was specified — omit -L flags otherwise
+
 # Who wrote it + when (last 5 lines of context if line is specified)
-git blame -L <line>,<line>+5 <file>
+git blame -L $LINE,+5 "$FILE"
 
 # When the file was created + changed (last 10 commits)
-git log --oneline -10 -- <file>
+git log --oneline -10 -- "$FILE"
 
 # Recent commits that touched the symbol (if line known)
-# NOTE: use git's native +offset syntax — git does NOT evaluate "<line>+10"
+# NOTE: use git's native +offset syntax — git does NOT evaluate "LINE+10"
 # arithmetic in -L. Pass +10 directly so git computes line + 10 internally
 # (Gemini-R1-G4 fix).
-git log -L <line>,+10:<file> --oneline | head -10
+git log -L $LINE,+10:"$FILE" --oneline | head -10
 
 # PR context (if gh CLI available)
-LAST_COMMIT=$(git log -1 --format=%H -- <file>)
+LAST_COMMIT=$(git log -1 --format=%H -- "$FILE")
 gh api "repos/{owner}/{repo}/commits/$LAST_COMMIT/pulls" --jq '.[].title' 2>/dev/null
 ```
 

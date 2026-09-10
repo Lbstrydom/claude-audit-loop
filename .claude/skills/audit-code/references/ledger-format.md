@@ -50,10 +50,7 @@ Write them with the bundled CLI — it derives every identity field from the
 round's own findings, so you supply only the judgement:
 
 ```bash
-node scripts/write-ledger-entries.mjs \
-  --result .audit/$SID-r1-result.json \
-  --ledger .audit/$SID-ledger.json \
-  --triage .claude/tmp/triage-r1.json
+node scripts/write-ledger-entries.mjs --result .audit/$SID-r1-result.json --ledger .audit/$SID-ledger.json --triage .claude/tmp/triage-r1.json
 ```
 
 `--triage` is a JSON file keyed by the round's finding ids. **Write it with an
@@ -121,9 +118,7 @@ of truth.
 After Step 4 completes, update ledger entries for the fixed items:
 
 ```bash
-node scripts/write-ledger-entries.mjs \
-  --ledger .audit/$SID-ledger.json \
-  --mark-fixed 42fe8eb796e8 6373587e8fe1
+node scripts/write-ledger-entries.mjs --ledger .audit/$SID-ledger.json --mark-fixed 42fe8eb796e8 6373587e8fe1
 ```
 
 topicIds are ARGUMENTS, and there is no `<angle-bracket>` placeholder anywhere:

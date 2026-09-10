@@ -149,11 +149,18 @@ describe('a skill must not hardcode a scope it advertises as selectable', () => 
   test('the Round 1 invocation passes the SELECTED scope, not a literal', () => {
     const src = fs.readFileSync(SKILL, 'utf-8');
     // Vacuous-pass guard: the invocation this asserts about must still exist.
-    assert.ok(src.includes('node scripts/openai-audit.mjs code <plan-file>'),
+    // PowerShell-safety pass (cross-host-parity, 2026-09-10) collapsed the
+    // continuation-wrapped `<plan-file>` invocation to a single line using a
+    // `$PLAN_FILE` variable — angle-bracket placeholders are unparseable in
+    // PowerShell and were replaced repo-wide; the property this guard checks
+    // (selected scope, not a hardcoded literal) is unchanged.
+    assert.ok(src.includes('node scripts/openai-audit.mjs code "$PLAN_FILE"'),
       'the Round 1 invocation is gone — re-point this guard rather than deleting it');
     assert.ok(src.includes('--scope "$SCOPE"'),
       'Round 1 must pass the resolved scope');
     assert.ok(!src.includes(`--scope diff ${CONT}`),
       'a literal --scope diff in an invocation discards an explicit --scope full/plan');
+    assert.ok(!src.includes('--scope diff"'),
+      'a literal --scope diff in a single-line invocation discards an explicit --scope full/plan');
   });
 });

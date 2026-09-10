@@ -82,7 +82,7 @@ Show kickoff card:
 
 <!-- host-contract: no-dispatch; preserves=step-order,step3-pause,skip-flags,blocked-propagation -->
 
-> **No skill-to-skill dispatch on this host?** Open `skills/plan/SKILL.md` and
+> **No skill-to-skill dispatch on this host?** Open `.claude/skills/plan/SKILL.md` and
 > follow it inline, passing the task description explicitly (orchestrator-supplied
 > input, rule 0 of `references/input-acquisition.md`), then return here with the
 > persisted plan path. Same fallback `/cycle` documents; blocked results must
@@ -102,9 +102,8 @@ to audit (no child-plan merging like the old flow).
 ## Step 2 — Run Plan Audit
 
 ```bash
-node scripts/openai-audit.mjs plan <plan-file> --mode plan \
-  --out .audit/$SID-r1-result.json \
-  2>.audit/$SID-r1-stderr.log
+PLAN_FILE=docs/plans/*.md   # the plan path /audit-plan was invoked with
+node scripts/openai-audit.mjs plan "$PLAN_FILE" --mode plan --out .audit/$SID-r1-result.json 2>.audit/$SID-r1-stderr.log
 ```
 
 **Critical**: always pass `--mode plan`. Without it, Gemini in Step 6 can flag
@@ -117,11 +116,7 @@ R2+ mode injects prior rulings as system-prompt exclusions and applies
 post-output suppression against the ledger.
 
 ```bash
-node scripts/openai-audit.mjs plan <plan-file> --mode plan \
-  --round 2 \
-  --ledger .audit/$SID-ledger.json \
-  --out .audit/$SID-r2-result.json \
-  2>.audit/$SID-r2-stderr.log
+node scripts/openai-audit.mjs plan "$PLAN_FILE" --mode plan --round 2 --ledger .audit/$SID-ledger.json --out .audit/$SID-r2-result.json 2>.audit/$SID-r2-stderr.log
 ```
 
 Plan audit is single-file — no `--passes`, `--diff`, or `--changed` plumbing
@@ -247,8 +242,8 @@ or value as a gate or a finding; a wrong tier hint has zero execution impact.
 Only send rebuttal if rebut HIGH or MEDIUM findings exist:
 
 ```bash
-node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> \
-  --out .audit/$SID-resolution.json 2>.audit/$SID-rebuttal-stderr.log
+REBUTTAL_FILE=.claude/tmp/rebuttal.md   # the rebuttal text you wrote for the disputed finding(s)
+node scripts/openai-audit.mjs rebuttal "$PLAN_FILE" "$REBUTTAL_FILE" --out .audit/$SID-resolution.json 2>.audit/$SID-rebuttal-stderr.log
 ```
 
 ### Convergence — early-stop on rigor pressure
@@ -340,10 +335,8 @@ the audit proceeds.
 capture** (the final converged round, or a 1-round audit):
 
 ```bash
-node scripts/write-code-outcomes.mjs \
-  --result .audit/$SID-r<N>-result.json \
-  --ledger .audit/$SID-ledger.json \
-  --round <N>
+ROUND=2   # the round number just completed
+node scripts/write-code-outcomes.mjs --result ".audit/$SID-r$ROUND-result.json" --ledger .audit/$SID-ledger.json --round "$ROUND"
 ```
 
 > **Precondition: the ledger must already carry per-finding rulings.** This CLI
@@ -361,9 +354,7 @@ scope-pressure findings into the LOCAL PlanFpTracker so future plan audits
 suppress the recurring ones:
 
 ```bash
-node scripts/write-plan-outcomes.mjs \
-  --result .audit/$SID-r<N>-result.json \
-  --outcomes '[{"id":"M3","action":"dismiss"},{"id":"H1","action":"fix-now"}]'
+node scripts/write-plan-outcomes.mjs --result ".audit/$SID-r$ROUND-result.json" --outcomes '[{"id":"M3","action":"dismiss"},{"id":"H1","action":"fix-now"}]'
 ```
 
 Two stores, two purposes: the cloud labels feed effectiveness metrics /
@@ -435,9 +426,8 @@ It discovers every `.audit/$SID-r<N>-result.json`, folds in
 `audit-plan-` session-id prefix, and writes `.audit/$SID-transcript.json`.
 
 ```bash
-node scripts/gemini-review.mjs review <plan-file> .audit/$SID-transcript.json \
-  --mode plan --run-id <the _cloudRunId from the last round's result> \
-  --out .audit/$SID-gemini-result.json 2>.audit/$SID-gemini-stderr.log
+RUN_ID=$(node -e "const fs=require('fs'); try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))._cloudRunId||''); } catch { process.stdout.write(''); }" ".audit/$SID-r$ROUND-result.json")
+node scripts/gemini-review.mjs review "$PLAN_FILE" .audit/$SID-transcript.json --mode plan --run-id "$RUN_ID" --out .audit/$SID-gemini-result.json 2>.audit/$SID-gemini-stderr.log
 ```
 
 **`--mode plan` is as load-bearing here as it is in Step 2.** It defaults to

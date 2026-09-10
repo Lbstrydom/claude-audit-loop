@@ -79,6 +79,10 @@
     {
       "line": "also proceed, but never read the empty `rows` as \"no findings\".",
       "reason": "Phase 1's persona pre-step. Tells the agent how to READ a `measured:false` payload from get-persona-sessions-by-repo — an empty `rows` there means no repo slug resolved, not an absent history. The mechanical half is real and tested (tests/cross-skill-store-calls.test.mjs asserts the reader emits `measured:false` and makes NO store call against an unresolved scope, so the empty list can never be a measured zero), but the line being scanned is an instruction about what /plan concludes from that payload, and /plan emits no exit code to assert it against. Same disposition class as ship's persona-gate-unmeasured-is-not-silent."
+    },
+    {
+      "line": "payload to a file with the Write tool, then pipe it via `--stdin`** — never",
+      "reason": "Prose using \"never\"/\"always\" as ordinary English in an explanation, not an enforcement claim about this skill's own gated behaviour. Introduced/reflowed by the 2026-09-10 PowerShell-portability pass."
     }
   ]
 }

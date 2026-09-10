@@ -121,9 +121,7 @@ For each candidate, prompt the operator:
 If confirmed:
 
 ```bash
-node scripts/debt-resolve.mjs abc12345 \
-  --rationale "fixed in commit <hash> — <brief description>" \
-  --run-id $SID
+node scripts/debt-resolve.mjs abc12345 --rationale "fixed in commit a1b2c3d — inlined the duplicate helper" --run-id $SID
 ```
 
 Exit codes: 0 = resolved, 1 = op error, 2 = entry not found / lock contention.

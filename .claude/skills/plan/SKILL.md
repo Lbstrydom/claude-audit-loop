@@ -236,8 +236,7 @@ uses the service-role key) — anon reads are now blocked at the policy
 boundary.
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 5 \
-  --select persona,focus,verdict,findings,p0_count,p1_count
+node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 5 --select persona,focus,verdict,findings,p0_count,p1_count
 ```
 
 Output shape: `{ok: true, cloud: true|false, measured, scope:{mode,slug}, rows: [...]}`.
@@ -668,16 +667,26 @@ Register in the cross-skill store so audit-plan/audit-code + ux-lock can link:
 
 Include the user's ORIGINAL task description as `taskText` in the SAME payload
 — that is what arm-eval scores the arms on. Persisting the plan and dispatching
-the capture is then one atomic call (no separate, skippable step):
+the capture is then one atomic call (no separate, skippable step). **Write the
+payload to a file with the Write tool, then pipe it via `--stdin`** — never
+inline it into a shell single-quoted string: the user's own task text can
+contain an apostrophe (e.g. "the user's original task"), and an apostrophe
+inside a single-quoted shell string terminates the string early, corrupting
+the call (same defect class the `--triage` payload note above already covers).
 
-```bash
-node scripts/cross-skill.mjs upsert-plan --json '{
-  "path": "docs/plans/<name>.md",
-  "skill": "plan",
-  "status": "draft",
-  "taskText": "<the user's original task description>"
-}'
-```
+1. Write `.claude/tmp/upsert-plan.json` with the Write tool:
+   ```json
+   {
+     "path": "docs/plans/*.md",
+     "skill": "plan",
+     "status": "draft",
+     "taskText": "the user's original task description, verbatim"
+   }
+   ```
+2. Pipe it in:
+   ```bash
+   cat .claude/tmp/upsert-plan.json | node scripts/cross-skill.mjs upsert-plan --stdin
+   ```
 
 Update status as implementation progresses.
 

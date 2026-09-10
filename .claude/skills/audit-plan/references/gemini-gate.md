@@ -131,9 +131,7 @@ find it) is worth the keystroke.
 ## Run the review
 
 ```bash
-node scripts/gemini-review.mjs review <plan-file> .audit/$SID-transcript.json \
-  --mode $AUDIT_MODE \
-  --out .audit/$SID-gemini-result.json 2>.audit/$SID-gemini-stderr.log
+node scripts/gemini-review.mjs review $PLAN_FILE .audit/$SID-transcript.json --mode $AUDIT_MODE --out .audit/$SID-gemini-result.json 2>.audit/$SID-gemini-stderr.log
 ```
 
 **`--mode` is not optional for a plan audit.** It defaults to `code`, and in
@@ -187,9 +185,7 @@ and `wrongly_dismissed` item — same peer relationship as GPT deliberation:
 4. **Re-run Gemini review** with updated transcript:
 
 ```bash
-node scripts/gemini-review.mjs review <plan-file> .audit/$SID-transcript-v2.json \
-  --mode $AUDIT_MODE \
-  --out .audit/$SID-gemini-result-v2.json 2>.audit/$SID-gemini-stderr-v2.log
+node scripts/gemini-review.mjs review $PLAN_FILE .audit/$SID-transcript-v2.json --mode $AUDIT_MODE --out .audit/$SID-gemini-result-v2.json 2>.audit/$SID-gemini-stderr-v2.log
 ```
 
 **CRITICAL**: Do NOT use GPT to verify Gemini's findings — GPT already

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "bundleVersion": "44b6988c0660b645",
+  "bundleVersion": "d541d1c3d5ecb424",
   "repoUrl": "https://github.com/Lbstrydom/claude-engineering-skills",
   "rawUrlBase": "https://raw.githubusercontent.com/Lbstrydom/claude-engineering-skills/main",
   "skills": {
@@ -54,14 +54,14 @@
     },
     "audit-code": {
       "path": "skills/audit-code/SKILL.md",
-      "sha": "d56bf7c31404",
-      "size": 46241,
+      "sha": "108effb1069b",
+      "size": 47333,
       "summary": "Iteratively audit code against a plan with GPT + Gemini final gate.",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "d56bf7c31404",
-          "size": 46241
+          "sha": "108effb1069b",
+          "size": 47333
         },
         {
           "relPath": "examples/contract-test-scaffold.md",
@@ -70,13 +70,13 @@
         },
         {
           "relPath": "references/debt-capture.md",
-          "sha": "d034ff149c42",
-          "size": 9326
+          "sha": "ae41c60ca101",
+          "size": 9328
         },
         {
           "relPath": "references/gemini-gate.md",
-          "sha": "b00c8360e0fd",
-          "size": 13279
+          "sha": "3fe39dadfbab",
+          "size": 13261
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -85,8 +85,8 @@
         },
         {
           "relPath": "references/ledger-format.md",
-          "sha": "6c1b1afa2567",
-          "size": 7645
+          "sha": "2fa3c03c5111",
+          "size": 7625
         },
         {
           "relPath": "references/prerequisite-ladder.md",
@@ -95,8 +95,8 @@
         },
         {
           "relPath": "references/r2-plus-mode.md",
-          "sha": "84472f97d437",
-          "size": 5547
+          "sha": "c741c0a1ff53",
+          "size": 5726
         },
         {
           "relPath": "references/verification-discipline.md",
@@ -107,19 +107,19 @@
     },
     "audit-plan": {
       "path": "skills/audit-plan/SKILL.md",
-      "sha": "7550381ced31",
-      "size": 25887,
+      "sha": "429e18739b84",
+      "size": 26250,
       "summary": "Iteratively audit a plan file (docs/plans/*.md) with GPT + Gemini final gate.",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "7550381ced31",
-          "size": 25887
+          "sha": "429e18739b84",
+          "size": 26250
         },
         {
           "relPath": "references/gemini-gate.md",
-          "sha": "b00c8360e0fd",
-          "size": 13279
+          "sha": "3fe39dadfbab",
+          "size": 13261
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -128,8 +128,8 @@
         },
         {
           "relPath": "references/ledger-format.md",
-          "sha": "6c1b1afa2567",
-          "size": 7645
+          "sha": "2fa3c03c5111",
+          "size": 7625
         },
         {
           "relPath": "references/prerequisite-ladder.md",
@@ -163,14 +163,14 @@
     },
     "click-test": {
       "path": "skills/click-test/SKILL.md",
-      "sha": "a4befc7e4ae5",
-      "size": 44573,
+      "sha": "b4d5b04111d1",
+      "size": 44606,
       "summary": "Structural DOM audit of a live app — walk every interactive element and",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "a4befc7e4ae5",
-          "size": 44573
+          "sha": "b4d5b04111d1",
+          "size": 44606
         },
         {
           "relPath": "references/browser-tool-detection.md",
@@ -191,27 +191,27 @@
     },
     "cycle": {
       "path": "skills/cycle/SKILL.md",
-      "sha": "0c4bb89c8602",
+      "sha": "45bd7ac4a0ef",
       "size": 38288,
       "summary": "End-to-end feature cycle orchestrator. Runs the full skill chain in",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "0c4bb89c8602",
+          "sha": "45bd7ac4a0ef",
           "size": 38288
         }
       ]
     },
     "explain": {
       "path": "skills/explain/SKILL.md",
-      "sha": "9590494a3faa",
-      "size": 16176,
+      "sha": "09d601d6af77",
+      "size": 16351,
       "summary": "Explain WHY a piece of code is structured the way it is. Synthesises",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "9590494a3faa",
-          "size": 16176
+          "sha": "09d601d6af77",
+          "size": 16351
         },
         {
           "relPath": "references/verification-discipline.md",
@@ -288,14 +288,14 @@
     },
     "persona-test": {
       "path": "skills/persona-test/SKILL.md",
-      "sha": "9248e5e99f96",
-      "size": 52854,
+      "sha": "77268622f2e8",
+      "size": 53539,
       "summary": "Persona-driven exploratory browser testing against a live URL.",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "9248e5e99f96",
-          "size": 52854
+          "sha": "77268622f2e8",
+          "size": 53539
         },
         {
           "relPath": "examples/report-and-debrief.md",
@@ -329,8 +329,8 @@
         },
         {
           "relPath": "references/interop.md",
-          "sha": "26fb81c7e23e",
-          "size": 3952
+          "sha": "82bfce5823ae",
+          "size": 3948
         },
         {
           "relPath": "references/persona-debrief-format.md",
@@ -339,21 +339,21 @@
         },
         {
           "relPath": "references/session-history.md",
-          "sha": "6eb292e0b432",
-          "size": 2334
+          "sha": "d347492a76fc",
+          "size": 2349
         }
       ]
     },
     "plan": {
       "path": "skills/plan/SKILL.md",
-      "sha": "bbb64a1275a5",
-      "size": 36738,
+      "sha": "044e16422194",
+      "size": 37286,
       "summary": "Unified architecture + UX planner with engineering principles. Auto-detects",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "bbb64a1275a5",
-          "size": 36738
+          "sha": "044e16422194",
+          "size": 37286
         },
         {
           "relPath": "examples/mermaid-blocks.md",
@@ -407,14 +407,14 @@
     },
     "ship": {
       "path": "skills/ship/SKILL.md",
-      "sha": "b241093c6d88",
-      "size": 89856,
+      "sha": "9aa497db5681",
+      "size": 90118,
       "summary": "Sync all project documentation, optionally update a plan, then commit and push to git.",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "b241093c6d88",
-          "size": 89856
+          "sha": "9aa497db5681",
+          "size": 90118
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -445,27 +445,27 @@
     },
     "skills": {
       "path": "skills/skills/SKILL.md",
-      "sha": "c68f009b9d35",
-      "size": 6106,
+      "sha": "4172abec9863",
+      "size": 6167,
       "summary": "Quick reference for every available skill in this repo — name, one-line",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "c68f009b9d35",
-          "size": 6106
+          "sha": "4172abec9863",
+          "size": 6167
         }
       ]
     },
     "ux-lock": {
       "path": "skills/ux-lock/SKILL.md",
-      "sha": "99b48fc4cc8f",
-      "size": 19170,
+      "sha": "e220c904076b",
+      "size": 19187,
       "summary": "Generate Playwright e2e specs. Two modes:",
       "files": [
         {
           "relPath": "SKILL.md",
-          "sha": "99b48fc4cc8f",
-          "size": 19170
+          "sha": "e220c904076b",
+          "size": 19187
         },
         {
           "relPath": "references/input-acquisition.md",
@@ -474,8 +474,8 @@
         },
         {
           "relPath": "references/lock-mode-spec-generation.md",
-          "sha": "5a35700b2dd0",
-          "size": 5805
+          "sha": "e063fe43949c",
+          "size": 5854
         },
         {
           "relPath": "references/scope-and-limitations.md",
@@ -489,8 +489,8 @@
         },
         {
           "relPath": "references/verify-mode-generation.md",
-          "sha": "7dbe5afcc99b",
-          "size": 12136
+          "sha": "bc3524b196c8",
+          "size": 12142
         }
       ]
     },
