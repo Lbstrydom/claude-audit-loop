@@ -12,7 +12,14 @@
  * (open `scripts/.sync-manifest.json`, diff each file) using the ALREADY
  * shipped `scripts/.sync-owned.json` sidecar + git-ignore state, via the one
  * ownership oracle `debt-review.mjs` already trusts
- * (`lib/upstream-ownership.mjs`'s `createUpstreamOwnershipOracle`).
+ * (`lib/upstream-ownership.mjs`'s `createUpstreamOwnershipOracle`) — PLUS a
+ * per-file content-hash check against `scripts/.sync-manifest.json`, because
+ * ownership alone is not provenance (`/audit-code` round 1, H1/H6/H7 —
+ * `docs/plans/sync-output-drift-classification.md`): a hand-edit to an owned
+ * `SKILL.md`, or a human rename onto an owned path, must not inherit "safe to
+ * commit" just because the PATH is one the sync manages. A path with no
+ * verifiable hash match is reported under "needs review", never folded into
+ * "safe to commit".
  *
  * REPORT-ONLY. Never stages or commits anything itself — see the "self-commit
  * rejected" rationale above; this tool exists so a human (or a pre-commit
@@ -30,16 +37,19 @@
  *
  * @module scripts/sync-status
  */
+import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertKnownFlags, ArgvError, finishAndExit } from './lib/cli-io.mjs';
 import { createUpstreamOwnershipOracle } from './lib/upstream-ownership.mjs';
+import { MANIFEST_RELATIVE_PATH, hashFile } from './lib/sync-manifest.mjs';
 import {
-  parsePorcelainZ, classifyDirtyEntries, buildCommitSuggestion,
+  parsePorcelainZ, classifyDirtyEntries, createProvenanceVerifier, buildCommitSuggestion,
 } from './lib/sync-status.mjs';
 
 const KNOWN_FLAGS = ['--format', '--repo-root', '--selfcheck-relocation'];
+const KNOWN_FORMATS = new Set(['json', 'text']);
 const G = '\x1b[32m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m', B = '\x1b[1m';
 
 // Relocation smoke: proves this file's imports survive being synced into a
@@ -47,6 +57,24 @@ const G = '\x1b[32m', Y = '\x1b[33m', D = '\x1b[2m', X = '\x1b[0m', B = '\x1b[1m
 // before `assertKnownFlags` — a probe that itself required valid flags could
 // never prove the file loads at all.
 if (process.argv.includes('--selfcheck-relocation')) { console.log('OK'); process.exit(0); }
+
+/**
+ * `scripts/.sync-manifest.json`'s `files` map (destination-relative path →
+ * `sha256:…`), or `null` when absent/unreadable/malformed. `null` must never
+ * be confused with `{}` — an empty map would assert "no path has a recorded
+ * hash", which is a claim about content, not about the file being missing.
+ *
+ * @param {string} repoRoot
+ * @returns {Record<string,string>|null}
+ */
+function loadManifestFiles(repoRoot) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(repoRoot, MANIFEST_RELATIVE_PATH), 'utf-8'));
+    return raw && typeof raw.files === 'object' && raw.files !== null ? raw.files : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * @param {string[]} argv
@@ -58,11 +86,26 @@ export function main(argv = process.argv, out = process.stdout, err = process.st
   assertKnownFlags(argv, KNOWN_FLAGS, { cli: 'sync-status' });
 
   const rest = argv.slice(2);
+  // Requires a value, unlike a bare `indexOf` lookup — a trailing `--repo-root`
+  // (nothing after it, or another flag) used to silently fall back to
+  // `process.cwd()` and an unsupported `--format` value silently fell through
+  // to the text path (`/audit-code` M3/M7). Malformed input now refuses
+  // rather than inspecting an unintended repository.
   const flagValue = (name) => {
     const i = rest.indexOf(name);
-    return i === -1 ? null : rest[i + 1];
+    if (i === -1) return undefined;
+    const v = rest[i + 1];
+    if (v === undefined || v.startsWith('--')) {
+      throw new ArgvError(`sync-status: ${name} requires a value`);
+    }
+    return v;
   };
-  const asJson = flagValue('--format') === 'json';
+
+  const formatRaw = flagValue('--format');
+  if (formatRaw !== undefined && !KNOWN_FORMATS.has(formatRaw)) {
+    throw new ArgvError(`sync-status: --format must be one of ${[...KNOWN_FORMATS].join('/')}, got "${formatRaw}"`);
+  }
+  const asJson = formatRaw === 'json';
   const repoRoot = path.resolve(flagValue('--repo-root') ?? process.cwd());
 
   // `--untracked-files=all`, not the default `normal`: an entirely-untracked
@@ -86,7 +129,7 @@ export function main(argv = process.argv, out = process.stdout, err = process.st
   const entries = parsePorcelainZ(status.stdout);
   if (entries.length === 0) {
     if (asJson) {
-      out.write(`${JSON.stringify({ repoRoot, syncOwned: [], other: [], clean: true }, null, 2)}\n`);
+      out.write(`${JSON.stringify({ repoRoot, syncOwned: [], needsReview: [], other: [], clean: true }, null, 2)}\n`);
     } else {
       out.write(`${G}Working tree is clean${X} — nothing to classify.\n`);
     }
@@ -95,11 +138,27 @@ export function main(argv = process.argv, out = process.stdout, err = process.st
 
   const candidates = entries.flatMap((e) => (e.origPath ? [e.path, e.origPath] : [e.path]));
   const oracle = createUpstreamOwnershipOracle(repoRoot, candidates);
-  const { syncOwned, other } = classifyDirtyEntries({ entries, isUpstreamOwned: oracle.isUpstreamOwned });
+  const manifestFiles = loadManifestFiles(repoRoot);
+  const isVerifiedSyncOutput = createProvenanceVerifier({
+    manifestFiles,
+    hashOf: (relPath) => {
+      try { return hashFile(path.join(repoRoot, relPath)); } catch { return null; }
+    },
+  });
+  const { syncOwned, needsReview, other } = classifyDirtyEntries({
+    entries, isUpstreamOwned: oracle.isUpstreamOwned, isVerifiedSyncOutput,
+  });
+  // Display lists are the CURRENT path per entry; the commit needs BOTH sides
+  // of a rename (`/audit-code` round 2 H2) so the old path's deletion lands
+  // in the same commit as the new path's addition.
+  const syncOwnedPaths = syncOwned.map((e) => e.path);
+  const needsReviewPaths = needsReview.map((e) => e.path);
+  const otherPaths = other.map((e) => e.path);
 
   if (asJson) {
     out.write(`${JSON.stringify({
-      repoRoot, syncOwned, other,
+      repoRoot, syncOwned: syncOwnedPaths, needsReview: needsReviewPaths, other: otherPaths,
+      manifestFound: manifestFiles !== null,
       degraded: oracle.degraded, partial: oracle.partial, blindTo: oracle.blindTo,
     }, null, 2)}\n`);
     return 0;
@@ -115,20 +174,32 @@ export function main(argv = process.argv, out = process.stdout, err = process.st
   } else if (oracle.partial) {
     out.write(`  ${Y}⚠ partial classification${X} ${D}(not examined: ${oracle.blindTo.join(', ')})${X}\n\n`);
   }
-
-  if (syncOwned.length > 0) {
-    out.write(`  ${G}Sync-owned${X} (${syncOwned.length}) — written by the last sync, safe to commit as-is:\n`);
-    for (const p of syncOwned) out.write(`    ${D}${p}${X}\n`);
-    out.write(`\n  ${buildCommitSuggestion(syncOwned)}\n\n`);
+  if (manifestFiles === null) {
+    out.write(
+      `  ${Y}⚠ no scripts/.sync-manifest.json${X} ${D}— cannot verify owned paths were unmodified since `
+      + `the last sync, so they are listed under "needs review" rather than "safe to commit".${X}\n\n`,
+    );
   }
 
-  if (other.length > 0) {
-    out.write(`  ${B}Not attributed to the sync${X} (${other.length}):\n`);
-    for (const p of other) out.write(`    ${p}\n`);
+  if (syncOwnedPaths.length > 0) {
+    out.write(`  ${G}Sync-owned${X} (${syncOwnedPaths.length}) — content verified unchanged since the last sync, safe to commit as-is:\n`);
+    for (const p of syncOwnedPaths) out.write(`    ${D}${p}${X}\n`);
+    out.write(`\n  ${buildCommitSuggestion(syncOwned, { repoRoot })}\n\n`);
+  }
+
+  if (needsReviewPaths.length > 0) {
+    out.write(`  ${Y}Needs review${X} (${needsReviewPaths.length}) — sync-managed path, but content changed since the last sync (or unverifiable):\n`);
+    for (const p of needsReviewPaths) out.write(`    ${p}\n`);
     out.write('\n');
   }
 
-  if (syncOwned.length === 0 && other.length === 0) {
+  if (otherPaths.length > 0) {
+    out.write(`  ${B}Not attributed to the sync${X} (${otherPaths.length}):\n`);
+    for (const p of otherPaths) out.write(`    ${p}\n`);
+    out.write('\n');
+  }
+
+  if (syncOwnedPaths.length === 0 && needsReviewPaths.length === 0 && otherPaths.length === 0) {
     out.write(`  ${D}nothing to report${X}\n`);
   }
 

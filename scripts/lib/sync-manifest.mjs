@@ -387,6 +387,53 @@ export function writeManifest(rootDir, files, opts = {}) {
   return { manifest, path: manifestPath, skipped: false };
 }
 
+/**
+ * Add or overwrite specific hash entries in an already-written manifest's
+ * `files` map, then rewrite it. For paths whose final bytes are only known
+ * AFTER the manifest write above — `sync-to-repos.mjs`'s own bookkeeping
+ * (`.sync-receipt.json`, `scripts/.sync-owned.json`) is computed and written
+ * later in the same run — so this is a deliberate follow-up patch, not a
+ * reorder of the original write (`/audit-code` round 2 M1,
+ * docs/plans/sync-output-drift-classification.md): without it,
+ * `sync-status.mjs` had no independent record to verify those two paths
+ * against and trusted their PATH alone, the exact gap the manifest-hash
+ * check closes for every other synced file.
+ *
+ * No self-reference: this never hashes the manifest file itself (excluded
+ * from `files` the same way `computeFileHashes` already excludes it), and
+ * the two paths patched in here are never fed back into anything that
+ * derives ITS OWN content from the manifest — `buildOwnedSidecar` already
+ * ran, off the in-memory file map, before this is ever called.
+ *
+ * Best-effort by design: a failure here must not fail a sync whose payload
+ * already landed. Returns `false` (never throws) on any failure — missing
+ * manifest, unreadable extra path, or a write error — so the caller can log
+ * it without a try/catch of its own.
+ *
+ * @param {string} manifestPath — absolute path to the consumer's manifest
+ * @param {Array<{rel: string, abs: string}>} extraPaths — each hashed from
+ *   `abs`; an unreadable `abs` is silently skipped rather than failing the
+ *   whole patch, since the OTHER path may still be perfectly hashable.
+ * @returns {boolean} true on success
+ */
+export function patchManifestWithExtraHashes(manifestPath, extraPaths) {
+  try {
+    const current = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const files = { ...current.files };
+    for (const { rel, abs } of extraPaths) {
+      // Same normalisation `computeFileHashes` applies to every other key —
+      // manifest keys are compared against git's own forward-slash porcelain
+      // paths (`createProvenanceVerifier`), so a Windows-style `rel` would
+      // silently never match (Gemini final review, /audit-code).
+      try { files[rel.replace(/\\/g, '/')] = hashFile(abs); } catch { /* leave unset — see docstring */ }
+    }
+    atomicWriteFileSync(manifestPath, JSON.stringify({ ...current, files }, null, 2) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hashesEqual(a, b) {
   const ak = Object.keys(a).sort();
   const bk = Object.keys(b).sort();

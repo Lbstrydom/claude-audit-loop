@@ -25,7 +25,7 @@ import {
 } from './lib/consumer-repos.mjs';
 import {
   writeManifest, detectOwnershipRegression, getGitMeta, buildConsumerManifest, listDirtyPaths,
-  findUndeliveredEntries,
+  findUndeliveredEntries, patchManifestWithExtraHashes,
 } from './lib/sync-manifest.mjs';
 import { buildOwnedSidecar, OWNED_SIDECAR_RELATIVE_PATH } from './lib/sync-owned-sidecar.mjs';
 import { collectImportClosure } from './lib/module-graph.mjs';
@@ -440,8 +440,7 @@ const CORE_ENTRY = [
   // consumer layout had, which is the helper-path-drift class filed as
   // wine-cellar-app 2026-07-19 §4 and caught by /ship Step 6.8's first real run.
   'scripts/check-doc-citations.mjs',
-  // Consumer git-status ownership triage; rationale in the file's own header.
-  'scripts/sync-status.mjs',
+  'scripts/sync-status.mjs', // consumer git-status ownership triage; see the file's own header
   // Local weekly-maintenance replica of the 5 GH Actions cron workflows
   // (docs/runbooks/local-maintenance-checks.md) — opt-in, default-OFF, invoked
   // opportunistically from the pre-push hook. Spawns each replicated check
@@ -2451,6 +2450,10 @@ async function main() {
       }
     }
 
+    // Record the receipt + sidecar's own hashes too (patchManifestWithExtraHashes's header, /audit-code round 2 M1).
+    if (!DRY_RUN && manifestWritten) patchManifestWithExtraHashes(priorManifestPath, [
+      { rel: OWNED_SIDECAR_RELATIVE_PATH, abs: path.join(repo.path, OWNED_SIDECAR_RELATIVE_PATH) }, { rel: RECEIPT_PATH, abs: receiptPath },
+    ]);
     const parts = [];
     if (repoNew > 0) parts.push(`${G}+${repoNew} new${X}`);
     if (repoUpdated > 0) parts.push(`${Y}~${repoUpdated} updated${X}`);
@@ -2467,11 +2470,9 @@ async function main() {
     if (repoErrors > 0) parts.push(`${R}${repoErrors} errors${X}`);
     console.log(`  ${parts.join('  ')}`);
 
-    if (!DRY_RUN) {
-      const line = describeSafeToCommit({ created: receiptCreated, updated: receiptUpdated,
-        sidecarWritten: manifestWritten, statusCliRel: sourceRelToDestRel('scripts/sync-status.mjs') }, { G, D, X });
-      if (line) console.log(line);
-    }
+    const safeLine = !DRY_RUN && describeSafeToCommit({ created: receiptCreated, updated: receiptUpdated,
+      sidecarWritten: manifestWritten, statusCliRel: sourceRelToDestRel('scripts/sync-status.mjs'), repoRoot: repo.path }, { G, D, X });
+    if (safeLine) console.log(safeLine);
 
     // Surface genuinely-unresolved imports — a path-like specifier the graph
     // walker could not resolve is a real missing dependency that would crash
