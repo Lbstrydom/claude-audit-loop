@@ -196,6 +196,18 @@
     {
       "line": "| `references/browser-tool-detection.md` | The browser-driver contract — capabilities, driver table, selection order, minimum sets, degraded/blocked evidence. | Phase 1 tool selection fails on first try, OR the user is on Windows and Playwright MCP tools aren't appearing. |",
       "reason": "A \"Reference files\" index-table row: the middle column is the shared reference's canonical summary (byte-checked against its frontmatter by skills:check, not an enforcement claim of this skill's own), and the right column is a \"read when\" trigger condition, both descriptive."
+    },
+    {
+      "line": "# 2. Pipe it on stdin — a pipe passes bytes, never shell-parsed text, and",
+      "reason": "Prose using \"never\"/\"always\" as ordinary English in an explanation, not an enforcement claim about this skill's own gated behaviour. Introduced/reflowed by the 2026-09-10 PowerShell-portability pass."
+    },
+    {
+      "line": "can contain quotes or shell metacharacters. Always write the payload to a JSON file with the **Write tool** — never a",
+      "reason": "Prose using \"never\"/\"always\" as ordinary English in an explanation, not an enforcement claim about this skill's own gated behaviour. Introduced/reflowed by the 2026-09-10 PowerShell-portability pass."
+    },
+    {
+      "line": "under `.audit/`, never `/tmp/` (the two disagree on Windows — see the `.audit/`",
+      "reason": "Prose using \"never\"/\"always\" as ordinary English in an explanation, not an enforcement claim about this skill's own gated behaviour. Introduced/reflowed by the 2026-09-10 PowerShell-portability pass."
     }
   ]
 }

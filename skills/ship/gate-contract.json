@@ -592,6 +592,22 @@
     {
       "line": "latest, and the gate re-flags what it was just told. When",
       "reason": "Continuation of the line above, completing the unclearable-by-construction description. Same disposition and the same enforcing oracle and tests."
+    },
+    {
+      "line": "node scripts/ux-lock-run.mjs spec --specs 'tests/e2e/*.spec.js' --commit \"$(git rev-parse HEAD)\" --run-context ship-gate",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
+    },
+    {
+      "line": "GATE=not-run                     # passed | converged | waived | not-run — see AI-Gate above",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
+    },
+    {
+      "line": "node scripts/ship-commit.mjs --message-file \".claude/tmp/ship-commit-msg-$EPOCH.txt\" --skill ship --models \"$MODELS\" --gate \"$GATE\" --expect-head \"$SHIP_HEAD\" --expect-branch \"$SHIP_BRANCH\" --path scripts/lib/*.mjs --path tests/*.test.mjs",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
+    },
+    {
+      "line": "node scripts/ship-commit.mjs --message-file \".claude/tmp/ship-commit-msg-$EPOCH.txt\" --skill ship --models \"$MODELS\" --gate \"$GATE\" --expect-head \"$SHIP_HEAD\" --expect-branch \"$SHIP_BRANCH\" --path scripts/foo.mjs --path tests/foo.test.mjs",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
     }
   ]
 }

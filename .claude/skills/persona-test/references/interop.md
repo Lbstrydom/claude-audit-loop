@@ -45,8 +45,7 @@ exploration) it queries via the cross-skill bridge (service-role only
 post-RLS-hardening), letting the bridge resolve the repo:
 
 ```bash
-node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 5 \
-  --select persona,focus,verdict,findings,debrief_md
+node scripts/cross-skill.mjs get-persona-sessions-by-repo --limit 5 --select persona,focus,verdict,findings,debrief_md
 ```
 
 Filter for sessions whose `focus` overlaps with the feature being planned.

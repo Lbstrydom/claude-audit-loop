@@ -395,6 +395,10 @@ export const BASELINE = new Set([
   'skills/ship/SKILL.md→tests/foo.test.mjs',
   '.claude/skills/ship/SKILL.md→scripts/foo.mjs',
   '.claude/skills/ship/SKILL.md→tests/foo.test.mjs',
+  // Same example line, verbatim, inside its gate-contract.json ignoredCandidates
+  // entry (the `line` field must byte-match the SKILL.md text to disposition it).
+  'skills/ship/gate-contract.json→scripts/foo.mjs',
+  'skills/ship/gate-contract.json→tests/foo.test.mjs',
   // Consumer-side artefacts this repo describes but never contains: a transient
   // sync lockfile, a per-machine untracked repo list, and a consumer's own test
   // entry point. Never existed here and never will (verified via git log).

@@ -150,8 +150,11 @@ single-quoted shell argument:**
 ```bash
 # 1. Write .audit/add-persona.json with the Write tool (NOT a shell heredoc):
 #    {"name":"…","description":"…","appUrl":"…","appName":null}
-# 2. Feed it on stdin — the redirect passes bytes, never shell-parsed text:
-node scripts/cross-skill.mjs add-persona --stdin < .audit/add-persona.json
+# 2. Pipe it on stdin — a pipe passes bytes, never shell-parsed text, and
+#    (unlike `<` redirection, which PowerShell does not support) `cat | …`
+#    parses the same way in bash and PowerShell (`cat` is a built-in
+#    PowerShell alias for `Get-Content`):
+cat .audit/add-persona.json | node scripts/cross-skill.mjs add-persona --stdin
 ```
 
 > **Why a file.** `name` and `description` are free text the user typed. An
@@ -307,8 +310,10 @@ Otherwise, this is non-negotiable — the LLM does not pick the device.
 Run from the consumer-repo root:
 
 ```bash
-node scripts/lib/device-presets.mjs prep "<persona.description or ad-hoc persona_input>" [--device <override-preset>]
+node scripts/lib/device-presets.mjs prep "the persona's description, or ad-hoc persona_input text"
 ```
+
+Add `--device PRESET` only when `$ARGUMENTS` contained an explicit override preset (see below).
 
 Pass `--device <preset>` only when `$ARGUMENTS` contained an explicit
 
@@ -541,11 +546,10 @@ print usage and STOP.
 ### Step C2 — Delegate to the runner
 
 ```bash
-node scripts/persona-consistency-run.mjs \
-  --canary <name> \
-  --url <url> \
-  [--out .persona-test/sessions/<SID>.json]
+node scripts/persona-consistency-run.mjs --canary CANARY_NAME --url "https://your-app.example.com"
 ```
+
+Optional: `--out .persona-test/sessions/$SID.json` to write the session artifact to a specific path.
 
 The runner:
 1. Resolves `surfaces.json` from `.persona-test/` → `<repo-root>/` → `src/` (first match wins).
@@ -870,24 +874,29 @@ finding being corrected** (canonical contract, so the hash matches the audit
 side byte-for-byte — `personaFindingHash()` is the single source). **Never
 inline free text into a shell-quoted `--json '...'` string** — `matchRationale`
 and other text fields come from model-composed or persona-observed prose that
-can contain quotes or shell metacharacters. Always write the payload to a
-temp JSON file and pipe it via `--stdin` (same convention as `/brainstorm`):
+can contain quotes or shell metacharacters. Always write the payload to a JSON file with the **Write tool** — never a
+shell heredoc (same convention as the `add-persona` recipe above) — and pipe
+it via `--stdin` (same convention as `/brainstorm`). Session artifacts live
+under `.audit/`, never `/tmp/` (the two disagree on Windows — see the `.audit/`
+vs `/tmp/` note elsewhere in this repo):
 
-```bash
-cat > /tmp/correlation-repair.json <<'EOF'
-{
-  "personaSessionId": "<sessionId from Phase 6>",
-  "personaFindingHash": "<personaFindingHash() of the persona finding>",
-  "personaSeverity": "P0|P1",
-  "auditFindingId": "<matching audit_findings.id, or omit if none>",
-  "auditRunId": "<the matched run id, or omit>",
-  "correlationType": "confirmed_hit | audit_missed | severity_understated | audit_false_positive | severity_overstated",
-  "matchScore": 0.0,
-  "matchRationale": "<one line>"
-}
-EOF
-node scripts/cross-skill.mjs record-correlation --stdin < /tmp/correlation-repair.json
-```
+1. Write `.audit/correlation-repair.json` with the Write tool:
+   ```json
+   {
+     "personaSessionId": "the sessionId from Phase 6",
+     "personaFindingHash": "personaFindingHash() of the persona finding",
+     "personaSeverity": "P0|P1",
+     "auditFindingId": "the matching audit_findings.id, or omit if none",
+     "auditRunId": "the matched run id, or omit",
+     "correlationType": "confirmed_hit | audit_missed | severity_understated | audit_false_positive | severity_overstated",
+     "matchScore": 0.0,
+     "matchRationale": "one line"
+   }
+   ```
+2. Pipe it in:
+   ```bash
+   cat .audit/correlation-repair.json | node scripts/cross-skill.mjs record-correlation --stdin
+   ```
 
 - Idempotent: the writer dedupes on `(persona_session_id, persona_finding_hash,
   audit_finding_id)`, so re-running is safe. Supplying a real `auditFindingId`

@@ -89,15 +89,12 @@ mkdir -p .audit
 #    Read JSON with node, never jq — node is guaranteed by the runtime contract,
 #    jq is not, and is absent from check-deps.
 node scripts/cross-skill.mjs resolve-repo-identity > .audit/repo-identity.json
-node scripts/cross-skill.mjs get-active-refresh-id \
-  --repo-uuid "$(node -p "require('./.audit/repo-identity.json').repoUuid")" \
-  > .audit/active-refresh.json
+node scripts/cross-skill.mjs get-active-refresh-id --repo-uuid "$(node -p "require('./.audit/repo-identity.json').repoUuid")" > .audit/active-refresh.json
 # 2. Fetch top-N symbols, CARRYING the refresh id forward (env-tunable:
 #    ARCH_AUDIT_FULL_TOPN, default 200). Capturing it is the point — printing
 #    it for a human to retype is how the two commands drift apart.
 REFRESH_ID=$(node -p "require('./.audit/active-refresh.json').refreshId")
-node scripts/cross-skill.mjs list-symbols-for-snapshot \
-  --json "{\"refreshId\":\"$REFRESH_ID\",\"limit\":200}"
+node scripts/cross-skill.mjs list-symbols-for-snapshot --json "{\"refreshId\":\"$REFRESH_ID\",\"limit\":200}"
 ```
 
 Format the rows as a `## Symbol catalogue (top N by domain)` section
@@ -157,10 +154,8 @@ advertise was accepted and then dropped.
 
 ```bash
 SCOPE=diff   # or plan / full, per the table above and the user's request
-node scripts/openai-audit.mjs code <plan-file> \
-  --scope "$SCOPE" \
-  --out .audit/$SID-r1-result.json \
-  2>.audit/$SID-r1-stderr.log
+PLAN_FILE=docs/plans/*.md   # the plan path /audit-code was invoked with
+node scripts/openai-audit.mjs code "$PLAN_FILE" --scope "$SCOPE" --out .audit/$SID-r1-result.json 2>.audit/$SID-r1-stderr.log
 ```
 
 ### Round 2+
@@ -176,20 +171,27 @@ tool pre-pass rules: `references/r2-plus-mode.md`.
 # commit). The CLI's `[scope] base resolved to <ref>` log is the source of
 # truth. Pass --base/clusterStartRef instead when separating audited-from-
 # unaudited across a commit boundary.
-BASE=$([ -n "$(git status --porcelain)" ] && echo HEAD || echo HEAD~1)
+git status --porcelain
+```
+
+Non-empty output above → `BASE=HEAD` (dirty tree). Empty output → `BASE=HEAD~1` (clean, use last commit).
+
+```bash
+BASE=HEAD
 git diff "$BASE" -- . > .audit/$SID-diff.patch
-# Include UNTRACKED new files — `git diff` omits them, so without this a brand-new file
-# reaches the auditor with NO [CHANGED] annotation (it's still read in full via --files, but
-# loses the diff focus markers). Append each as a /dev/null→file "new file" diff.
-git ls-files --others --exclude-standard -z \
-  | xargs -0 -r -I{} git diff --no-index --no-color -- /dev/null "{}" >> .audit/$SID-diff.patch 2>/dev/null || true
-node scripts/openai-audit.mjs code <plan-file> \
-  --round 2 \
-  --ledger .audit/$SID-ledger.json \
-  --diff .audit/$SID-diff.patch \
-  --changed <csv> --files <csv> --passes <csv> \
-  --out .audit/$SID-r2-result.json \
-  2>.audit/$SID-r2-stderr.log
+```
+
+**Include UNTRACKED new files** — `git diff` omits them, so without this a brand-new file reaches the auditor with NO `[CHANGED]` annotation (it's still read in full via `--files`, but loses the diff focus markers). Append each as a new-file diff against `/dev/null`. **POSIX shell only** (Git Bash on Windows) — `xargs` and `/dev/null` have no native PowerShell equivalent; run this step in a bash-capable shell even on a Windows/Copilot host:
+
+```bash
+git ls-files --others --exclude-standard -z | xargs -0 -r -I{} git diff --no-index --no-color -- /dev/null "{}" >> .audit/$SID-diff.patch 2>/dev/null || true
+```
+
+```bash
+CHANGED="scripts/*.mjs,tests/*.test.mjs"   # files with real diff content this round
+FILES="$CHANGED"                            # + any dependent you also want in scope
+PASSES="sustainability"                     # e.g. sustainability,backend — per r2-plus-mode.md
+node scripts/openai-audit.mjs code "$PLAN_FILE" --round 2 --ledger .audit/$SID-ledger.json --diff .audit/$SID-diff.patch --changed "$CHANGED" --files "$FILES" --passes "$PASSES" --out .audit/$SID-r2-result.json 2>.audit/$SID-r2-stderr.log
 ```
 
 ### Requirements rubric (automatic)
@@ -339,8 +341,8 @@ Each finding has `is_mechanical: true/false` from GPT:
 Only send rebuttal if rebut HIGH or MEDIUM findings exist:
 
 ```bash
-node scripts/openai-audit.mjs rebuttal <plan-file> <rebuttal-file> \
-  --out .audit/$SID-resolution.json 2>.audit/$SID-rebuttal-stderr.log
+REBUTTAL_FILE=.claude/tmp/rebuttal.md   # the rebuttal text you wrote for the disputed finding(s)
+node scripts/openai-audit.mjs rebuttal "$PLAN_FILE" "$REBUTTAL_FILE" --out .audit/$SID-resolution.json 2>.audit/$SID-rebuttal-stderr.log
 ```
 
 ### Convergence
@@ -425,10 +427,8 @@ the **final converged round** of a standalone audit, a **1-round** audit, or
 `/cycle`, finalization is fully covered — skip this.)
 
 ```bash
-node scripts/write-code-outcomes.mjs \
-  --result .audit/$SID-r<N>-result.json \
-  --ledger .audit/$SID-ledger.json \
-  --round <N>
+ROUND=2   # the round number just completed
+node scripts/write-code-outcomes.mjs --result ".audit/$SID-r$ROUND-result.json" --ledger .audit/$SID-ledger.json --round "$ROUND"
 ```
 
 Both the automatic path and this CLI delegate to the same shared
@@ -728,8 +728,9 @@ Fire it **in the background, non-blocking** (it takes minutes; it must NEVER del
 gate the audit result):
 
 ```bash
-node scripts/solo-control-audit.mjs run --model claude-sonnet-5 \
-  && node scripts/solo-control-audit.mjs run --model claude-fable-5   # run backgrounded
+node scripts/solo-control-audit.mjs run --model claude-sonnet-5
+node scripts/solo-control-audit.mjs run --model claude-fable-5
+# run each backgrounded / in its own terminal — they're independent, not chained
 ```
 
 The script **self-gates on the toggle** (no-ops when the shadow is off) and is
@@ -747,8 +748,8 @@ its findings are the highest-signal input) so recommendations are grounded in wh
 the audit actually found:
 
 ```bash
-node scripts/cross-skill.mjs recommend-skills \
-  --findings .audit/$SID-r<final>-result.json --just-ran audit-code --format human
+FINAL_ROUND=2   # the last round actually run
+node scripts/cross-skill.mjs recommend-skills --findings ".audit/$SID-r$FINAL_ROUND-result.json" --just-ran audit-code --format human
 ```
 
 Print the card verbatim if non-empty; **if it's empty, say nothing** (a backend-only
@@ -810,15 +811,25 @@ being dropped and the builder warns on stderr.
 # $(...), which discards the failure and leaves RUN_ID empty with no visible
 # error. fs.readFileSync + JSON.parse (not require — this is a data file, not a
 # module) with a try/catch fails safe to an empty RUN_ID rather than crashing.
-# <N> = the last round actually run (matches the `-r<N>-result.json` convention
-# Step 2/Step 3.5b/Step 6.6 already use — NOT a bare `-result.json`).
-RUN_ID=$(node -e "const fs=require('fs'); try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))._cloudRunId||''); } catch { process.stdout.write(''); }" ".audit/$SID-r<N>-result.json")
+# ROUND = the last round actually run (matches the `-r$ROUND-result.json`
+# convention Step 2/Step 3.5b/Step 6.6 already use — NOT a bare `-result.json`).
+ROUND=2
+RUN_ID=$(node -e "const fs=require('fs'); try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))._cloudRunId||''); } catch { process.stdout.write(''); }" ".audit/$SID-r$ROUND-result.json")
 # gemini-review.mjs itself now warns loudly (2026-07-26) when cloud is enabled
 # but --run-id is absent — if you see that warning, the extraction above
 # failed; don't ignore it. Omit --run-id only when cloud is genuinely off.
-node scripts/gemini-review.mjs review <plan-file> .audit/$SID-transcript.json \
-  --out .audit/$SID-gemini-result.json \
-  ${RUN_ID:+--run-id "$RUN_ID"} 2>.audit/$SID-gemini-stderr.log
+```
+
+If `RUN_ID` is non-empty:
+
+```bash
+node scripts/gemini-review.mjs review "$PLAN_FILE" .audit/$SID-transcript.json --out .audit/$SID-gemini-result.json --run-id "$RUN_ID" 2>.audit/$SID-gemini-stderr.log
+```
+
+Otherwise (cloud genuinely off — `RUN_ID` empty):
+
+```bash
+node scripts/gemini-review.mjs review "$PLAN_FILE" .audit/$SID-transcript.json --out .audit/$SID-gemini-result.json 2>.audit/$SID-gemini-stderr.log
 ```
 
 Verdict handling: `APPROVE` → done. `CONCERNS` → deliberate, fix, re-run

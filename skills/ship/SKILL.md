@@ -380,9 +380,10 @@ them through the deterministic runner with the ship `run_context` so the
 `regression_spec_runs` rows are tagged correctly and written without the model:
 
 ```bash
-node scripts/ux-lock-run.mjs spec --specs 'tests/e2e/*.spec.js' \
-  --commit <sha> --run-context ship-gate [--url <base-url>]
+node scripts/ux-lock-run.mjs spec --specs 'tests/e2e/*.spec.js' --commit "$(git rev-parse HEAD)" --run-context ship-gate
 ```
+
+Optional: `--url BASE_URL` when the specs need a non-default base URL.
 
 A non-zero exit means a locked contract broke — treat as a `test-failure`
 block reason. Cloud off → it still runs + prints; Playwright missing → exit 5
@@ -779,7 +780,7 @@ belonging to another consumer's store, run the transition with that store's DSN
 in the environment:
 
 ```bash
-node scripts/cross-skill.mjs upstream ack --id <the full uuid>     # or fix --commit / wont-fix
+node scripts/cross-skill.mjs upstream ack --id ISSUE_UUID     # or fix --commit / wont-fix
 ```
 
 Closing a report needs the **FULL uuid**, not a prefix: the store resolves a
@@ -1164,10 +1165,10 @@ entry is source-only and does not propagate to the consumer managed block.
 Stage relevant files by name (be specific):
 
 ```bash
-git add <list of changed source files>
+git add scripts/lib/*.mjs tests/*.test.mjs   # your changed source files
 git add status.md
-git add CLAUDE.md AGENTS.md    # only if modified
-git add docs/plans/<plan>.md   # only if plan was updated
+git add CLAUDE.md AGENTS.md          # only if modified
+git add docs/plans/*.md              # only if plan was updated
 # NOTE: do NOT `git add scripts/.sync-manifest.json` in the source repo — it's
 # gitignored here (Category A; regenerated every sync). Consumers track their own.
 # NOTE: do NOT `git add dashboard/index.html` — it and dashboard/telemetry.html
@@ -1278,13 +1279,12 @@ confirmation prompts.
 # ran one), and pass that exact pair to every ship-commit invocation in the run.
 SHIP_HEAD=$(git rev-parse HEAD)
 SHIP_BRANCH=$(git symbolic-ref --quiet --short HEAD)   # empty ⇒ detached
+EPOCH=$(date +%s)
+MODELS="claude-sonnet-5,gpt-5.6"   # the models that actually did the work this ship
+GATE=not-run                     # passed | converged | waived | not-run — see AI-Gate above
 
-node scripts/ship-commit.mjs \
-  --message-file .claude/tmp/ship-commit-msg-<epoch>.txt \
-  --skill ship --models <csv> --gate <value> \
-  --expect-head "$SHIP_HEAD" --expect-branch "$SHIP_BRANCH" \
-  --path <file> --path <file>          # one per file you are shipping
-git push origin <current-branch>
+node scripts/ship-commit.mjs --message-file ".claude/tmp/ship-commit-msg-$EPOCH.txt" --skill ship --models "$MODELS" --gate "$GATE" --expect-head "$SHIP_HEAD" --expect-branch "$SHIP_BRANCH" --path scripts/lib/*.mjs --path tests/*.test.mjs
+git push origin "$SHIP_BRANCH"
 ```
 
 > **Why identity is a precondition and not a warning.** A concurrent session can
@@ -1315,11 +1315,7 @@ Add one `--path <file>` per file you
 are shipping:
 
 ```bash
-node scripts/ship-commit.mjs \
-  --message-file .claude/tmp/ship-commit-msg-<epoch>.txt \
-  --skill ship --models <csv> --gate <value> \
-  --expect-head "$SHIP_HEAD" --expect-branch "$SHIP_BRANCH" \
-  --path scripts/foo.mjs --path tests/foo.test.mjs
+node scripts/ship-commit.mjs --message-file ".claude/tmp/ship-commit-msg-$EPOCH.txt" --skill ship --models "$MODELS" --gate "$GATE" --expect-head "$SHIP_HEAD" --expect-branch "$SHIP_BRANCH" --path scripts/foo.mjs --path tests/foo.test.mjs
 ```
 
 This commits those paths' worktree contents and leaves every other index

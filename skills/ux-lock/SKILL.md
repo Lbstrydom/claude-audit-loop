@@ -183,10 +183,9 @@ sequence (run → hand-parse → `record-regression-spec` → `record-regression
 that left the tables empty whenever a step was skipped or mis-parsed:
 
 ```bash
-node scripts/ux-lock-run.mjs spec \
-  --spec tests/e2e/<new-spec>.spec.js \
-  --commit <sha> --run-context manual \
-  --source-kind manual [--url <base-url>] --strict-selectors
+SPEC=tests/e2e/*.spec.js
+COMMIT=$(git rev-parse HEAD)
+node scripts/ux-lock-run.mjs spec --spec "$SPEC" --commit "$COMMIT" --run-context manual --source-kind manual --strict-selectors
 ```
 
 > **Diagnosis (docs/plans/skill-efficacy-census.md Phase 1, 2026-08-22)**: a
@@ -278,9 +277,8 @@ old model-remembered run → parse → `record-plan-verify-run` →
 `record-plan-verify-items` sequence:
 
 ```bash
-node scripts/ux-lock-run.mjs verify \
-  --plan docs/plans/<plan>.md --spec tests/e2e/<verify-spec>.spec.js \
-  --plan-id <plan-uuid> --commit <sha> --url <base-url> --strict-selectors
+COMMIT=$(git rev-parse HEAD)
+node scripts/ux-lock-run.mjs verify --plan docs/plans/*.md --spec tests/e2e/verify-*.spec.js --plan-id PLAN_UUID --commit "$COMMIT" --url BASE_URL --strict-selectors
 ```
 
 (`--strict-selectors`: verify specs are newly generated, so the selector-policy

@@ -103,19 +103,19 @@ separate `record-regression-spec` / `record-regression-spec-run` calls, no
 hand-parsing, no shell-quoting of free text:
 
 ```bash
-node scripts/ux-lock-run.mjs spec \
-  --spec tests/e2e/<name>.spec.js \
-  --commit <sha> --run-context ux-lock \
-  --source-kind audit-code-fix \  # or persona-test-p0 | persona-test-p1 | manual
-  --strict-selectors              # newly generated spec → lint FAILS (exit 6), not warns
-  # [--specs <glob>]   run + group a suite by spec_path (one run row per file)
-  #                    (globs are Playwright-expanded — NOT combinable with
-  #                    --strict-selectors, which needs explicit paths to scan
-  #                    before anything executes; warn mode reconciles post-run)
-  # [--url <base-url>] exported to the spec as E2E_BASE_URL
-  # [--no-register]    record nothing (spec is unknown / throwaway)
-  # [--test-root <d>] [--alias prefix=dir]...  selector-policy scan inputs
+SPEC=tests/e2e/*.spec.js
+COMMIT=$(git rev-parse HEAD)
+node scripts/ux-lock-run.mjs spec --spec "$SPEC" --commit "$COMMIT" --run-context ux-lock --source-kind audit-code-fix --strict-selectors
 ```
+
+`--source-kind` is one of `audit-code-fix | persona-test-p0 | persona-test-p1 | manual`.
+`--strict-selectors` on a newly generated spec → lint FAILS (exit 6), not warns.
+
+Other optional flags:
+- `--specs GLOB` — run + group a suite by spec_path (one run row per file). Globs are Playwright-expanded — NOT combinable with `--strict-selectors`, which needs explicit paths to scan before anything executes; warn mode reconciles post-run.
+- `--url BASE_URL` — exported to the spec as `E2E_BASE_URL`.
+- `--no-register` — record nothing (spec is unknown / throwaway).
+- `--test-root DIR` / `--alias PREFIX=DIR` (repeatable) — selector-policy scan inputs.
 
 The runner derives the `description` from the spec filename and supplies the
 required `source_kind`. Cloud off → it runs + prints and skips recording (no

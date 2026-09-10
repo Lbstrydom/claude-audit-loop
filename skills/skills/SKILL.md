@@ -69,8 +69,8 @@ near-matches. Skill names are the directory names under `skills/`
 # List all skills
 node scripts/skills-help.mjs
 
-# Detail for one skill
-node scripts/skills-help.mjs <skill-name>
+# Detail for one skill (SKILL_NAME = a directory name under skills/, e.g. audit-code)
+node scripts/skills-help.mjs SKILL_NAME
 
 # Filter by search term
 node scripts/skills-help.mjs --search "<term>"

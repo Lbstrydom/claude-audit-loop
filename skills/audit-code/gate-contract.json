@@ -397,6 +397,14 @@
     {
       "line": "mode). Never blocks the audit.",
       "reason": "States that Step 6.5's advisory dashboard-telemetry rebuild is non-blocking — a property of that step's own instruction, already covered in spirit by the ship gate-contract's equivalent \"never blocks\" exemptions; not a claim this skill's own execution exits on anything."
+    },
+    {
+      "line": "node scripts/cross-skill.mjs get-active-refresh-id --repo-uuid \"$(node -p \"require('./.audit/repo-identity.json').repoUuid\")\" > .audit/active-refresh.json",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
+    },
+    {
+      "line": "RUN_ID=$(node -e \"const fs=require('fs'); try { process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))._cloudRunId||''); } catch { process.stdout.write(''); }\" \".audit/$SID-r$ROUND-result.json\")",
+      "reason": "Command-example text touching a technical identifier (\"require(\", \"-gate\"/\"GATE=\" as a flag/value name) that the enforcement-verb scanner matches as a whole word; not an enforcement claim about this skill's own behaviour. Introduced by the 2026-09-10 PowerShell-portability pass (cross-host-parity follow-up)."
     }
   ]
 }
